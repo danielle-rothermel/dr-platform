@@ -31,7 +31,9 @@ def _alembic_config(
 ) -> Config:
     config = Config()
     config.set_main_option("script_location", str(_ALEMBIC_DIR))
-    config.set_main_option("sqlalchemy.url", database_url)
+    # configparser interpolation: raw "%" (e.g. percent-encoded query
+    # params like search_path options) must be escaped.
+    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
     config.attributes["naming"] = naming
     return config
 

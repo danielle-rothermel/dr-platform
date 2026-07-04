@@ -139,3 +139,13 @@ def test_stamp_then_upgrade_runs_only_post_baseline(
             )
         ).scalar_one()
     assert tags == {}
+
+
+def test_upgrade_accepts_percent_encoded_urls(pg_engine: Engine) -> None:
+    # Percent-encoded query params (search_path options) must survive
+    # alembic's configparser interpolation.
+    url = str(pg_engine.url) + "?options=-csearch_path%3Dpublic"
+    upgrade_platform_schema(url)
+    assert "dr_platform_projections" in set(
+        inspect(pg_engine).get_table_names()
+    )
