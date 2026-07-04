@@ -27,6 +27,9 @@ dependencies = [
     "sqlalchemy>=2.0.0",
 ]
 
+[project.optional-dependencies]
+frames = ["pandas>=2.2.0"]
+
 [project.urls]
 Repository = "https://github.com/danielle-rothermel/dr-platform"
 Issues = "https://github.com/danielle-rothermel/dr-platform/issues"
@@ -37,6 +40,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "pandas>=2.2.0",
     "pre-commit>=4.6.0",
     "psycopg[binary]>=3.3.4",
     "pytest>=9.1.1",

@@ -1,5 +1,12 @@
 """Conventions on top of DBOS for running large sweeps of durable work."""
 
+from dr_platform.artifacts import (
+    ArtifactIntegrityError,
+    ArtifactNotFoundError,
+    ArtifactRef,
+    ArtifactStore,
+    LocalDirArtifactStore,
+)
 from dr_platform.backoff import (
     RETRYABLE_BACKOFF_FAILURES,
     ThrottleBackoffState,
@@ -50,6 +57,11 @@ from dr_platform.dbos_config import (
     resolve_database_url,
     workflow_start_raced,
 )
+from dr_platform.enqueue import (
+    EnqueueItem,
+    EnqueueOutcome,
+    dedup_enqueue,
+)
 from dr_platform.fairness import (
     Orderable,
     fair_ordered,
@@ -72,10 +84,27 @@ from dr_platform.jsonl import (
     load_jsonl_items,
 )
 from dr_platform.naming import PlatformNaming
+from dr_platform.observability import (
+    AwaitOperationTimeoutError,
+    OperationSnapshot,
+    WorkflowStatusBreakdown,
+    await_operation,
+    dbos_workflow_status,
+    load_operation_snapshot,
+    operation_workflow_ids,
+    workflow_status_breakdown,
+)
 from dr_platform.progress import (
     DEFAULT_PROGRESS_INTERVAL_SECONDS,
     OperationProgress,
     operation_progress,
+)
+from dr_platform.projections import (
+    ProjectionBuildResult,
+    ProjectionSpec,
+    load_projection_frame,
+    load_projection_rows,
+    rebuild_projection,
 )
 from dr_platform.records import (
     ENQUEUE_CLAIM_ID_METADATA_KEY,
@@ -84,6 +113,14 @@ from dr_platform.records import (
     BatchItemRecord,
     BatchOperationRecord,
     EnqueueFailure,
+)
+from dr_platform.submission import (
+    BatchSubmitResult,
+    EnqueueCandidate,
+    SubmittedItem,
+    enqueue_failure_from_exception,
+    submit_batch,
+    submit_batch_jsonl,
 )
 
 __all__ = [
@@ -98,6 +135,11 @@ __all__ = [
     "TERMINAL_OPERATION_STATUSES",
     "WORKFLOW_ID_METADATA_KEY",
     "WORKFLOW_START_RACE_ERRORS",
+    "ArtifactIntegrityError",
+    "ArtifactNotFoundError",
+    "ArtifactRef",
+    "ArtifactStore",
+    "AwaitOperationTimeoutError",
     "BatchItemEnqueueStatus",
     "BatchItemInsertStatus",
     "BatchItemRecord",
@@ -105,19 +147,30 @@ __all__ = [
     "BatchOperationCounts",
     "BatchOperationRecord",
     "BatchOperationStatus",
+    "BatchSubmitResult",
     "DbosWorkflowStatus",
+    "EnqueueCandidate",
     "EnqueueFailure",
+    "EnqueueItem",
+    "EnqueueOutcome",
     "InsertOutcome",
     "ItemIdentity",
     "JsonlFieldNames",
     "JsonlItemRef",
+    "LocalDirArtifactStore",
     "OperationProgress",
+    "OperationSnapshot",
     "Orderable",
     "PlatformDbosConfig",
     "PlatformNaming",
     "PlatformSchema",
+    "ProjectionBuildResult",
+    "ProjectionSpec",
     "SubmittableItem",
+    "SubmittedItem",
     "ThrottleBackoffState",
+    "WorkflowStatusBreakdown",
+    "await_operation",
     "batch_item_id",
     "batch_operation_counts",
     "build_dbos_config",
@@ -125,8 +178,11 @@ __all__ = [
     "claim_token",
     "clear_throttle_backoff",
     "clear_throttle_hold",
+    "dbos_workflow_status",
+    "dedup_enqueue",
     "delay_until_unblocked_seconds",
     "destroy_dbos_runtime",
+    "enqueue_failure_from_exception",
     "fair_ordered",
     "fair_ordered_item_windows",
     "fair_ordered_windows",
@@ -135,11 +191,16 @@ __all__ = [
     "is_terminal_enqueue_status",
     "list_throttle_states",
     "load_jsonl_items",
+    "load_operation_snapshot",
+    "load_projection_frame",
+    "load_projection_rows",
     "load_throttle_backoff_state",
     "next_backoff_delay_seconds",
     "normalize_postgresql_driver_url",
     "operation_progress",
     "operation_status_from_counts",
+    "operation_workflow_ids",
+    "rebuild_projection",
     "record_throttle_failure",
     "resolve_database_url",
     "set_throttle_hold",
@@ -147,6 +208,8 @@ __all__ = [
     "should_backoff_failure",
     "stable_item_id",
     "stamp_platform_schema",
+    "submit_batch",
+    "submit_batch_jsonl",
     "terminal_enqueue_total",
     "terminal_enqueue_total_from_counts",
     "throttle_delay_seconds",
@@ -154,4 +217,5 @@ __all__ = [
     "validate_window_size",
     "windows",
     "workflow_start_raced",
+    "workflow_status_breakdown",
 ]
