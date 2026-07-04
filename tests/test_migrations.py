@@ -149,3 +149,25 @@ def test_upgrade_accepts_percent_encoded_urls(pg_engine: Engine) -> None:
     assert "dr_platform_projections" in set(
         inspect(pg_engine).get_table_names()
     )
+
+
+def test_search_path_schema_does_not_inherit_public_lineage(
+    pg_engine: Engine,
+) -> None:
+    # An adopter with the lineage applied in public must still get real
+    # DDL when migrating an isolated scratch schema on the same DB.
+    upgrade_platform_schema(str(pg_engine.url))  # public at head
+    with pg_engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA IF EXISTS scratch CASCADE"))
+        connection.execute(text("CREATE SCHEMA scratch"))
+    scratch_url = (
+        str(pg_engine.url) + "?options=-csearch_path%3Dscratch,public"
+    )
+    upgrade_platform_schema(scratch_url)
+
+    scratch_tables = set(inspect(pg_engine).get_table_names("scratch"))
+    assert {
+        "dr_platform_throttle_backoff",
+        "dr_platform_projections",
+        "dr_platform_platform_alembic_version",
+    } <= scratch_tables
