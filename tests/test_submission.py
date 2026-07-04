@@ -310,6 +310,7 @@ def test_empty_submission_records_error_operation(
     )
     assert result.requested_count == 0
     assert enqueue.calls == []
+    # seed runs even for empty submissions (group rows may be FK targets)
     with pg_engine.connect() as connection:
         operation = load_batch_operation(
             connection,

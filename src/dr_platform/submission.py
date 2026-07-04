@@ -300,6 +300,11 @@ def prepare_submission_records(  # noqa: PLR0913 -- one registration transaction
     item_index_offset: int = 0,
 ) -> None:
     created_at = datetime.now(UTC)
+    # Seed hook runs FIRST inside the transaction: app-side rows (which
+    # may be FK targets of the physical batch tables, e.g. whetstone's
+    # experiments table) must exist before the operation row lands. It
+    # runs even for empty windows so group-level rows are registered.
+    inserted_ids = seed(connection, ordered_items) if seed else None
     existing_operation = load_batch_operation(
         connection,
         operation_key=operation_key,
@@ -336,7 +341,6 @@ def prepare_submission_records(  # noqa: PLR0913 -- one registration transaction
 
     if not ordered_items:
         return
-    inserted_ids = seed(connection, ordered_items) if seed else None
     for item_index, item in enumerate(ordered_items, start=item_index_offset):
         insert_status = (
             BatchItemInsertStatus.INSERTED
