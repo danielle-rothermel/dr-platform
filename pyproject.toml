@@ -18,10 +18,13 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "alembic>=1.16.2",
     "dbos>=2.25.0",
+    "dr-providers>=0.1.1",
     "dr-serialize>=0.1.0",
     "pydantic>=2.13.4",
     "rich>=13.0.0",
+    "sqlalchemy>=2.0.0",
 ]
 
 [project.urls]
@@ -35,13 +38,15 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pre-commit>=4.6.0",
+    "psycopg[binary]>=3.3.4",
     "pytest>=9.1.1",
     "ruff>=0.15.18",
     "ty>=0.0.51",
 ]
 
-# Migration-time wiring: must become a git/PyPI pin before merge.
+# dr-* libs are not on PyPI; pinned to git revs.
 [tool.uv.sources]
+dr-providers = { git = "https://github.com/danielle-rothermel/dr-providers", rev = "8b098b02ca87111e69b8f727503184a2f0fbdea9" }
 dr-serialize = { git = "https://github.com/danielle-rothermel/dr-serialize", rev = "19abbc707820efde16b599801a5eba1dd6953cbf" }
 
 [tool.hatch.build.targets.sdist]
@@ -99,7 +104,7 @@ select = [
 ignore = ["PLR1711", "S101", "TRY003"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["PLR2004", "PLC0415", "ARG001", "ARG005", "S603", "TC003"]
+"tests/**/*.py" = ["PLR2004", "PLC0415", "ARG001", "ARG005", "S603", "TC002", "TC003"]
 
 [tool.ty.src]
 include = ["src", "tests"]
