@@ -13,10 +13,6 @@ jobs:
       - uses: astral-sh/setup-uv@v8.3.1
         with:
           python-version: "3.12"
-      # NOTE: fails on today's main. [tool.uv.sources] pins dr-serialize to a
-      # local path (../dr-serialize) that does not exist in a CI checkout, and
-      # `--no-sources` cannot resolve either (dr-serialize is not on PyPI).
-      # Goes green once the migration PR converts the path dep to a git pin.
       - run: uv sync
       - run: uv run ruff check .
       # tests/ is an empty skeleton on main; tolerate pytest exit 5
