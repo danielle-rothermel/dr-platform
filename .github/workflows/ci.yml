@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.1
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run ruff check .
+      # tests/ is an empty skeleton on main; tolerate pytest exit 5
+      # (no tests collected) so the check is not permanently red.
+      - run: uv run pytest || [ $? = 5 ]
