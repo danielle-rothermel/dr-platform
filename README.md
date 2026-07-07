@@ -1,44 +1,38 @@
 # dr-platform
 
 Conventions on top of [DBOS](https://www.dbos.dev/) for running large
-sweeps of durable work: stable work-item identity, idempotent resumable
-batch submission, throttle/backoff with operator holds, fair ordering,
-progress and attempt observability, artifact offload, and rebuildable
-analysis projections.
+sweeps of durable work — the batch-submission/platform kernel of the
+`dr-*` library family, extracted from whetstone: stable work-item
+identity, idempotent resumable batch submission, throttle/backoff with
+operator holds, fair ordering, and progress/attempt observability.
 
-Deliberately **not** an orchestrator: no step definitions, no handler
-registries, no retry scheduling — DBOS owns workflow execution and
+Deliberately **not** an orchestrator: DBOS owns workflow execution and
 recovery; workflows and steps stay app-side. The library accepts
 callables and typed items, never step definitions, and knows nothing
 about any domain (no LM calls, prompts, scoring, or model configs).
 
-Design doc: `docs/composable/platform.md` in the whetstone-ai repo.
-
 ## Status
 
-v0.1 — the pure kernel (extraction stage 6a):
+`main` is a skeleton: an empty typed package (`src/dr_platform/`) plus
+project scaffolding (uv, ruff, ty, pytest, pre-commit). There is no
+library code and there are no tests yet.
 
-- `dr_platform.items` — `SubmittableItem` protocol, `ItemIdentity`
-  digest configuration, `stable_item_id` axis hashing.
-- `dr_platform.fairness` — order-key sorting and windowing.
-- `dr_platform.jsonl` — byte-offset JSONL indexing/windowed loading
-  with parameterized field names.
-- `dr_platform.batch_status` — the batch operation/item status state
-  machine (pure counts, no I/O).
-- `dr_platform.dbos_config` — DBOS config/bootstrap helpers and the
-  single compatibility shim for DBOS's private race-error classes.
-- `dr_platform.progress` — heartbeat progress logging for long
-  operations.
-
-Coming (6b): library-owned schema + Alembic lineage, claim/lease batch
-submission, dedup enqueue, throttle/backoff with tags and holds,
-`await_operation`, projections, artifact store.
+The actual library lands with
+[PR #1](https://github.com/danielle-rothermel/dr-platform/pull/1)
+(the whetstone platform extraction). Until it merges, don't build
+against this repo.
 
 ## Development
 
+`pyproject.toml` pins `dr-serialize` as an editable **path dependency**
+(`../dr-serialize` — temporary migration wiring, to become a real pin
+before PR #1 merges). A fresh clone's `uv sync` fails unless
+`dr-serialize` is checked out as a sibling directory. With that in
+place:
+
 ```bash
 uv sync
-uv run pytest
 uv run ruff check .
 uv run ty check
+uv run pytest   # collects nothing on main — tests arrive with PR #1
 ```
