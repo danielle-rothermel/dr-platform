@@ -1,0 +1,4 @@
+interface:
+  display_name: "Danielle Code Quality"
+  short_description: "Apply Danielle's code quality preferences while coding or reviewing."
+  default_prompt: "Use $danielle-code-quality whenever writing, editing, refactoring, or reviewing code."
