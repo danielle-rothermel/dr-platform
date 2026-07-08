@@ -11,6 +11,16 @@ recovery; workflows and steps stay app-side. The library accepts
 callables and typed items, never step definitions, and knows nothing
 about any domain (no LM calls, prompts, scoring, or model configs).
 
+## Ecosystem
+
+`dr-platform` is the DBOS-backed durable-workflow platform layer for
+batch submission, idempotent resumable work, backoff/holds, fair ordering,
+and progress/attempt observability. Neighbors: `dr-serialize`,
+`dr-providers`, `dr-graph`, `dr-code`, `whetstone-ai`, and `unitbench`.
+It depends on `dr-serialize` and `dr-providers`; the README/source
+identify whetstone as the current extraction/adopter (`whetstone-ai`),
+with no declared `dr-graph`, `dr-code`, or `unitbench` consumer here.
+
 ## Status
 
 `main` is a skeleton: an empty typed package (`src/dr_platform/`) plus
