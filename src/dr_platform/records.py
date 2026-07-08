@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from dr_providers.kernel.failures import (
+from dr_providers import (
     FailureClass,  # noqa: TC002 -- pydantic runtime type
 )
 from dr_serialize import (

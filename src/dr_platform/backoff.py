@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from dr_providers.kernel.failures import FailureClass
+from dr_providers import FailureClass
 from dr_serialize import sha256_json_digest
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from sqlalchemy import update

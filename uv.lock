@@ -141,7 +141,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.16.2" },
     { name = "dbos", specifier = ">=2.25.0" },
-    { name = "dr-providers", git = "https://github.com/danielle-rothermel/dr-providers?rev=8b098b02ca87111e69b8f727503184a2f0fbdea9" },
+    { name = "dr-providers", git = "https://github.com/danielle-rothermel/dr-providers?rev=f6ffcbdf9b7cef1d3f58dca5506a49ebc84a5f90" },
     { name = "dr-serialize", git = "https://github.com/danielle-rothermel/dr-serialize?rev=cfdf4496f1a5510d1788dba70f554300b39a3bca" },
     { name = "pandas", marker = "extra == 'frames'", specifier = ">=2.2.0" },
     { name = "pydantic", specifier = ">=2.13.4" },
@@ -162,8 +162,8 @@ dev = [
 
 [[package]]
 name = "dr-providers"
-version = "0.1.1"
-source = { git = "https://github.com/danielle-rothermel/dr-providers?rev=8b098b02ca87111e69b8f727503184a2f0fbdea9#8b098b02ca87111e69b8f727503184a2f0fbdea9" }
+version = "0.2.0"
+source = { git = "https://github.com/danielle-rothermel/dr-providers?rev=f6ffcbdf9b7cef1d3f58dca5506a49ebc84a5f90#f6ffcbdf9b7cef1d3f58dca5506a49ebc84a5f90" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
