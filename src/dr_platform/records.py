@@ -17,8 +17,8 @@ from dr_providers.kernel.failures import (
 from dr_serialize import (
     POSTGRES_JSONB_PAYLOAD_MAX_BYTES,
     SerializationError,
+    Serializer,
     postgres_jsonb_limits,
-    to_jsonable,
 )
 from pydantic import (
     BaseModel,
@@ -46,7 +46,7 @@ WORKFLOW_ID_METADATA_KEY = "workflow_id"
 
 def _validate_payload_size(value: Any, *, max_bytes: int, label: str) -> None:
     try:
-        to_jsonable(value, limits=postgres_jsonb_limits(max_bytes))
+        Serializer(limits=postgres_jsonb_limits(max_bytes)).to_jsonable(value)
     except SerializationError as exc:
         raise ValueError(f"{label}: {exc}") from exc
 
