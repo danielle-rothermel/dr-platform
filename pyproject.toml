@@ -51,7 +51,7 @@ dev = [
 # dr-* libs are not on PyPI; pinned to git revs.
 [tool.uv.sources]
 dr-providers = { git = "https://github.com/danielle-rothermel/dr-providers", rev = "8b098b02ca87111e69b8f727503184a2f0fbdea9" }
-dr-serialize = { git = "https://github.com/danielle-rothermel/dr-serialize", rev = "a9c21b30addc6952511f044821285570ec9821d2" }
+dr-serialize = { git = "https://github.com/danielle-rothermel/dr-serialize", rev = "ab17928c3b6f570996416454f0cc5d619add780d" }
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src"]
