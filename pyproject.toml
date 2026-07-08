@@ -51,13 +51,17 @@ dev = [
 # dr-* libs are not on PyPI; pinned to git revs.
 [tool.uv.sources]
 dr-providers = { git = "https://github.com/danielle-rothermel/dr-providers", rev = "8b098b02ca87111e69b8f727503184a2f0fbdea9" }
-dr-serialize = { git = "https://github.com/danielle-rothermel/dr-serialize", rev = "19abbc707820efde16b599801a5eba1dd6953cbf" }
+dr-serialize = { git = "https://github.com/danielle-rothermel/dr-serialize", rev = "cfdf4496f1a5510d1788dba70f554300b39a3bca" }
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
 
 [tool.ruff]
 include = ["src/**/*.py", "tests/**/*.py"]
