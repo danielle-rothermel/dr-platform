@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from dr_providers.kernel.failures import FailureClass
+from dr_providers import FailureClass
 from sqlalchemy import Engine
 
 from dr_platform import (

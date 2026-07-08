@@ -20,7 +20,7 @@ classifiers = [
 dependencies = [
     "alembic>=1.16.2",
     "dbos>=2.25.0",
-    "dr-providers>=0.1.1",
+    "dr-providers>=0.2.0",
     "dr-serialize>=0.1.0",
     "pydantic>=2.13.4",
     "rich>=13.0.0",
@@ -48,10 +48,11 @@ dev = [
     "ty>=0.0.51",
 ]
 
-# dr-* libs are not on PyPI; pinned to git revs.
+# dr-* libs are not on PyPI; sources track main and uv.lock pins the exact
+# commit. Refresh with `uv lock --upgrade-package <name>`.
 [tool.uv.sources]
-dr-providers = { git = "https://github.com/danielle-rothermel/dr-providers", rev = "8b098b02ca87111e69b8f727503184a2f0fbdea9" }
-dr-serialize = { git = "https://github.com/danielle-rothermel/dr-serialize", rev = "cfdf4496f1a5510d1788dba70f554300b39a3bca" }
+dr-providers = { git = "https://github.com/danielle-rothermel/dr-providers", branch = "main" }
+dr-serialize = { git = "https://github.com/danielle-rothermel/dr-serialize", branch = "main" }
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src"]
