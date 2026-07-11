@@ -1,0 +1,301 @@
+---
+title: "Platform and Whetstone implementation orchestration"
+brief: "Execute the frozen v6 Platform/Whetstone design as coordinated per-repository stacked PRs, with explicit state-machine matrices, final hard-cut deletion, cross-repo revision pins, automated review gates, Slack transition updates, and owner review only after the full verified constellation is complete."
+kind: "plan"
+localOnly: true
+---
+
+# Platform and Whetstone implementation orchestration
+
+Execute the frozen v6 Platform/Whetstone design as coordinated per-repository stacked PRs, with explicit state-machine matrices, final hard-cut deletion, cross-repo revision pins, automated review gates, Slack transition updates, and owner review only after the full verified constellation is complete.
+
+## Review Surface
+
+<Callout id="execution-decision" tone="decision">
+
+This is an execution control artifact, not a new design gate. Implement the frozen v6 packet and ADRs 0022–0023 as final-intent code: fresh schemas, one runtime path, no dual reads or writes, no fallback adapters, no compatibility views, and deletion of replaced paths in the same stack that proves their replacements. Automated gates and agent review continue without owner pauses. Danielle reviews only the complete, cross-repo verified constellation.
+
+</Callout>
+
+### Outcome
+
+Land coordinated Graphite stacks in `dr-platform`, `whetstone-ai`, and `unitbench` that replace the legacy enqueue, operational-analysis, and publisher paths with:
+
+- a DBOS 2.26-backed Platform kernel with durable operations, attempts, claims, reconciliation, cancellation, inspection, and one public export verb;
+- Whetstone Generation and Scoring Operations, populated-only selection, strict experiment acceptance, and atomic Analysis and Detail publication bundles;
+- Unitbench two-plane reads through pinned Analysis and Detail adapters; and
+- a reproducible constellation manifest proving the exact revisions, schemas, bundles, deployment, and end-to-end gates reviewed together.
+
+The reviewed v6 packet remains frozen. Implementation matrices and evidence live outside it.
+
+<Diagram id="stack-topology" caption="Per-repository stacks advance independently; only reviewed milestone SHAs cross repository boundaries.">
+
+```html
+<div class="diagram-grid">
+  <div class="diagram-lane"><strong>dr-platform</strong><span>P0 preflight</span><span>P1–P6 kernel</span><span>P7 export</span><em>DP-EXPORT SHA</em></div>
+  <div class="diagram-arrow">→</div>
+  <div class="diagram-lane"><strong>whetstone-ai</strong><span>W0 pin</span><span>W1–W6 lifecycle</span><span>W7–W8 publication cut</span><em>WHETSTONE-PUB SHA</em></div>
+  <div class="diagram-arrow">→</div>
+  <div class="diagram-lane"><strong>unitbench</strong><span>U0 contract</span><span>U1–U4 adapters/pages</span><span>U5–U6 deploy/delete</span><em>UNITBENCH-V6 SHA</em></div>
+  <div class="diagram-final"><strong>Constellation gate</strong><span>fresh stores · pinned bundles · zero-spend E2E · Vercel preview · final owner review</span></div>
+</div>
+```
+
+```css
+.diagram-grid { display:grid; grid-template-columns:1fr auto 1fr auto 1fr; gap:12px; align-items:center; }
+.diagram-lane { display:flex; flex-direction:column; gap:8px; padding:14px; border:1px solid var(--wf-border); border-radius:10px; }
+.diagram-lane span { padding:6px 8px; background:var(--wf-surface-muted); border-radius:6px; }
+.diagram-lane em { color:var(--wf-accent); font-style:normal; font-weight:700; }
+.diagram-arrow { font-size:24px; color:var(--wf-accent); }
+.diagram-final { grid-column:1 / -1; display:flex; justify-content:space-between; gap:16px; padding:14px; border:2px solid var(--wf-accent); border-radius:10px; }
+```
+
+</Diagram>
+
+## Operating rules
+
+1. Verify each repository's canonical `main` against its remote, then root a `v6-bootstrap` PR directly on that commit. Cherry-pick only the accepted planning/ADR commits into the bootstrap PR; the first implementation PR stacks on it. Existing planning branches are never used as hidden or permanent dependency bases.
+2. Every PR begins with its state-machine/scenario matrix and focused failing tests. The implementation makes that matrix pass in the same PR.
+3. Keep PRs draft while the stack is moving. Automated checks and fresh-agent review gate each PR; owner approval does not.
+4. Open and update PRs with Graphite. A child PR never pins an unreviewed intermediate commit from a sibling repository.
+5. Delete a legacy path only in the PR that proves the replacement end to end. Do not retain a shim “temporarily.”
+6. Stop only on baseline drift, unexpected mutations, a failed feasibility preflight, or a genuine owner decision not settled by v6/ADRs. Otherwise repair and continue.
+7. Post `#progress` at each transition: planning → implementation, each PR published, stack advance, cross-repo pin, integration gate, deployment gate, and completion. If input is required, post to both `#progress` and `#high-pri`.
+
+## Evidence layout
+
+Implementation evidence is mutable and therefore stays outside the frozen packet.
+
+<FileTree
+  id="evidence-tree"
+  title="Checked-in control and evidence artifacts"
+  entries={[
+    { path: "plans/platform-whetstone-implementation/plan.mdx", change: "added", note: "Cross-repo execution control plan." },
+    { path: "docs/implementation/platform-whetstone-v6/matrices/", change: "added", note: "Platform source-barrier, destination, bundle, compatibility, and pin matrices." },
+    { path: "docs/implementation/platform-whetstone-v6/evidence/", change: "added", note: "Preflight, crash-injection, parity, and constellation evidence." },
+    { path: "docs/implementation/platform-whetstone-v6/risk-register.md", change: "added", note: "Open A1–A3, L1–L2, and V1 closures linked to matrices, code, tests, observability, and review." },
+    { path: "whetstone-ai/docs/implementation/platform-v6/matrices/", change: "added", note: "Generation, scoring, selection, acceptance, and publication matrices." },
+    { path: "unitbench/docs/implementation/platform-v6/matrices/", change: "added", note: "Adapter, compute-policy, page, and deployment matrices." },
+    { path: "docs/implementation/platform-whetstone-v6/constellation.json", change: "added", note: "Final exact-revision and artifact manifest." },
+  ]}
+/>
+
+## Phase 0 — deterministic bootstrap and feasibility
+
+No production implementation slice begins until Phase 0 is green.
+
+1. Fetch and record canonical `main` SHAs for all three repositories. Stop on drift or local mutation.
+2. Create `platform/v6-bootstrap`, `whetstone/v6-bootstrap`, and `unitbench/v6-bootstrap` directly from those SHAs. Cherry-pick the accepted frozen packet, ADR, vocabulary, and execution-plan commits that belong in each repository; verify the resulting diffs contain documentation/control artifacts only.
+3. Publish those bootstrap PRs as the stack roots. Their descendants may remain draft and unmerged until final owner review; “canonical base” means the root parent is canonical `main`, not an old planning branch.
+4. Run one blocking cross-repo feasibility PR/commit series before P1:
+   - installed DBOS 2.26 signatures, system schema, queue/priority, serialization, cancellation, and allowlisted telemetry reads;
+   - Postgres advisory locks and fresh-schema ctype behavior;
+   - local DuckDB OS locking and SQL parity;
+   - tiny live MotherDuck Postgres Lease, conditional renewal, fencing, atomic pointer, and query compatibility;
+   - tiny live Neon pooled transaction/fencing and Detail query proof;
+   - Unitbench Node runtime, server-only `DATABASE_URL`/`ANALYSIS_DATABASE_URL`, independent missing-secret behavior, no native DuckDB in the Vercel bundle, and same-fixture local-versus-deployed query parity.
+5. Record provider/project identifiers without secrets. Any infeasible contract blocks the entire production stack before P1.
+
+## Open v6 risk register
+
+The checked-in risk register starts open and closes only with linked matrix rows, implementation decisions, focused tests, runtime observability/escalation, and a fresh-agent review checkpoint.
+
+| Risk | Owning PRs | Required closure evidence |
+| --- | --- | --- |
+| **A1 — authorized PARTIAL acceptance** | W4–W5 | A truthful selected-partial-policy disposition carrying observed `PARTIAL`, immutable policy authorization/digest, exact selected run and Platform Attempt proof, candidate provenance, strict-versus-override fixtures, promotion, and current-read replay. The feature is representable in the final system but remains disabled for preliminary runs unless explicitly operator-confirmed. |
+| **A2 — delayed enqueue after `NO_WORKFLOW_FOUND`** | P3–P5 | Append-compatible late-enqueue successor/escalation; periodic re-observation; claimant-success-after-resolution path; workflow exclusivity re-check; a blocked `init_workflow` fixture that resolves absence, commits later, kills the claimant, and proves `CANCELLED`, `SKIPPED_SHARED`, or observed terminal truth. Cancellation/retry remains prohibited while call state is uncertain. |
+| **A3 — independently captured source cuts** | P0, P7, W7 | ADR 0023 coordinate/timestamp/bound contract, DBOS transition between captures, measured skew, inside/outside/unknown outcomes, and fail-closed publication without fabricated same-cut equality. |
+| **L1 — exact populated-only predicate** | P0, W3 | Pin provisioned Postgres ctype; define one ctype-independent persisted predicate; align/remove Python `str.strip()`; test ASCII plus U+00A0, U+2007, and U+3000 across selection, identity, retry, outcome, and deletion parity. |
+| **L2 — plural membership vs accepted run** | W3–W5 | Manifest freezes the complete populated-only ordered candidate set, including plural eligible runs per Prediction; acceptance separately derives and pins the accepted run; differing cuts retain `SUPERSEDED_GENERATION` provenance. |
+| **V1 — pinned-bundle survival/loss** | P7, W7 | Active-pin retention, promotion/cleanup race, checksum/member loss, typed `PINNED_BUNDLE_GONE`, and COPRO abandon-and-restart at a new explicit pin. |
+
+No risk can be marked closed by a generic full-suite pass.
+
+## Stack A — dr-platform
+
+| PR | Depends on | Implements and deletes | Required gate |
+| --- | --- | --- | --- |
+| **P0 `platform/dbos-226-preflight`** | `platform/v6-bootstrap` | Execute the entire Phase 0 feasibility matrix; pin `dbos[otel]==2.26.0`; capture exact signatures/schema/serialization fixtures and cross-source measurement evidence. | All installed-package, Postgres, sink, Unitbench/Vercel, secret, packaging, and local/remote parity proofs. Stop if any are infeasible. |
+| **P1 `platform/final-domain-schema`** | P0 | Final Pydantic vocabulary and fresh kernel schema with `change_seq`; remove `batch_status.py`, `naming.py`, old migrations/stamps, legacy Item vocabulary. | Model/schema matrix, fresh migration, old-name search. |
+| **P2 `platform/manifests-and-targets`** | P1 | Manifest registration, immutable identities, `TargetRegistry`, final submission boundary. | Registration/idempotency/conflict matrix. |
+| **P3 `platform/kernel-enqueue-claims`** | P2 | DBOS enqueue, append-only claim ledger, writer lock invariant; remove `enqueue.py`, `fairness.py`, callback enqueue path. | Concurrent claim/recovery matrix, call-start uncertainty gate, and static direct-mutation check. |
+| **P4 `platform/reconciliation-retries`** | P3 | Attempt lifecycle, reconciliation, retry policy, `request_next_attempt`, periodic re-observation of falsifiable absence. | Crash/replay/late-completion plus blocked-enqueue/delayed-commit matrix. |
+| **P5 `platform/control-inspection-wait`** | P4 | Cancellation, append-compatible compensation escalation, typed inspection, typed `wait_operation`, control verbs. | A2 claimant-death and claimant-success-after-resolution fixtures; exclusive/shared/terminal outcomes. |
+| **P6 `platform/public-kernel-cut`** | P5 | Final public API, telemetry, hygiene and docs; remove legacy `observability.py` and `artifacts.py`. | Public import snapshot, full kernel suite, legacy-symbol search. |
+| **P7 `platform/export-public-cut`** | P6 | One `export(...) -> ExportResult`; source barrier, destination leases/fences, atomic bundles, truthful cross-source coordinates, pins, DuckDB/MotherDuck/Neon/DBOS adapters; remove `projections.py`, frame API, pandas extra, old projection tests. | Export matrices, fault injection, incremental/full equivalence, sink parity, sensitive-field allowlist. |
+
+P6 is the reviewed kernel milestone. P7 is the only `dr-platform` SHA Whetstone may pin. Lock DBOS to exactly 2.26.0 throughout this implementation series.
+
+## Stack B — whetstone-ai
+
+Begin W0 only after P7 is reviewed and has a stable SHA.
+
+| PR | Depends on | Implements and deletes | Required gate |
+| --- | --- | --- | --- |
+| **W0 `whetstone/platform-v6-pin`** | P7 SHA | Exact `dr-platform` revision and lock refresh; contract fixtures. | Import/signature compatibility and fresh-schema smoke. |
+| **W1 `whetstone/final-domain-schema`** | W0 | Final identities and fresh schema for predictions, generation, scoring, relationships, acceptance. | Schema/identity matrix and old-vocabulary search. |
+| **W2 `whetstone/generation-operation`** | W1 | Generation Operation and target execution; delete queue worker, fairness, legacy workflow names/stamps. | Generation/retry/reconciliation matrix. |
+| **W3 `whetstone/populated-selection-scoring`** | W2 | Deterministic ctype-independent populated-only selection and Scoring Operation; Manifest contains the full ordered plural eligible-run set; retain populated PARTIAL outputs for scoring; delete custom batching/orphan replay. | L1 ASCII/non-ASCII boundary parity and L2 membership-versus-derived-run matrix plus scoring lifecycle. |
+| **W4 `whetstone/relationships-acceptance`** | W3 | Explicit relationships, strict reducer, and truthful policy-authorized selected-PARTIAL disposition with exact policy/run/Attempt provenance. | Strict-versus-override schema/reducer matrix; PARTIAL never promotes without immutable explicit authorization. |
+| **W5 `whetstone/experiment-transactions`** | W4 | Atomic acceptance facts, strict and authorized-override promotion/current read, experiment CLI, idempotent replay. | A1 promotion/current-read, source/platform race, transaction/crash/replay matrix. |
+| **W6 `whetstone/inspection-telemetry`** | W5 | Typed domain inspection over final Platform APIs. | Inspection and redaction gates. |
+| **W7 `whetstone/analysis-detail-publication`** | W6 | Registered six-member Analysis Bundle, root-cascaded Detail Bundle, explicit export facade, pinned COPRO and zero-spend E2E. | PK/FK/root closure, deterministic sampling, pin-loss restart, wait → export → pinned-read E2E. |
+| **W8 `whetstone/publication-hard-cut`** | W7 | Final docs and pins; delete `analysis/frames.py`, operational analysis connection paths, unmigrated publisher scripts/tests, and direct COPRO operational reads. | Full Whetstone suite, zero-spend E2E, old-path search. |
+
+The Analysis Bundle contains exactly `experiments`, `predictions`, `generation_runs`, `score_attempts`, `sweep_metrics`, and `failure_metrics`. The Detail Bundle publishes a root manifest plus root-closed prediction payload, generation, node-attempt, score-attempt, harness-failure, and Platform-attempt members from one application snapshot.
+
+## Stack C — unitbench
+
+U0 may begin once W7 freezes projection schemas. Local and remote adapter work can then proceed in parallel within the stack; page conversion waits for both.
+
+| PR | Depends on | Implements and deletes | Required gate |
+| --- | --- | --- | --- |
+| **U0 `unitbench/two-plane-contract`** | W7 schema | Typed Analysis/Detail intents, `RemoteComputePolicy`, `SnapshotReadPolicy`, validators, explicit plane in table configs. | Contract and fail-closed matrix. |
+| **U1 `unitbench/local-analysis-adapter`** | U0 | Server-only local DuckDB adapter using `LOCAL_ANALYSIS_DATABASE_PATH`. | Local fixture suite; prove local compute ignores remote guard. |
+| **U2 `unitbench/remote-analysis-adapter`** | U1 | MotherDuck Postgres adapter using `ANALYSIS_DATABASE_URL`; no production-reachable native DuckDB import. | ALLOW/CONFIRM/LOCAL_ONLY matrix and packaging proof. |
+| **U3 `unitbench/detail-plane`** | U2 | Neon Detail adapter using `DATABASE_URL`; root-bundle prediction detail queries. | Exact-root pin, missing-detail, and root-closure tests. |
+| **U4 `unitbench/page-parity`** | U3 | Route aggregate, heatmap, dashboard, table, and prediction-detail pages through typed planes; set explicit Node runtime. | Same-fixture local/remote parity and every-page matrix. |
+| **U5 `unitbench/vercel-switchover`** | U4 | Preview deployment, server-only secrets, independent missing-store behavior, framework/runtime verification. | Live preview, secret audit, native DuckDB bundle exclusion. |
+| **U6 `unitbench/publisher-hard-delete`** | U5 | Delete `tools/unitbench_publish`, Python publisher tests/deps/locks when unused, `UNITBENCH_*` envs, `published_*` configs and docs. | Full suite, deployed smoke, old-name search. |
+
+Old databases remain untouched for source/config rollback, but new code has no fallback to them.
+
+## Required state-machine matrices
+
+### Platform source barrier
+
+| State | Event | Next | Invariant |
+| --- | --- | --- | --- |
+| open | writer begins | shared-held | Owning mutation function acquires shared transaction lock internally. |
+| shared-held | mutate | shared-held | Trigger assigns monotonic `change_seq`. |
+| shared-held | commit/rollback | open | Lock releases with transaction. |
+| open/shared-held | exporter requests | draining | Exclusive session lock waits for existing writers. |
+| draining | exclusive acquired | snapshot | Repeatable-read begins only after exclusive acquisition. |
+| snapshot | capture/extract | released | Extract `previous < change_seq <= high_water`; record truthful coordinates. |
+| snapshot | failure | released | Roll back source transaction; destination is unchanged. |
+| released | publish destinations | open | No source lock is held during remote work. |
+
+### Destination lease, fence, and promotion
+
+| Current | Event | Outcome |
+| --- | --- | --- |
+| absent/idle | acquire | Create/increment fence token, set owner and expiry. |
+| same live owner | renew | Extend only through owner/token/unexpired CAS. |
+| other live owner | acquire | Typed `LEASE_HELD`; no blind retry. |
+| leased | stage/member failure | Prior pointer/cursors remain; owned stages are recoverable. |
+| leased | renewal CAS lost | Abort before validation/promotion. |
+| validated | newer snapshot | Atomically promote all members, cursors, checksums; clear lease. |
+| validated | equal snapshot/equal checksum | Idempotent success. |
+| validated | older or equal/unequal | Typed stale promotion; current version untouched. |
+| promoting | process death | Destination transaction commits state and data together or rolls both back. |
+
+### Cross-source compatibility
+
+P0 pins this contract before P1 begins:
+
+- application coordinate: the captured application `snapshot_seq` plus `application_captured_at`, a UTC database-server timestamp read inside the barriered repeatable-read transaction;
+- DBOS coordinate: the exact installed DBOS system-database snapshot identity available from its transaction plus `dbos_captured_at`, a UTC DBOS-database-server timestamp read in the telemetry snapshot transaction;
+- comparison: `absolute(dbos_captured_at - application_captured_at)` in integer milliseconds; sequence/transaction coordinates are persisted for diagnosis but never compared across source families;
+- configured bound: `max_capture_skew_ms`, immutable for an export configuration and repeated in every result; and
+- failure: missing coordinates, timestamp reversal beyond clock-health tolerance, schema drift, or measured skew above the bound fails the combined compatibility result closed while preserving each bundle's independent transaction and the prior compatible pointer.
+
+The numeric bound is derived once in P0 by a checked-in deterministic 100-run zero-work fixture on the actual sink topology: take the observed p99 absolute skew, add two measured scheduler quanta, round up to the next 100 ms, and cap at 5,000 ms. Record raw samples, clocks, formula, chosen integer, and environment. Exceeding the cap is a feasibility failure, not permission to widen it silently. A later bound change is a reviewed configuration-contract change.
+
+| Application coordinate | DBOS coordinate | Measured relation | Outcome |
+| --- | --- | --- | --- |
+| present | present | skew ≤ `max_capture_skew_ms` and clocks healthy | Record both coordinates/timestamps, bound, and skew; compatible result may publish. |
+| present | present | skew above bound | Fail closed; preserve prior compatible pointer. |
+| present | missing/unreadable | unknown | Fail closed; never fabricate equality. |
+| present | DBOS schema drift or unhealthy clocks | unknown | Retain previous DBOS projection and report typed failure. |
+| equal-looking labels | independently captured | unproven | Never reuse or compare application `snapshot_seq` as a DBOS coordinate. |
+
+### Pin and cleanup
+
+| Pin state | Promotion | Cleanup | Reader behavior |
+| --- | --- | --- | --- |
+| active/unexpired | allowed | Retain pinned old bundle. | Continue exact bundle. |
+| expired | allowed | May remove if neither current nor otherwise pinned. | Typed `PINNED_BUNDLE_GONE`. |
+| missing, physical data present | allowed | Treat as unprotected. | Fail closed; never drift to latest. |
+| active, member/checksum missing | allowed | Report integrity failure. | Typed pin/integrity loss. |
+| COPRO sees typed loss | n/a | n/a | Abandon iteration results; restart from wait/export/new pin. |
+
+### Whetstone selection and acceptance
+
+| Output | Generation terminal state | Scoring Manifest membership | Strict acceptance | Explicit authorized override |
+| --- | --- | --- | --- | --- |
+| `null` | any | excluded | no | no |
+| empty string | any | excluded | no | no |
+| ASCII or declared non-ASCII whitespace only | any | excluded | no | no |
+| populated | success | included | yes, if every other declared criterion passes | unnecessary |
+| populated | PARTIAL | included | no | may select only with immutable operator-confirmed policy authorization and exact provenance |
+| populated | failed/cancelled | excluded | no | no |
+
+Selection is deterministic over the declared stable ordering and freezes all eligible runs, including plural runs for one Prediction. Acceptance derives its pinned winner separately. Partial populated output remains available for scoring evidence, never satisfies strict acceptance, and promotes only through the explicit persisted override path.
+
+### Unitbench compute and store policy
+
+| Plane/adapter | ALLOW | CONFIRM | LOCAL_ONLY | Missing configuration |
+| --- | --- | --- | --- | --- |
+| Analysis/local DuckDB | run locally | run locally | run locally | typed missing local Analysis store |
+| Analysis/MotherDuck Postgres | run remotely | require explicit confirmation token | reject before query | typed missing remote Analysis store |
+| Detail/Neon | declared Detail reads only | n/a | n/a | typed missing Detail store |
+
+Analysis and Detail failures render independently. Neither plane falls back to the other.
+
+## Gate strategy
+
+### Per-PR gate
+
+- matrix and focused tests committed before implementation;
+- repo format, lint, type check, and focused tests;
+- old-symbol/path search for the slice;
+- fresh-agent findings-first review with every blocker/major and every contract-, schema-, safety-, or dependency-boundary finding resolved before the child PR begins. Only a minor, non-blocking finding whose correction cannot invalidate the current contract or downstream assumptions may carry forward, and it must name its owner PR and test;
+- clean worktree and mutation audit before publishing/updating the PR.
+
+### Stack gate
+
+- full repository test suite on the stack top;
+- fresh schema/store bootstrap from zero;
+- deterministic crash injection at extraction, lease, renewal, each member stage, validation, promotion, and post-commit;
+- deterministic stale-writer scenario A(H1), B(H2), B promotes, A rejected for every destination and `full_rebuild`;
+- incremental/full kernel equivalence;
+- static and dynamic proof that DBOS inputs, outputs, errors, roles, events, streams, and notifications are never selected or deserialized by export;
+- no legacy imports, paths, runtime names, dependency declarations, or docs remain.
+
+### Cross-repo constellation gate
+
+1. Pin Whetstone to the reviewed P7 SHA and exact DBOS patch.
+2. Pin publication manifests to the reviewed W8 SHA and record schema/bundle versions.
+3. Create disposable Kernel, Analysis, and Detail stores from fresh schemas.
+4. Run zero-spend Generation → populated selection → Scoring → acceptance → explicit export.
+5. Hold an active COPRO pin while a newer promotion and cleanup run; prove exact-bundle continuity or typed restart.
+6. Run Unitbench adapter parity across local DuckDB, MotherDuck Postgres, and Neon Detail.
+7. Exercise every current Unitbench page and independent missing-Analysis/missing-Detail states.
+8. Deploy a Vercel preview with Node runtime and server-only secrets; prove native DuckDB is absent.
+9. Run full suites and old-name searches in all three exact revisions.
+10. Write `constellation.json` with repository SHAs, lock hashes, DBOS version, schema IDs, queue/workflow names, bundle IDs/checksums, Vercel deployment ID, and evidence links.
+
+Only after this gate passes is the complete constellation presented for Danielle's review and production switchover.
+
+## Branch, PR, and notification protocol
+
+- Use one Graphite stack per repository. Branch names match the PR identifiers above.
+- Publish each PR as draft immediately after its per-PR gate; stack children remain based on their parent PR.
+- Put the matrix/evidence path, exact commands, deletion list, and downstream dependency impact in every PR description.
+- Post `#progress` when a PR is created, updated after review, or becomes the new stack top; include repo, PR/branch, gate result, and next slice.
+- Do not request owner review on intermediate PRs. The final review entrypoint links the three stack tops, the constellation manifest, verification evidence, and a concise change/deletion map.
+- Production switchover is a final-intent deployment: new environment variables and fresh stores become authoritative, old code paths are already absent, and rollback means redeploying the preserved old revision/config against the preserved old stores.
+
+<Checklist
+  id="completion-checklist"
+  items={[
+    { id: "planning-committed", label: "Execution plan validated and committed" },
+    { id: "platform-stack", label: "P0–P7 published and green" },
+    { id: "whetstone-stack", label: "W0–W8 published and green" },
+    { id: "unitbench-stack", label: "U0–U6 published and green" },
+    { id: "constellation", label: "Fresh-store cross-repo constellation gate passed" },
+    { id: "preview", label: "Vercel preview and environment switchover evidence captured" },
+    { id: "legacy-gone", label: "Legacy paths, names, dependencies, and publisher deleted" },
+    { id: "owner-review", label: "Complete constellation presented for owner review" },
+  ]}
+/>
