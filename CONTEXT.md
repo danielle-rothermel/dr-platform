@@ -32,21 +32,51 @@ spec with stable identity.
 _Avoid_: batch item, prediction, task
 
 **Registration**:
-The atomic establishment of an Operation's Items and any caller-owned domain
-records those Items require before enqueue.
-_Avoid_: fixture seeding, a separate caller-managed pre-submit phase
+The durable establishment of an Operation's complete caller-prepared Manifest,
+Items, and any caller-owned domain records those Items require before enqueue.
+One registrar advances bounded pages under a Lease until completion. After an
+expired Lease, an operator may terminally abandon partial Registration without
+deleting its committed provenance.
+_Avoid_: fixture seeding, treating a transaction page as the input set, leaving
+an unresumable Operation permanently REGISTERING
+
+**Manifest**:
+The immutable, caller-prepared identity of an Operation's complete ordered Item
+set, including its count, canonical digest, and stable page boundaries.
+_Avoid_: an unbounded iterator as registration authority, progressively
+discovering Operation membership after writes begin
+
+**Execution Recipe**:
+The complete versioned identity of what one Item execution will do: its exact
+canonical domain input plus the workflow, argument recipe, application, and
+relevant profile, parser, dataset, and provider-configuration versions. Its
+digest is persisted on the Attempt and participates in content-scoped workflow
+identity; the Operation stores an ordered aggregate of its Item recipe digests.
+_Avoid_: treating a Manifest, callable object, Prediction ID, or workflow name
+alone as proof that two executions are equal
 
 **Attempt**:
-One numbered execution opportunity for an Item. dr-platform owns the ordinal;
-the caller maps it to the corresponding content-scoped domain execution.
-_Avoid_: maintaining a second caller retry counter
+One numbered execution opportunity for an Item. dr-platform alone allocates
+the ordinal and lineage; retry policy, a caller-owned Domain Outcome, or an
+operator decision may establish eligibility for the next Attempt.
+_Avoid_: maintaining a second caller retry counter, treating eligibility as
+Attempt creation authority
 
 **Cancellation**:
 An explicit operator decision that an Item or Operation must not resume
 automatically. Cancellation is terminal until another explicit operator
-action permits a new Attempt. Cancelling one Operation does not cancel an
-execution still referenced by another live Operation.
-_Avoid_: treating cancellation as a retryable failure
+action permits a new Attempt. Platform-managed executions have no DBOS child
+workflows in the pre-experiment topology, and cancelling one Operation does
+not cancel an execution still referenced by another live Operation. DBOS
+`CANCELLED` is a logical platform boundary, not proof that an in-flight
+synchronous provider request stopped; an authorized replacement may overlap
+that older paid call, and the resulting duplicate spend is accepted. If the
+cancelled call returns after DBOS prevents its later Whetstone outcome write,
+its price may remain only in the provider's billing receipts; Whetstone does
+not add a separate provider-call ledger for an outcome it will not use.
+_Avoid_: treating cancellation as a retryable failure, recursive DBOS
+cancellation, claiming physical provider abort from DBOS status, claiming
+Whetstone cost totals are complete for discarded post-cancellation outcomes
 
 **Failure Class**:
 The kernel-owned, domain-neutral category that determines retry and pacing
@@ -56,13 +86,17 @@ _Avoid_: persisting provider-library enums in the kernel
 
 **Claim**:
 The exclusive right of one submitter to perform the next enqueue transition
-for an Attempt.
-_Avoid_: treating a claim as proof that DBOS accepted the workflow
+for an Attempt. Every Claim that reaches the enqueue-call boundary has an
+append-only durable identity; expiry, replacement, invalidation, or Attempt
+terminalization may change the current pointer but cannot erase that history.
+_Avoid_: treating a claim as proof that DBOS accepted the workflow, storing
+Claim history only on the mutable Attempt
 
 **Lease**:
-The bounded lifetime of a Claim. An expired Lease permits another submitter
-to recover the same Attempt without changing its identity.
-_Avoid_: creating a new Attempt merely because a claimant disappeared
+The bounded lifetime of exclusive transition authority, used for an enqueue
+Claim or Operation Registration. Expiry permits recovery of the same durable
+identity and cursor rather than creation of different work.
+_Avoid_: creating a new Attempt or input set merely because an owner disappeared
 
 **Spec**:
 The caller-owned payload of an Item — opaque to the kernel.
@@ -88,8 +122,11 @@ _Avoid_: fairness, using urgency to randomize work
 **Shuffle Rank**:
 The kernel-derived stable rank used to mix Item claim and enqueue order within
 a Service Class when caller input is grouped. It is separate from original
-Item position and DBOS priority.
-_Avoid_: treating deterministic mixing as strict fairness
+Item position and DBOS priority. The rank and kernel enqueue order are
+reproducible; DBOS may nondeterministically reorder workflows that share the
+same priority and millisecond `created_at`, which is accepted.
+_Avoid_: treating deterministic mixing as strict fairness, promising identical
+final DBOS start order
 
 **Throttle Domain**:
 The unit of pacing for one rate-limited external resource, identified by
@@ -118,6 +155,31 @@ _Avoid_: one operational-Postgres watermark shared by every destination
 The brief exclusion point between platform writers and source extraction that
 makes an Export Snapshot complete through its captured change sequence.
 _Avoid_: holding the barrier during destination upload or synchronization
+
+**Platform Cut Version**:
+The monotonic version on one Operation that changes with every
+acceptance-relevant platform lifecycle mutation. A caller may pin a sorted set
+of Operation versions as a platform cut and later verify it atomically without
+the kernel knowing which domain object consumes that cut.
+_Avoid_: domain-specific invalidation callbacks in dr-platform, treating a
+previously read Operation/Attempt set as current without checking its versions
+
+**Publication Fence**:
+The destination-local, per-Publication-Bundle Lease and monotonic token that
+permits one exporter to promote a staged Snapshot and advance its Cursor. It
+rejects a stale exporter even after that exporter's Lease expires.
+_Avoid_: treating the Export Barrier or invocation discipline as destination
+writer serialization
+
+**Publication Bundle**:
+The smallest consumer-visible set of mutually referential tables that one
+export promotes through a single atomic pointer or transaction. Kernel tables
+and their cursor bookkeeping form one bundle, Whetstone Analysis projections
+form one bundle, and a Detail root manifest plus all root-cascaded rows form one
+bundle. Intentionally independent bundles carry their own Snapshot sequence;
+cross-bundle readers must declare that they tolerate skew or check it.
+_Avoid_: independent promotion of tables whose joins promise one Snapshot,
+one universal Snapshot that couples unrelated artifact families
 
 **Analysis Store**:
 The DuckDB database (local file, synced to MotherDuck) that all aggregate

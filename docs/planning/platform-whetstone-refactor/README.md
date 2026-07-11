@@ -3,26 +3,67 @@
 This effort plans the hard-cut refactor across `dr-platform`, `whetstone-ai`,
 and the affected `unitbench` boundary before intensive experiments begin.
 
-**Current version:** v1 (`in-review`)
+**Current version:** v6 (`reviewed`)
 
 **Tracker map:** not created. Until Wayfinder is introduced, this index and the
 active plan plus canonical ADRs are the navigation surface. V0 review
-questions resolved for v1 are recorded in the draft and `docs/adr/`.
+questions resolved for v1 are recorded in that version and `docs/adr/`.
 
 ## Versions
 
 | Version | Status | Review scope | Plan | Unified feedback |
 | --- | --- | --- | --- | --- |
 | v0 | superseded | `dr-platform` plus immediate downstream impacts | [plan](v0/plan.md) | [feedback](v0/reviews/unified-feedback.md) |
-| v1 | in-review | whole-system convergence across `dr-platform`, `whetstone-ai`, `unitbench`, DBOS, and export/runtime boundaries | [plan](v1/plan.md) | pending |
+| v1 | superseded | whole-system convergence across `dr-platform`, `whetstone-ai`, `unitbench`, DBOS, and export/runtime boundaries | [plan](v1/plan.md) | [feedback](v1/reviews/unified-feedback.md) |
+| v2 | superseded | hybrid whole-system convergence plus explicit v1-correction closure | [plan](v2/plan.md) | [feedback](v2/reviews/unified-feedback.md) |
+| v3 | superseded | strict-inclusive v2 closure plus owner-resolved identity, publication, cancellation, acceptance, and scheduling contracts | [plan](v3/plan.md) | [feedback](v3/reviews/unified-feedback.md) |
+| v4 | superseded | strict-inclusive v3 closure plus restart-safe targets, representable/current acceptance, cancellation compensation, safe inspection, and the three owner decisions | [plan](v4/plan.md) | [feedback](v4/reviews/unified-feedback.md) |
+| v5 | superseded | strict-inclusive v4 closure plus singular Generation membership, ordered deterministic score selection, `PARTIAL` scoring parity, pre-scoring evaluations, and independent local corrections | [plan](v5/plan.md) | [feedback](v5/reviews/unified-feedback.md) |
+| v6 | reviewed | bounded v5 closure for durable Claim identity, terminal/run-pinned acceptance, reference-safe compensation, and owner-selected populated-only `PARTIAL` selection | [plan](v6/plan.md) | [feedback](v6/reviews/unified-feedback.md) |
 
-v0 is immutable and superseded. V1 is frozen while its convergence review is
-in progress. Decision-changing findings land only in a successor draft.
+V0 through v5 are immutable and superseded. V6 is reviewed and immutable.
+Its gate remains `REPEAT_CONVERGENCE`; this is not
+`READY_FOR_FOCUSED_AUDITS`. [PD1](../../adr/0022-implementation-first-final-hard-cut.md)
+stops automatic successor generation and selects an implementation-first final
+hard cut against v6. [V6-OD1](../../adr/0023-bounded-cross-source-compatibility.md)
+selects bounded cross-source compatibility. The owner-question queue is
+complete.
 
-V1 review prompts: [Codex 5.6 (`sol`, high)](v1/reviews/codex-prompt.md) and
-[Claude Fable 5 (high)](v1/reviews/fable-prompt.md). Findings and unified
-feedback are pending; no findings placeholders are created before a review
-actually runs.
+V1 review packet: [Codex 5.6 (`sol`, high)](v1/reviews/codex-findings.md),
+[Claude Fable 5 (high)](v1/reviews/fable-findings.md), and the
+[unified feedback](v1/reviews/unified-feedback.md).
+
+V2 review packet: [Codex 5.6 (`sol`, high)](v2/reviews/codex-findings.md),
+[Claude Fable 5 (high)](v2/reviews/fable-findings.md), and the
+[strict-inclusive unified feedback](v2/reviews/unified-feedback.md). The
+reviewers disagreed on the gate and seven closure/architecture questions; the
+synthesis preserves both positions and the synthesis opinion for v3.
+
+V3 review packet: [Codex code/dependency findings](v3/reviews/codex-findings.md),
+[Claude architecture/domain findings](v3/reviews/fable-findings.md), and the
+[strict-inclusive unified feedback](v3/reviews/unified-feedback.md). Codex
+returned `REPEAT_CONVERGENCE`; Claude returned `READY_FOR_FOCUSED_AUDITS`.
+The synthesis preserves their gate and closure disagreements plus its own
+opinion for the v4 planner.
+
+V4 review packet: [Codex code/dependency findings](v4/reviews/codex-findings.md),
+[Claude architecture/domain findings](v4/reviews/fable-findings.md), and the
+[strict-inclusive unified feedback](v4/reviews/unified-feedback.md). Both
+reviewers returned `REPEAT_CONVERGENCE`; synthesis retained all eight source
+findings and selected `REPEAT_CONVERGENCE`.
+
+V5 review packet: [Codex code/dependency findings](v5/reviews/codex-findings.md),
+[Claude architecture/domain findings](v5/reviews/fable-findings.md), and the
+[strict-inclusive unified feedback](v5/reviews/unified-feedback.md). Both
+reviewers returned `REPEAT_CONVERGENCE`; synthesis accepted all five source
+findings and selected `REPEAT_CONVERGENCE`.
+
+V6 review packet: [Codex code/dependency findings](v6/reviews/codex-findings.md),
+[Claude architecture/domain findings](v6/reviews/fable-findings.md), and the
+[strict-inclusive unified feedback](v6/reviews/unified-feedback.md). Both
+reviewers returned `REPEAT_CONVERGENCE`; synthesis accepted six source
+findings, merged one duplicate, selected `REPEAT_CONVERGENCE`, and stopped
+automatic successor generation for process-level review.
 
 ## Process
 
@@ -95,8 +136,35 @@ review repeats until reviewers stop finding architecture-changing issues;
 focused and constellation audits then drive down local correctness and
 integration risk.
 
-V1 entered whole-system convergence review on 2026-07-10. Its plan is frozen;
-the review packet currently contains only the two issued prompts.
+V2 completed hybrid whole-system convergence review on 2026-07-10. Codex
+returned `REPEAT_CONVERGENCE`; Fable returned `READY_FOR_FOCUSED_AUDITS`.
+Strict-inclusive synthesis retained every evidence-backed finding and selected
+`REPEAT_CONVERGENCE`. V3 incorporated that synthesis and the five owner
+decisions, then completed whole-system convergence review on 2026-07-11.
+Codex returned `REPEAT_CONVERGENCE`; Claude returned
+`READY_FOR_FOCUSED_AUDITS`. Strict-inclusive synthesis selected
+`REPEAT_CONVERGENCE`. V4 incorporated that synthesis and the three owner
+decisions, then completed whole-system convergence review on 2026-07-11. Both
+reviewers and strict-inclusive synthesis selected `REPEAT_CONVERGENCE`.
+V5 incorporated the complete v4 synthesis, all four owner decisions, and the
+three independent local corrections, then completed whole-system convergence
+review on 2026-07-11. Both reviewers and strict-inclusive synthesis selected
+`REPEAT_CONVERGENCE`.
+V6 incorporated all five accepted v5 synthesis targets and the populated-only
+owner decision, then completed whole-system convergence review on 2026-07-11.
+The synthesis classified the current method as non-convergent at the agreed
+checkpoint and stopped automatic v7 generation. PD1 then selected an
+implementation-first final hard cut: every slice is final-intent, old paths are
+deleted as their tested replacements land, and rollback uses source control
+plus fresh schemas rather than runtime compatibility paths.
+
+**Exact next action:** prepare implementation under
+[ADR 0022](../../adr/0022-implementation-first-final-hard-cut.md): create the
+implementation state-machine and scenario matrices that link every v6 A1-A3,
+L1-L2, and V1 risk, including the ADR 0023 compatibility-bound contract, to
+implementation decisions, focused tests, observability and escalation
+triggers, and code-review checkpoints; then begin the final-intent replacement
+slices against those artifacts without generating v7.
 
 ## Historical provenance
 
