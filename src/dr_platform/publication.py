@@ -221,6 +221,27 @@ class RemoteBundleManifest(BaseModel):
         return {member.member: member.checksum for member in self.members}
 
 
+class BundleIntegrityAttestation(BaseModel):
+    """Immutable, destination-local proof for one promoted physical bundle."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    destination_id: NonEmptyStr
+    bundle_key: NonEmptyStr
+    bundle_id: NonEmptyStr
+    snapshot_seq: NonNegativeInt
+    manifest_sha256: NonEmptyStr
+    members: tuple[RemoteBundleMember, ...]
+
+    @model_validator(mode="after")
+    def validate_members(self) -> BundleIntegrityAttestation:
+        if not self.members:
+            raise ValueError("integrity attestation members must be non-empty")
+        if len({member.member for member in self.members}) != len(self.members):
+            raise ValueError("integrity attestation members must be unique")
+        return self
+
+
 class _StalePromotionError(RuntimeError):
     pass
 
@@ -287,6 +308,14 @@ class PostgresPublicationFence:
                     "owner TEXT NOT NULL, fencing_token BIGINT NOT NULL, "
                     f"created_at TIMESTAMPTZ NOT NULL DEFAULT {self._now}, "
                     "PRIMARY KEY(destination_id, bundle_key, bundle_id))"
+                )
+            )
+            # This is intentionally a hard cut for readers: legacy bundle rows
+            # have no attestation and cannot be resolved after this upgrade.
+            connection.execute(
+                text(
+                    f"ALTER TABLE {self._bundles_table} ADD COLUMN IF NOT EXISTS "
+                    "integrity_attestation_json TEXT"
                 )
             )
             connection.execute(
@@ -503,14 +532,20 @@ class PostgresPublicationFence:
         source_coordinates: tuple[SourceCoordinate, ...],
         manifest: RemoteBundleManifest,
     ) -> None:
+        attestation = self._attestation(
+            bundle_key=bundle_key,
+            bundle_id=bundle_id,
+            snapshot_seq=snapshot_seq,
+            manifest=manifest,
+        )
         connection.execute(
             text(
                 f"INSERT INTO {self._bundles_table} (destination_id, bundle_key, "
                 "bundle_id, snapshot_seq, source_coordinates_json, manifest_json, "
-                "status, owner, fencing_token) VALUES ("
+                "integrity_attestation_json, status, owner, fencing_token) VALUES ("
                 "CAST(:destination AS TEXT), CAST(:bundle AS TEXT), "
                 "CAST(:bundle_id AS TEXT), CAST(:snapshot AS BIGINT), "
-                "CAST(:coordinates AS TEXT), CAST(:manifest AS TEXT), "
+                "CAST(:coordinates AS TEXT), CAST(:manifest AS TEXT), CAST(:attestation AS TEXT), "
                 "'STAGED', CAST(:run AS TEXT), CAST(:token AS BIGINT)) "
                 "ON CONFLICT DO NOTHING"
             ),
@@ -526,10 +561,53 @@ class PostgresPublicationFence:
                     ]
                 ),
                 "manifest": manifest.model_dump_json(),
+                "attestation": attestation.model_dump_json(),
                 "run": run_id,
                 "token": fencing_token,
             },
         )
+
+    def _attestation(
+        self,
+        *,
+        bundle_key: str,
+        bundle_id: str,
+        snapshot_seq: int,
+        manifest: RemoteBundleManifest,
+    ) -> BundleIntegrityAttestation:
+        manifest_json = manifest.model_dump_json()
+        return BundleIntegrityAttestation(
+            destination_id=self.destination_id,
+            bundle_key=bundle_key,
+            bundle_id=bundle_id,
+            snapshot_seq=snapshot_seq,
+            manifest_sha256=hashlib.sha256(manifest_json.encode()).hexdigest(),
+            members=manifest.members,
+        )
+
+    def _require_attestation(
+        self,
+        *,
+        encoded: str | None,
+        bundle_key: str,
+        bundle_id: str,
+        snapshot_seq: int,
+        manifest: RemoteBundleManifest,
+    ) -> None:
+        if not encoded:
+            raise ValueError("missing bundle integrity attestation")
+        try:
+            attestation = BundleIntegrityAttestation.model_validate_json(encoded)
+        except Exception as exc:
+            raise ValueError("malformed bundle integrity attestation") from exc
+        expected = self._attestation(
+            bundle_key=bundle_key,
+            bundle_id=bundle_id,
+            snapshot_seq=snapshot_seq,
+            manifest=manifest,
+        )
+        if attestation != expected:
+            raise ValueError("stale or forged bundle integrity attestation")
 
     def stage_table_name(
         self,
@@ -919,7 +997,8 @@ class PostgresPublicationFence:
         with self.engine.connect() as connection:
             row = connection.execute(
                 text(
-                    f"SELECT b.snapshot_seq, b.manifest_json FROM {self._pins_table} p "
+                    f"SELECT b.snapshot_seq, b.manifest_json, b.integrity_attestation_json "
+                    f"FROM {self._pins_table} p "
                     f"JOIN {self._bundles_table} b ON "
                     "b.destination_id = p.destination_id "
                     "AND b.bundle_key = p.bundle_key AND b.bundle_id = p.bundle_id "
@@ -938,6 +1017,16 @@ class PostgresPublicationFence:
                 raise PinnedBundleGoneError(pin.pin_id)
             manifest = RemoteBundleManifest.model_validate_json(row[1])
             try:
+                # Resolve only the pinned bundle's immutable record.  Never
+                # consult mutable current publication state here: a successor
+                # promotion must not change an existing pin's proof.
+                self._require_attestation(
+                    encoded=row[2],
+                    bundle_key=pin.bundle_key,
+                    bundle_id=pin.bundle_id,
+                    snapshot_seq=int(row[0]),
+                    manifest=manifest,
+                )
                 self._validate_remote_manifest(connection, manifest)
             except Exception as exc:
                 raise PinnedBundleGoneError(pin.pin_id) from exc
@@ -949,6 +1038,26 @@ class PostgresPublicationFence:
                 for member in manifest.members
             },
         )
+
+    def release_pin(self, pin: BundlePin) -> None:
+        """Release one reader pin without touching any successor bundle."""
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    f"DELETE FROM {self._pins_table} "
+                    "WHERE destination_id = CAST(:destination AS TEXT) "
+                    "AND bundle_key = CAST(:bundle AS TEXT) "
+                    "AND pin_id = CAST(:pin AS TEXT) "
+                    "AND bundle_id = CAST(:bundle_id AS TEXT)"
+                ),
+                {
+                    "destination": pin.destination_id,
+                    "bundle": pin.bundle_key,
+                    "pin": pin.pin_id,
+                    "bundle_id": pin.bundle_id,
+                },
+            )
 
     def cleanup_bundles(
         self,

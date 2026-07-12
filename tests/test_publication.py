@@ -372,6 +372,9 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
     replay_table = fence.stage_table_name(
         member="member", run_id="replay", fencing_token=4, snapshot_seq=1
     )
+    successor_table = fence.stage_table_name(
+        member="member", run_id="successor", fencing_token=5, snapshot_seq=2
+    )
     try:
         first = fence.acquire_lease(
             bundle_key="analysis", run_id="owner", lease_seconds=60
@@ -535,6 +538,30 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
         resolved = fence.resolve_pin(pin)
         assert resolved.bundle_id == "bundle-one"
         assert resolved.members == {"member": f"public.{promoted_table}"}
+
+        successor_lease = fence.acquire_lease(
+            bundle_key="analysis", run_id="successor", lease_seconds=60
+        )
+        assert successor_lease.fencing_token == 5
+        successor = fence.promote(
+            bundle_key="analysis",
+            run_id="successor",
+            fencing_token=5,
+            snapshot_seq=2,
+            bundle_id="bundle-two",
+            cursors={"member": 2},
+            source_coordinates=(capture_source_coordinate(
+                pg_engine, source_id="application", snapshot_seq=2
+            ),),
+            source_families=("application",),
+            stage=lambda connection: _empty_candidate_manifest(
+                connection, successor_table
+            ),
+        )
+        assert successor.disposition == "PROMOTED"
+        # The old pin reads bundle-one's attestation rather than the mutable
+        # current-state pointer now owned by bundle-two.
+        assert fence.resolve_pin(pin).bundle_id == "bundle-one"
         with pg_engine.begin() as connection:
             connection.execute(
                 text(f'INSERT INTO "{promoted_table}" VALUES (1)')
@@ -547,11 +574,11 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
         cleaner = fence.acquire_lease(
             bundle_key="analysis", run_id="cleaner", lease_seconds=60
         )
-        assert cleaner.fencing_token == 5
+        assert cleaner.fencing_token == 6
         deleted = fence.cleanup_bundles(
             bundle_key="analysis",
             run_id="cleaner",
-            fencing_token=5,
+            fencing_token=6,
         )
         assert "bundle-one" not in deleted
         assert fence.resolve_pin(pin).bundle_id == "bundle-one"
@@ -563,6 +590,9 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
                 text(f'DROP TABLE IF EXISTS "{promoted_table}"')
             )
             connection.execute(text(f'DROP TABLE IF EXISTS "{replay_table}"'))
+            connection.execute(
+                text(f'DROP TABLE IF EXISTS "{successor_table}"')
+            )
             connection.execute(
                 text(f'DROP TABLE IF EXISTS "{state_table}_pins"')
             )
