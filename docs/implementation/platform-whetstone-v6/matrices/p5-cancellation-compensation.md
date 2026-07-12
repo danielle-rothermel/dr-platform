@@ -53,6 +53,15 @@ the fail-closed behavior.
 | P5-A209 | Compensation already resolved | Exact replay | No DBOS call and no mutation |
 | P5-A210 | Existing compensation identity or workflow provenance differs | Replay | Typed integrity conflict; remain degraded and fail closed |
 
+P5-A206 through P5-A208 are isolated pending an owner/schema decision. The
+frozen compensation ledger has no durable grace/count observation fields, and
+resolved rows are immutable with no append-compatible successor identity for
+a workflow that appears after `NO_WORKFLOW_FOUND`. P5b therefore leaves an
+absent call-started hazard `PENDING`, keeps health/reference creation blocked,
+and continues bounded replay. Completing these rows requires either durable
+absence observations plus a successor hazard ledger or a DBOS-side quiescence
+guard; it cannot be inferred safely from repeated absence alone.
+
 ## Foreign cancellation provenance and retry seam
 
 | ID | Starting state | Observation/request | Expected result |
@@ -72,8 +81,9 @@ compensation or cancellation result is unresolved or failed.
 ## Exit gate
 
 P5a is complete when C01-C03, C05, R, and F scenarios pass, with C04 recorded
-as the isolated owner/schema decision above. P5b is complete when A2
-scenarios pass and the risk register closes A2. P5 as a whole is complete when
+as the isolated owner/schema decision above. P5b is complete when A201-A205,
+A209, and A210 pass, with A206-A208 recorded as the isolated owner/schema
+decision above. P5 as a whole is complete when
 all scenarios above pass against a fresh schema; recursive
 DBOS cancellation is statically and dynamically absent; exact replay is
 idempotent; a blocked delayed DBOS commit closes A2 through bounded detection

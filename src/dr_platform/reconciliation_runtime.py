@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy import Engine
 
+    from dr_platform.cancellation import WorkflowCanceller
     from dr_platform.db import PlatformSchema
     from dr_platform.enqueue_runtime import (
         PhysicalEnqueueAdapter,
@@ -287,6 +288,7 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
     reader: LifecycleObservationReader | None = None,
     recovery_observer: WorkflowObserver | None = None,
     enqueue_adapter: PhysicalEnqueueAdapter | None = None,
+    compensation_canceller: WorkflowCanceller | None = None,
 ) -> ReconcileResult:
     """Recover call-started Claims, then reconcile one bounded Attempt page."""
     from dr_platform.claims import ClaimPageOptions  # noqa: PLC0415
@@ -321,6 +323,20 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
     selected_queue_lookup = queue_lookup or owned_client
     assert selected_queue_lookup is not None
     try:
+        if compensation_canceller is not None:
+            # Compensation never mutates its terminal Attempt.  The optional
+            # adapter keeps this facade payload-free while allowing health
+            # reconciliation to replay a bounded late-enqueue repair page.
+            from dr_platform.cancellation import (  # noqa: PLC0415
+                repair_late_enqueue_compensations,
+            )
+
+            repair_late_enqueue_compensations(
+                engine=engine,
+                canceller=compensation_canceller,
+                schema=schema,
+                limit=selected.page_size,
+            )
         recovery = recover_call_started_page(
             engine,
             resolver=resolver,
