@@ -1664,6 +1664,39 @@ def _random_claim_id() -> str:
     return uuid4().hex
 
 
+def _invalidate_attempt_claims(  # noqa: PLR0913
+    connection: Connection,
+    *,
+    schema: PlatformSchema,
+    item_id: str,
+    attempt: int,
+    invalidated_by: str,
+    now: datetime,
+) -> None:
+    """Invalidate outstanding Claims through the Claim-owned boundary."""
+    connection.execute(
+        update(schema.enqueue_claims)
+        .where(
+            and_(
+                schema.enqueue_claims.c.item_id == item_id,
+                schema.enqueue_claims.c.attempt == attempt,
+                schema.enqueue_claims.c.disposition.in_(
+                    [
+                        EnqueueClaimDisposition.CLAIMED.value,
+                        EnqueueClaimDisposition.CALL_STARTED.value,
+                    ]
+                ),
+            )
+        )
+        .values(
+            disposition=EnqueueClaimDisposition.INVALIDATED.value,
+            invalidated_at=now,
+            invalidated_by=invalidated_by,
+            resolved_at=now,
+        )
+    )
+
+
 def _database_now(connection: Connection) -> datetime:
     return connection.execute(text("SELECT clock_timestamp()")).scalar_one()
 

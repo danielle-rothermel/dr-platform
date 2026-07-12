@@ -1,5 +1,15 @@
 """Durable execution kernel contracts built on DBOS."""
 
+from dr_platform.cancellation import (
+    CancellationAttemptResult,
+    CancellationConflictError,
+    CancellationInspection,
+    CancellationInspectionDisposition,
+    CancellationRequest,
+    CancellationResult,
+    WorkflowCanceller,
+    cancel_operation,
+)
 from dr_platform.db import PlatformSchema, upgrade_platform_schema
 from dr_platform.dbos_config import (
     PlatformDbosConfig,
@@ -63,6 +73,12 @@ __all__ = [
     "AttemptEnqueueState",
     "AttemptExecutionState",
     "AttemptRecord",
+    "CancellationAttemptResult",
+    "CancellationConflictError",
+    "CancellationInspection",
+    "CancellationInspectionDisposition",
+    "CancellationRequest",
+    "CancellationResult",
     "EligibilityReference",
     "EnqueueClaimRecord",
     "EnqueueCompensationRecord",
@@ -96,10 +112,12 @@ __all__ = [
     "TargetRegistry",
     "TargetResolver",
     "ThrottleState",
+    "WorkflowCanceller",
     "WorkflowTopology",
     "abandon_registration",
     "build_dbos_config",
     "build_platform_dbos_config",
+    "cancel_operation",
     "reconcile",
     "request_next_attempt",
     "submit",
