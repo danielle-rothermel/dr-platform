@@ -11,7 +11,10 @@ import pytest
 from sqlalchemy import Engine, func, insert, select, update
 
 from dr_platform import (
+    CancellationAttemptCut,
     CancellationConflictError,
+    CancellationCutDriftError,
+    CancellationExpectedCut,
     CancellationInspection,
     CancellationInspectionDisposition,
     CancellationRequest,
@@ -165,6 +168,46 @@ def _mark_enqueued(
         )
 
 
+def _cancellation_cut(
+    engine: Engine,
+    schema: PlatformSchema,
+    *,
+    operation_key: str,
+) -> CancellationExpectedCut:
+    with engine.connect() as connection:
+        platform_cut_version = connection.scalar(
+            select(schema.operations.c.platform_cut_version).where(
+                schema.operations.c.operation_key == operation_key
+            )
+        )
+        attempts = connection.execute(
+            select(
+                schema.item_attempts.c.item_id,
+                schema.item_attempts.c.attempt,
+                schema.item_attempts.c.workflow_id,
+                schema.item_attempts.c.execution_key,
+            )
+            .join(
+                schema.items,
+                schema.items.c.item_id == schema.item_attempts.c.item_id,
+            )
+            .where(
+                schema.items.c.operation_key == operation_key,
+                schema.items.c.current_attempt
+                == schema.item_attempts.c.attempt,
+            )
+            .order_by(
+                schema.item_attempts.c.item_id,
+                schema.item_attempts.c.attempt,
+            )
+        ).mappings()
+        assert platform_cut_version is not None
+        return CancellationExpectedCut(
+            platform_cut_version=platform_cut_version,
+            attempts=tuple(CancellationAttemptCut(**row) for row in attempts),
+        )
+
+
 def test_cancellation_persists_intent_and_exact_replay(
     pg_engine: Any,
 ) -> None:
@@ -181,6 +224,9 @@ def test_cancellation_persists_intent_and_exact_replay(
         operation_key="cancel-operation",
         request_id="cancel-1",
         requested_by="operator",
+        expected_cut=_cancellation_cut(
+            pg_engine, schema, operation_key="cancel-operation"
+        ),
     )
     canceller = _Canceller()
 
@@ -247,6 +293,211 @@ def test_cancellation_persists_intent_and_exact_replay(
             select(schema.item_attempts.c.execution_state)
         ).scalar_one()
     assert state == AttemptExecutionState.CANCELLED.value
+
+
+def test_cancellation_rejects_operation_cut_drift_without_mutation(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    schema = PlatformSchema()
+    _register_operation(
+        pg_engine,
+        schema,
+        operation_key="cut-drift",
+        item_keys=("one",),
+    )
+    _mark_enqueued(pg_engine, schema)
+    expected = _cancellation_cut(pg_engine, schema, operation_key="cut-drift")
+    with pg_engine.begin() as connection:
+        connection.execute(
+            update(schema.operations)
+            .where(schema.operations.c.operation_key == "cut-drift")
+            .values(
+                platform_cut_version=(
+                    schema.operations.c.platform_cut_version + 1
+                )
+            )
+        )
+    with pg_engine.connect() as connection:
+        operation_before = dict(
+            connection.execute(select(schema.operations)).mappings().one()
+        )
+        attempt_before = dict(
+            connection.execute(select(schema.item_attempts)).mappings().one()
+        )
+    canceller = _Canceller()
+
+    with pytest.raises(CancellationCutDriftError) as raised:
+        cancel_operation(
+            CancellationRequest(
+                operation_key="cut-drift",
+                request_id="cut-drift-request",
+                requested_by="operator",
+                expected_cut=expected,
+            ),
+            engine=pg_engine,
+            schema=schema,
+            canceller=canceller,
+        )
+
+    with pg_engine.connect() as connection:
+        operation_after = dict(
+            connection.execute(select(schema.operations)).mappings().one()
+        )
+        attempt_after = dict(
+            connection.execute(select(schema.item_attempts)).mappings().one()
+        )
+    assert raised.value.expected == expected
+    assert raised.value.actual.platform_cut_version == (
+        expected.platform_cut_version + 1
+    )
+    assert operation_after == operation_before
+    assert attempt_after == attempt_before
+    assert canceller.inspection_calls == []
+    assert canceller.calls == []
+
+
+def test_cancellation_rejects_successor_installed_after_preview(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    schema = PlatformSchema()
+    registry = _register_operation(
+        pg_engine,
+        schema,
+        operation_key="successor-drift",
+        item_keys=("one",),
+    )
+    _mark_enqueued(pg_engine, schema)
+    expected = _cancellation_cut(
+        pg_engine, schema, operation_key="successor-drift"
+    )
+    now = func.clock_timestamp()
+    with pg_engine.begin() as connection:
+        item_id = connection.scalar(select(schema.items.c.item_id))
+        connection.execute(
+            update(schema.item_attempts).values(
+                execution_state=AttemptExecutionState.SUCCEEDED.value,
+                dbos_status="SUCCESS",
+                terminal_at=now,
+                updated_at=now,
+            )
+        )
+    assert item_id is not None
+    successor = request_next_attempt(
+        NextAttemptRequest(
+            item_id=item_id,
+            source_attempt=0,
+            request_key="successor-after-preview",
+            reason=NextAttemptReason.DOMAIN_OUTCOME,
+            eligibility=EligibilityReference(
+                kind="domain_outcome",
+                record_id="outcome",
+                digest="outcome-digest",
+            ),
+            requested_by="reconciler",
+        ),
+        engine=pg_engine,
+        resolver=registry,
+        schema=schema,
+    )
+    assert successor.created_attempt == 1
+    canceller = _Canceller()
+
+    with pytest.raises(CancellationCutDriftError) as raised:
+        cancel_operation(
+            CancellationRequest(
+                operation_key="successor-drift",
+                request_id="stale-confirmation",
+                requested_by="operator",
+                expected_cut=expected,
+            ),
+            engine=pg_engine,
+            schema=schema,
+            canceller=canceller,
+        )
+
+    assert raised.value.actual.attempts[0].attempt == 1
+    with pg_engine.connect() as connection:
+        successor_row = (
+            connection.execute(
+                select(schema.item_attempts).where(
+                    schema.item_attempts.c.attempt == 1
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert successor_row["cancellation_request_id"] is None
+    assert canceller.inspection_calls == []
+    assert canceller.calls == []
+
+
+def test_cancellation_cut_requires_order_and_rejects_attempt_aba_drift(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    schema = PlatformSchema()
+    _register_operation(
+        pg_engine,
+        schema,
+        operation_key="attempt-drift",
+        item_keys=("one", "two"),
+    )
+    _mark_enqueued(pg_engine, schema)
+    current = _cancellation_cut(
+        pg_engine, schema, operation_key="attempt-drift"
+    )
+    with pytest.raises(
+        ValueError,
+        match="expected cancellation Attempts must be unique and sorted",
+    ):
+        CancellationExpectedCut(
+            platform_cut_version=current.platform_cut_version,
+            attempts=tuple(reversed(current.attempts)),
+        )
+    stale_identity = CancellationExpectedCut(
+        platform_cut_version=current.platform_cut_version,
+        attempts=(
+            CancellationAttemptCut(
+                item_id=current.attempts[0].item_id,
+                attempt=current.attempts[0].attempt,
+                workflow_id=current.attempts[0].workflow_id,
+                execution_key="reused-ordinal-old-execution",
+            ),
+            current.attempts[1],
+        ),
+    )
+    canceller = _Canceller()
+
+    with pytest.raises(CancellationCutDriftError) as raised:
+        cancel_operation(
+            CancellationRequest(
+                operation_key="attempt-drift",
+                request_id="attempt-drift-request",
+                requested_by="operator",
+                expected_cut=stale_identity,
+            ),
+            engine=pg_engine,
+            schema=schema,
+            canceller=canceller,
+        )
+
+    assert raised.value.expected == stale_identity
+    assert raised.value.actual == current
+    with pg_engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(func.count())
+                .select_from(schema.item_attempts)
+                .where(
+                    schema.item_attempts.c.cancellation_request_id.is_not(None)
+                )
+            )
+            == 0
+        )
+    assert canceller.inspection_calls == []
+    assert canceller.calls == []
 
 
 def test_cancellation_invalidates_claim_and_finalizes_not_enqueued(

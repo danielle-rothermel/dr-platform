@@ -17,8 +17,11 @@ from dr_platform.backoff import (
     throttle_delay_seconds,
 )
 from dr_platform.cancellation import (
+    CancellationAttemptCut,
     CancellationAttemptResult,
     CancellationConflictError,
+    CancellationCutDriftError,
+    CancellationExpectedCut,
     CancellationInspection,
     CancellationInspectionDisposition,
     CancellationRequest,
@@ -154,8 +157,11 @@ __all__ = [
     "AttemptInspection",
     "AttemptRecord",
     "BundlePin",
+    "CancellationAttemptCut",
     "CancellationAttemptResult",
     "CancellationConflictError",
+    "CancellationCutDriftError",
+    "CancellationExpectedCut",
     "CancellationInspection",
     "CancellationInspectionDisposition",
     "CancellationRequest",
