@@ -128,6 +128,21 @@ def cancel_operation(
     """Cancel current Attempts, preserving durable intent for exact replay."""
     selected_schema = schema or PlatformSchema()
     planned = _persist_intent(engine, request=request, schema=selected_schema)
+    if planned and all(
+        row.get("_non_durable_already_cancelled") is True for row in planned
+    ):
+        return CancellationResult(
+            request=request,
+            results=tuple(
+                CancellationAttemptResult(
+                    item_id=row["item_id"],
+                    attempt=row["attempt"],
+                    workflow_id=row["workflow_id"],
+                    disposition=CancellationDisposition.ALREADY_CANCELLED,
+                )
+                for row in planned
+            ),
+        )
     for row in planned:
         if row["cancellation_disposition"] in {
             None,
@@ -162,17 +177,21 @@ def repair_late_enqueue_compensations(
     canceller: WorkflowCanceller,
     schema: PlatformSchema | None = None,
     limit: int = 100,
+    missing_grace_seconds: int = 60,
+    missing_required_observations: int = 3,
 ) -> int:
     """Repair one bounded page of invalidated call-started enqueue hazards.
 
-    The compensation ledger is the only mutable artifact here: cancelled
-    Attempts can already be terminal, so this path never updates them.
-    Absence deliberately remains pending.  The frozen ledger has nowhere to
-    persist per-compensation grace/count observations or a late-appearance
-    successor after ``NO_WORKFLOW_FOUND``.
+    Cancelled Attempts can already be terminal, so this path never updates
+    them. Absence observations are durable on the predecessor compensation;
+    a workflow appearing after terminal absence appends one bounded successor.
     """
     if limit <= 0:
         raise ValueError("compensation repair limit must be positive")
+    if missing_grace_seconds < 0:
+        raise ValueError("compensation missing grace must be non-negative")
+    if missing_required_observations <= 0:
+        raise ValueError("compensation missing observations must be positive")
     selected_schema = schema or PlatformSchema()
     with engine.connect() as connection:
         rows = connection.execute(
@@ -182,6 +201,13 @@ def repair_late_enqueue_compensations(
                 selected_schema.enqueue_claims.c.attempt,
                 selected_schema.enqueue_claims.c.claim_id,
                 selected_schema.enqueue_claims.c.workflow_id,
+                selected_schema.enqueue_compensations.c.cancel_disposition.label(
+                    "predecessor_disposition"
+                ),
+                selected_schema.enqueue_compensation_hazards.c.hazard_seq,
+                selected_schema.enqueue_compensation_hazards.c.cancel_disposition.label(
+                    "hazard_disposition"
+                ),
             )
             .select_from(selected_schema.enqueue_claims)
             .join(
@@ -200,6 +226,17 @@ def repair_late_enqueue_compensations(
                     == selected_schema.enqueue_claims.c.claim_id,
                 ),
             )
+            .outerjoin(
+                selected_schema.enqueue_compensation_hazards,
+                and_(
+                    selected_schema.enqueue_compensation_hazards.c.item_id
+                    == selected_schema.enqueue_compensations.c.item_id,
+                    selected_schema.enqueue_compensation_hazards.c.attempt
+                    == selected_schema.enqueue_compensations.c.attempt,
+                    selected_schema.enqueue_compensation_hazards.c.claim_id
+                    == selected_schema.enqueue_compensations.c.claim_id,
+                ),
+            )
             .where(
                 and_(
                     selected_schema.enqueue_claims.c.disposition
@@ -216,6 +253,23 @@ def repair_late_enqueue_compensations(
                                 EnqueueCompensationDisposition.PENDING.value,
                                 EnqueueCompensationDisposition.FAILED.value,
                             ]
+                        ),
+                        and_(
+                            selected_schema.enqueue_compensations.c.cancel_disposition
+                            == (
+                                EnqueueCompensationDisposition.NO_WORKFLOW_FOUND.value
+                            ),
+                            or_(
+                                selected_schema.enqueue_compensation_hazards.c.hazard_seq.is_(
+                                    None
+                                ),
+                                selected_schema.enqueue_compensation_hazards.c.cancel_disposition.in_(
+                                    [
+                                        EnqueueCompensationDisposition.PENDING.value,
+                                        EnqueueCompensationDisposition.FAILED.value,
+                                    ]
+                                ),
+                            ),
                         ),
                     ),
                 )
@@ -242,14 +296,32 @@ def repair_late_enqueue_compensations(
             )
             guard.commit()
             try:
+                successor = candidate["predecessor_disposition"] == (
+                    EnqueueCompensationDisposition.NO_WORKFLOW_FOUND.value
+                )
+                inspection: CancellationInspection | None = None
+                if successor and candidate["hazard_seq"] is None:
+                    inspection = _inspect_compensation(
+                        canceller=canceller, workflow_id=workflow_id
+                    )
+                    if (
+                        inspection.disposition
+                        is CancellationInspectionDisposition.ABSENT
+                    ):
+                        continue
                 prepared = _prepare_compensation_repair(
-                    engine=engine, schema=selected_schema, candidate=candidate
+                    engine=engine,
+                    schema=selected_schema,
+                    candidate=candidate,
+                    successor=successor,
                 )
                 if prepared is None:
                     continue
                 repaired += 1
                 disposition, failure = _perform_compensation_cancel(
-                    canceller=canceller, workflow_id=workflow_id
+                    canceller=canceller,
+                    workflow_id=workflow_id,
+                    inspection=inspection,
                 )
                 _finalize_compensation_repair(
                     engine=engine,
@@ -257,6 +329,9 @@ def repair_late_enqueue_compensations(
                     candidate=candidate,
                     disposition=disposition,
                     failure=failure,
+                    successor=successor,
+                    missing_grace_seconds=missing_grace_seconds,
+                    missing_required_observations=missing_required_observations,
                 )
             finally:
                 guard.execute(
@@ -296,6 +371,11 @@ def _persist_intent(
             locked_attempts[(row["item_id"], row["attempt"])]
             for row in candidates
         ]
+        if _is_non_durable_already_cancelled(attempts, request=request):
+            return [
+                {**row, "_non_durable_already_cancelled": True}
+                for row in attempts
+            ]
         exact_replay = _validate_replay(attempts, request=request)
         if exact_replay:
             return _request_rows(connection, schema=schema, request=request)
@@ -627,6 +707,30 @@ def _validate_replay(
     return bool(existing)
 
 
+def _is_non_durable_already_cancelled(
+    rows: Sequence[Mapping[str, Any]], *, request: CancellationRequest
+) -> bool:
+    durable_intents = {
+        (row["cancellation_request_id"], row["cancellation_requested_by"])
+        for row in rows
+        if row["cancellation_request_id"] is not None
+    }
+    return (
+        bool(rows)
+        and request.request_id
+        not in {request_id for request_id, _ in durable_intents}
+        and len(durable_intents) == 1
+        and all(
+            row["execution_state"] == AttemptExecutionState.CANCELLED.value
+            and row["cancellation_request_id"] is not None
+            and row["cancellation_requested_by"] is not None
+            and row["cancellation_disposition"]
+            not in {None, CancellationDisposition.FAILED.value}
+            for row in rows
+        )
+    )
+
+
 def _current_attempts(
     connection: Connection, *, schema: PlatformSchema, operation_key: str
 ) -> list[dict[str, Any]]:
@@ -869,11 +973,12 @@ def _refresh_if_resolved(
     )
 
 
-def _prepare_compensation_repair(
+def _prepare_compensation_repair(  # noqa: PLR0912
     *,
     engine: Engine,
     schema: PlatformSchema,
     candidate: Mapping[str, Any],
+    successor: bool = False,
 ) -> bool | None:
     """Insert/reload one exact compensation and decide if it is exclusive."""
     with engine.begin() as connection:
@@ -933,6 +1038,10 @@ def _prepare_compensation_repair(
             .one_or_none()
         )
         if compensation is None:
+            if successor:
+                raise CancellationConflictError(
+                    "successor compensation predecessor disappeared"
+                )
             now = _database_now(connection)
             connection.execute(
                 insert(schema.enqueue_compensations).values(
@@ -956,7 +1065,55 @@ def _prepare_compensation_repair(
                 raise CancellationConflictError(
                     "enqueue compensation replay conflicts"
                 )
-            if compensation["resolved_at"] is not None:
+            if successor:
+                if compensation["cancel_disposition"] != (
+                    EnqueueCompensationDisposition.NO_WORKFLOW_FOUND.value
+                ):
+                    raise CancellationConflictError(
+                        "successor compensation predecessor is not "
+                        "terminal absence"
+                    )
+                hazard = (
+                    connection.execute(
+                        select(schema.enqueue_compensation_hazards)
+                        .where(
+                            and_(
+                                schema.enqueue_compensation_hazards.c.item_id
+                                == candidate["item_id"],
+                                schema.enqueue_compensation_hazards.c.attempt
+                                == candidate["attempt"],
+                                schema.enqueue_compensation_hazards.c.claim_id
+                                == candidate["claim_id"],
+                                schema.enqueue_compensation_hazards.c.hazard_seq
+                                == 1,
+                            )
+                        )
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if hazard is None:
+                    connection.execute(
+                        insert(schema.enqueue_compensation_hazards).values(
+                            item_id=candidate["item_id"],
+                            attempt=candidate["attempt"],
+                            claim_id=candidate["claim_id"],
+                            hazard_seq=1,
+                            workflow_id=claim["workflow_id"],
+                            cancel_disposition=(
+                                EnqueueCompensationDisposition.PENDING.value
+                            ),
+                            created_at=_database_now(connection),
+                        )
+                    )
+                elif hazard["workflow_id"] != claim["workflow_id"]:
+                    raise CancellationConflictError(
+                        "successor compensation workflow identity changed"
+                    )
+                elif hazard["resolved_at"] is not None:
+                    return None
+            elif compensation["resolved_at"] is not None:
                 return None
         resolved_sibling = connection.execute(
             select(schema.enqueue_compensations.c.cancel_disposition)
@@ -992,6 +1149,7 @@ def _prepare_compensation_repair(
                 candidate=candidate,
                 disposition=EnqueueCompensationDisposition(resolved_sibling),
                 failure=None,
+                successor=successor,
             )
             return None
         if _has_other_reference(
@@ -1006,6 +1164,7 @@ def _prepare_compensation_repair(
                 candidate=candidate,
                 disposition=EnqueueCompensationDisposition.SKIPPED_SHARED,
                 failure=None,
+                successor=successor,
             )
             return None
         # The attempt lock above is intentionally only a topology guard.  A
@@ -1015,18 +1174,28 @@ def _prepare_compensation_repair(
         return True
 
 
-def _perform_compensation_cancel(
+def _inspect_compensation(
     *, canceller: WorkflowCanceller, workflow_id: str
+) -> CancellationInspection:
+    inspection = canceller.inspect(workflow_id=workflow_id)
+    if inspection.workflow_id != workflow_id:
+        raise CancellationConflictError("inspector changed workflow identity")
+    if inspection.has_children:
+        raise CancellationConflictError("workflow topology drift")
+    return inspection
+
+
+def _perform_compensation_cancel(
+    *,
+    canceller: WorkflowCanceller,
+    workflow_id: str,
+    inspection: CancellationInspection | None = None,
 ) -> tuple[EnqueueCompensationDisposition | None, FailureSnapshot | None]:
     """Do the DBOS work after releasing all kernel row locks."""
     try:
-        inspection = canceller.inspect(workflow_id=workflow_id)
-        if inspection.workflow_id != workflow_id:
-            raise CancellationConflictError(
-                "inspector changed workflow identity"
-            )
-        if inspection.has_children:
-            raise CancellationConflictError("workflow topology drift")
+        inspection = inspection or _inspect_compensation(
+            canceller=canceller, workflow_id=workflow_id
+        )
         if inspection.disposition is CancellationInspectionDisposition.ABSENT:
             return None, None
         if inspection.disposition in {
@@ -1064,11 +1233,10 @@ def _finalize_compensation_repair(
     candidate: Mapping[str, Any],
     disposition: EnqueueCompensationDisposition | None,
     failure: FailureSnapshot | None,
+    successor: bool = False,
+    missing_grace_seconds: int = 60,
+    missing_required_observations: int = 3,
 ) -> None:
-    # ``None`` is the fail-closed absent-workflow result: no bounded durable
-    # observation ledger exists in the frozen schema, so it stays pending.
-    if disposition is None:
-        return
     with engine.begin() as connection:
         _acquire_export_writer_lock(connection)
         _lock_cancellation_hierarchy(
@@ -1102,34 +1270,73 @@ def _finalize_compensation_repair(
             raise CancellationConflictError(
                 "compensation workflow identity changed"
             )
-        if compensation["resolved_at"] is None:
+        if disposition is None:
+            if successor:
+                raise CancellationConflictError(
+                    "successor workflow disappeared after late appearance"
+                )
+            _record_compensation_absence(
+                connection,
+                schema=schema,
+                candidate=candidate,
+                compensation=dict(compensation),
+                missing_grace_seconds=missing_grace_seconds,
+                missing_required_observations=missing_required_observations,
+            )
+        elif compensation["resolved_at"] is None or successor:
             _resolve_compensation(
                 connection,
                 schema=schema,
                 candidate=candidate,
                 disposition=disposition,
                 failure=failure,
+                successor=successor,
             )
 
 
-def _resolve_compensation(
+def _record_compensation_absence(
     connection: Connection,
     *,
     schema: PlatformSchema,
     candidate: Mapping[str, Any],
-    disposition: EnqueueCompensationDisposition,
-    failure: FailureSnapshot | None,
+    compensation: Mapping[str, Any],
+    missing_grace_seconds: int,
+    missing_required_observations: int,
 ) -> None:
+    if compensation["resolved_at"] is not None:
+        return
     now = _database_now(connection)
-    values: dict[str, Any] = {
-        "cancel_disposition": disposition.value,
-        "resolved_at": (
-            None
-            if disposition is EnqueueCompensationDisposition.FAILED
-            else now
-        ),
-        "failure": failure.model_dump(mode="json") if failure else null(),
-    }
+    first_absent_at = compensation["first_absent_at"] or now
+    observation_count = compensation["absence_observation_count"] + 1
+    reached_grace = (
+        now - first_absent_at
+    ).total_seconds() >= missing_grace_seconds
+    if observation_count >= missing_required_observations and reached_grace:
+        connection.execute(
+            update(schema.enqueue_compensations)
+            .where(
+                and_(
+                    schema.enqueue_compensations.c.item_id
+                    == candidate["item_id"],
+                    schema.enqueue_compensations.c.attempt
+                    == candidate["attempt"],
+                    schema.enqueue_compensations.c.claim_id
+                    == candidate["claim_id"],
+                    schema.enqueue_compensations.c.resolved_at.is_(None),
+                )
+            )
+            .values(
+                first_absent_at=first_absent_at,
+                last_absent_at=now,
+                absence_observation_count=observation_count,
+                cancel_disposition=(
+                    EnqueueCompensationDisposition.NO_WORKFLOW_FOUND.value
+                ),
+                resolved_at=now,
+                failure=null(),
+            )
+        )
+        return
     connection.execute(
         update(schema.enqueue_compensations)
         .where(
@@ -1141,5 +1348,48 @@ def _resolve_compensation(
                 schema.enqueue_compensations.c.resolved_at.is_(None),
             )
         )
-        .values(**values)
+        .values(
+            first_absent_at=first_absent_at,
+            last_absent_at=now,
+            absence_observation_count=observation_count,
+            cancel_disposition=EnqueueCompensationDisposition.PENDING.value,
+            failure=null(),
+        )
+    )
+
+
+def _resolve_compensation(
+    connection: Connection,
+    *,
+    schema: PlatformSchema,
+    candidate: Mapping[str, Any],
+    disposition: EnqueueCompensationDisposition,
+    failure: FailureSnapshot | None,
+    successor: bool = False,
+) -> None:
+    now = _database_now(connection)
+    values: dict[str, Any] = {
+        "cancel_disposition": disposition.value,
+        "resolved_at": (
+            None
+            if disposition is EnqueueCompensationDisposition.FAILED
+            else now
+        ),
+        "failure": failure.model_dump(mode="json") if failure else null(),
+    }
+    ledger = (
+        schema.enqueue_compensation_hazards
+        if successor
+        else schema.enqueue_compensations
+    )
+    conditions = [
+        ledger.c.item_id == candidate["item_id"],
+        ledger.c.attempt == candidate["attempt"],
+        ledger.c.claim_id == candidate["claim_id"],
+        ledger.c.resolved_at.is_(None),
+    ]
+    if successor:
+        conditions.append(ledger.c.hazard_seq == 1)
+    connection.execute(
+        update(ledger).where(and_(*conditions)).values(**values)
     )

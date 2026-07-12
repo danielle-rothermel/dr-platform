@@ -138,6 +138,17 @@ PERSISTED_RECORD_FIELDS: dict[str, frozenset[str]] = {
             "change_seq",
         }
     ),
+    "EnqueueCompensationHazardRecord": frozenset(
+        {
+            "item_id",
+            "attempt",
+            "claim_id",
+            "hazard_seq",
+            "workflow_id",
+            "cancel_disposition",
+            "change_seq",
+        }
+    ),
 }
 
 LEGACY_ROOT_EXPORTS = frozenset(

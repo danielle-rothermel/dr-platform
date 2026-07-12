@@ -29,6 +29,7 @@ KERNEL_TABLE_SUFFIXES = {
     "next_attempt_requests",
     "enqueue_claims",
     "enqueue_compensations",
+    "enqueue_compensation_hazards",
     "missing_reobservations",
     "throttle_state",
     "platform_alembic_version",
@@ -47,6 +48,10 @@ LEDGER_CHANGE_SEQ_QUERIES = {
     ),
     "enqueue_compensations": (
         "SELECT change_seq FROM platform_enqueue_compensations "
+        "WHERE claim_id = 'claim'"
+    ),
+    "enqueue_compensation_hazards": (
+        "SELECT change_seq FROM platform_enqueue_compensation_hazards "
         "WHERE claim_id = 'claim'"
     ),
     "next_attempt_requests": (
@@ -623,6 +628,18 @@ def _insert_update_guard_fixtures(connection: Connection) -> None:
             """
         )
     )
+    connection.execute(
+        text(
+            """
+            INSERT INTO platform_enqueue_compensation_hazards (
+                item_id, attempt, claim_id, hazard_seq, workflow_id,
+                cancel_disposition, created_at
+            ) VALUES (
+                'item', 0, 'claim', 1, 'workflow', 'pending', now()
+            )
+            """
+        )
+    )
 
 
 def _ledger_change_seqs(connection: Connection) -> dict[str, int]:
@@ -658,6 +675,12 @@ def test_lifecycle_ledger_guards_allow_noops_and_valid_transitions(
             "enqueue_compensations": connection.execute(
                 text(
                     "UPDATE platform_enqueue_compensations "
+                    "SET workflow_id = workflow_id"
+                )
+            ).rowcount,
+            "enqueue_compensation_hazards": connection.execute(
+                text(
+                    "UPDATE platform_enqueue_compensation_hazards "
                     "SET workflow_id = workflow_id"
                 )
             ).rowcount,

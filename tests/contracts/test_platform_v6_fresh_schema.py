@@ -20,6 +20,7 @@ FINAL_TABLE_SUFFIXES = frozenset(
         "next_attempt_requests",
         "enqueue_claims",
         "enqueue_compensations",
+        "enqueue_compensation_hazards",
         "missing_reobservations",
         "throttle_state",
     }
@@ -124,6 +125,22 @@ EXPECTED_COLUMN_SUBSETS: dict[str, frozenset[str]] = {
             "claim_id",
             "workflow_id",
             "reason",
+            "cancel_disposition",
+            "created_at",
+            "resolved_at",
+            "first_absent_at",
+            "last_absent_at",
+            "absence_observation_count",
+            "change_seq",
+        }
+    ),
+    "enqueue_compensation_hazards": frozenset(
+        {
+            "item_id",
+            "attempt",
+            "claim_id",
+            "hazard_seq",
+            "workflow_id",
             "cancel_disposition",
             "created_at",
             "resolved_at",
@@ -326,6 +343,11 @@ def test_schema_enum_checks_use_the_closed_values() -> None:
         ("enqueue_claims", "disposition", status.EnqueueClaimDisposition),
         (
             "enqueue_compensations",
+            "cancel_disposition",
+            status.EnqueueCompensationDisposition,
+        ),
+        (
+            "enqueue_compensation_hazards",
             "cancel_disposition",
             status.EnqueueCompensationDisposition,
         ),

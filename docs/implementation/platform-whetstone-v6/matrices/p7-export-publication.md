@@ -36,6 +36,13 @@ no secret or DSN enters export models, logs, or bundle metadata.
 
 P7 verification on 2026-07-12:
 
+- MotherDuck application-publication project hash `c248c2555063`: one
+  non-empty Whetstone Analysis bundle (six members) and Detail bundle (seven
+  members) were independently visible after their STAGED commits and final
+  pointer CAS operations. A fresh connection resolved the Analysis pin;
+  renewal, replacement-token, stale-renewal, and stale-promotion checks passed.
+  MotherDuck application manifests must name its `main` schema; the generic
+  Postgres `public` default fails before STAGED metadata commits.
 - MotherDuck project hash `493872f2ab39`: the production fence acquired and
   renewed a Lease, promoted a physically present row-count/checksum-validated
   bundle with persisted source coordinates through conditional

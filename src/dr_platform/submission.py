@@ -895,6 +895,27 @@ def _validate_workflow_reference_guards(
         raise RegistrationConflictError(
             "workflow has unresolved late-enqueue compensation"
         )
+    unresolved_successor = connection.execute(
+        select(schema.enqueue_compensation_hazards.c.workflow_id)
+        .where(
+            and_(
+                schema.enqueue_compensation_hazards.c.workflow_id.in_(
+                    workflow_ids
+                ),
+                schema.enqueue_compensation_hazards.c.cancel_disposition.in_(
+                    [
+                        EnqueueCompensationDisposition.PENDING.value,
+                        EnqueueCompensationDisposition.FAILED.value,
+                    ]
+                ),
+            )
+        )
+        .limit(1)
+    ).first()
+    if unresolved_successor is not None:
+        raise RegistrationConflictError(
+            "workflow has unresolved late-enqueue successor hazard"
+        )
 
 
 def _operation_insert_values(  # noqa: PLR0913

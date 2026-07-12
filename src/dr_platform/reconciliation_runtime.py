@@ -340,6 +340,10 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
                 canceller=compensation_canceller,
                 schema=schema,
                 limit=selected.page_size,
+                missing_grace_seconds=selected.missing_grace_seconds,
+                missing_required_observations=(
+                    selected.missing_required_observations
+                ),
             )
         recovery = recover_call_started_page(
             engine,

@@ -29,6 +29,7 @@ TABLE_SUFFIXES = (
     "missing_reobservations",
     "next_attempt_requests",
     "enqueue_compensations",
+    "enqueue_compensation_hazards",
 )
 TERMINAL_STATES = (
     "'cancelled', 'error', 'missing', 'recovery_exhausted', 'succeeded'"
@@ -416,6 +417,9 @@ OR (
 	reason TEXT NOT NULL,
 	cancel_disposition TEXT NOT NULL,
 	failure JSONB,
+	first_absent_at TIMESTAMP WITH TIME ZONE,
+	last_absent_at TIMESTAMP WITH TIME ZONE,
+	absence_observation_count INTEGER DEFAULT 0 NOT NULL,
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	resolved_at TIMESTAMP WITH TIME ZONE,
 	change_seq BIGINT NOT NULL,
@@ -424,7 +428,28 @@ OR (
 	CONSTRAINT xbase_ck_compensations_disposition CHECK (cancel_disposition IN ('pending', 'failed', 'cancelled', 'observed_terminal', 'skipped_shared', 'no_workflow_found')),
 	CONSTRAINT xbase_ck_compensations_reason CHECK (reason IN ('invalidated_call_started_claim')),
 	CONSTRAINT xbase_ck_compensations_resolution CHECK ((cancel_disposition IN ('pending', 'failed')) = (resolved_at IS NULL)),
-	CONSTRAINT xbase_ck_compensations_failure CHECK ((cancel_disposition = 'failed') = (failure IS NOT NULL))
+	CONSTRAINT xbase_ck_compensations_failure CHECK ((cancel_disposition = 'failed') = (failure IS NOT NULL)),
+	CONSTRAINT xbase_ck_compensations_absence_observations CHECK ((absence_observation_count = 0) = (first_absent_at IS NULL AND last_absent_at IS NULL) AND (first_absent_at IS NULL OR last_absent_at >= first_absent_at)),
+	CONSTRAINT xbase_uq_compensations_workflow UNIQUE (item_id, attempt, claim_id, workflow_id)
+)""",
+    """CREATE TABLE xbase_enqueue_compensation_hazards (
+	item_id TEXT NOT NULL,
+	attempt INTEGER NOT NULL,
+	claim_id TEXT NOT NULL,
+	hazard_seq INTEGER NOT NULL,
+	workflow_id TEXT NOT NULL,
+	cancel_disposition TEXT NOT NULL,
+	failure JSONB,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	resolved_at TIMESTAMP WITH TIME ZONE,
+	change_seq BIGINT NOT NULL,
+	PRIMARY KEY (item_id, attempt, claim_id, hazard_seq),
+	CONSTRAINT xbase_fk_compensation_hazards_predecessor FOREIGN KEY(item_id, attempt, claim_id, workflow_id) REFERENCES xbase_enqueue_compensations (item_id, attempt, claim_id, workflow_id) ON DELETE RESTRICT,
+	CONSTRAINT xbase_ck_compensation_hazards_bounded CHECK (hazard_seq = 1),
+	CONSTRAINT xbase_ck_compensation_hazards_disposition CHECK (cancel_disposition IN ('pending', 'failed', 'cancelled', 'observed_terminal', 'skipped_shared', 'no_workflow_found')),
+	CONSTRAINT xbase_ck_compensation_hazards_not_absent CHECK (cancel_disposition != 'no_workflow_found'),
+	CONSTRAINT xbase_ck_compensation_hazards_resolution CHECK ((cancel_disposition IN ('pending', 'failed')) = (resolved_at IS NULL)),
+	CONSTRAINT xbase_ck_compensation_hazards_failure CHECK ((cancel_disposition = 'failed') = (failure IS NOT NULL))
 )""",
     """ALTER TABLE xbase_items ADD CONSTRAINT xbase_fk_items_current_attempt FOREIGN KEY(item_id, current_attempt) REFERENCES xbase_item_attempts (item_id, attempt) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED""",
     """ALTER TABLE xbase_item_attempts ADD CONSTRAINT xbase_fk_attempts_current_claim FOREIGN KEY(item_id, attempt, current_claim_id) REFERENCES xbase_enqueue_claims (item_id, attempt, claim_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED""",
@@ -455,6 +480,9 @@ OR (
     """CREATE INDEX ix_xbase_compensations_change_seq ON xbase_enqueue_compensations (change_seq)""",
     """CREATE INDEX ix_xbase_compensations_unresolved ON xbase_enqueue_compensations (cancel_disposition) WHERE cancel_disposition IN ('pending', 'failed')""",
     """CREATE INDEX ix_xbase_compensations_workflow ON xbase_enqueue_compensations (workflow_id)""",
+    """CREATE INDEX ix_xbase_compensation_hazards_change_seq ON xbase_enqueue_compensation_hazards (change_seq)""",
+    """CREATE INDEX ix_xbase_compensation_hazards_unresolved ON xbase_enqueue_compensation_hazards (cancel_disposition) WHERE cancel_disposition IN ('pending', 'failed')""",
+    """CREATE INDEX ix_xbase_compensation_hazards_workflow ON xbase_enqueue_compensation_hazards (workflow_id)""",
 )
 
 
@@ -499,6 +527,38 @@ def _install_change_tracking(prefix: str) -> None:
           RETURN NEW;
         END;
         $$
+        """
+    )
+
+    hazard_function = f"{prefix}_guard_compensation_hazard_update"
+    hazard_trigger = f"{prefix}_00_guard_compensation_hazard_update"
+    _execute(
+        f"""
+        CREATE FUNCTION {hazard_function}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW IS NOT DISTINCT FROM OLD THEN
+            RETURN NULL;
+          END IF;
+          IF OLD.resolved_at IS NOT NULL THEN
+            RAISE EXCEPTION 'resolved compensation hazards are immutable';
+          END IF;
+          IF ROW(NEW.item_id, NEW.attempt, NEW.claim_id, NEW.hazard_seq,
+                 NEW.workflow_id, NEW.created_at) IS DISTINCT FROM
+             ROW(OLD.item_id, OLD.attempt, OLD.claim_id, OLD.hazard_seq,
+                 OLD.workflow_id, OLD.created_at) THEN
+            RAISE EXCEPTION 'compensation hazard identity is immutable';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    _execute(
+        f"""
+        CREATE TRIGGER {hazard_trigger}
+        BEFORE UPDATE ON {_name(prefix, "enqueue_compensation_hazards")}
+        FOR EACH ROW EXECUTE FUNCTION {hazard_function}()
         """
     )
     for suffix in TABLE_SUFFIXES:
@@ -806,6 +866,7 @@ def downgrade() -> None:
         f"{_name(prefix, 'fk_attempts_current_claim')}"
     )
     for suffix in (
+        "enqueue_compensation_hazards",
         "enqueue_compensations",
         "next_attempt_requests",
         "missing_reobservations",
@@ -820,6 +881,9 @@ def downgrade() -> None:
         f"DROP FUNCTION {_name(prefix, 'guard_next_attempt_request_update')}()"
     )
     _execute(f"DROP FUNCTION {_name(prefix, 'guard_compensation_update')}()")
+    _execute(
+        f"DROP FUNCTION {_name(prefix, 'guard_compensation_hazard_update')}()"
+    )
     _execute(f"DROP FUNCTION {_name(prefix, 'guard_enqueue_claim_update')}()")
     _execute(f"DROP FUNCTION {_name(prefix, 'guard_item_update')}()")
     _execute(f"DROP FUNCTION {_name(prefix, 'guard_operation_update')}()")

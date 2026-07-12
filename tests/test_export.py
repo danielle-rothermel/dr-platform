@@ -36,7 +36,10 @@ from dr_platform.export import (
     _stage_and_promote,
     capture_dbos_publication_telemetry,
 )
-from dr_platform.publication import PostgresPublicationFence
+from dr_platform.publication import (
+    PostgresPublicationFence,
+    RemotePromotionResult,
+)
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
 from tests.contracts.test_platform_v6_cancellation import _register_operation
 
@@ -60,6 +63,7 @@ def test_empty_kernel_export_promotes_and_replays(
         "platform_enqueue_claims",
         "platform_next_attempt_requests",
         "platform_enqueue_compensations",
+        "platform_enqueue_compensation_hazards",
         "platform_throttle_state",
         "platform_missing_reobservations",
     }
@@ -248,6 +252,67 @@ def test_application_bundle_promotes_and_resolves_remote_fence(
     assert set(resolved.members) == {"roots"}
 
 
+def test_application_bundle_records_motherduck_main_schema(
+    pg_engine: Engine, tmp_path
+) -> None:
+    """MotherDuck unqualified stages live in `main`, not Postgres `public`."""
+
+    upgrade_platform_schema(str(pg_engine.url))
+
+    def roots(
+        _connection: Connection, _snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, str], ...]:
+        return ({"id": "root"},)
+
+    class CapturingFence(PostgresPublicationFence):
+        def promote(self, *, stage, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            with self.engine.connect() as connection:
+                transaction = connection.begin()
+                try:
+                    manifest = stage(connection)
+                    assert {
+                        member.schema_name for member in manifest.members
+                    } == {"main"}
+                finally:
+                    transaction.rollback()
+            return RemotePromotionResult(
+                disposition="PROMOTED",
+                bundle_id="fixture",
+                snapshot_seq=1,
+            )
+
+    fence = CapturingFence(
+        pg_engine,
+        destination_id="motherduck-schema-fixture",
+        table_name="motherduck_schema_fixture_state",
+        kind="motherduck",
+    )
+
+    result = export(
+        pg_engine,
+        ExportOptions(
+            destination_path=str(tmp_path / "motherduck-schema.duckdb"),
+            bundle_key="motherduck-schema",
+            full_rebuild=True,
+            projections=(
+                ProjectionSpec(
+                    member="roots",
+                    columns=("id",),
+                    unique_key=("id",),
+                    full_rebuild_builder=roots,
+                ),
+            ),
+        ),
+        remote_destinations=(fence,),
+    )
+
+    assert [destination.status for destination in result.destinations] == [
+        "PROMOTED",
+        "PROMOTED",
+    ]
+
+
 def test_application_projection_rejects_missing_builder_and_invalid_closure(
     pg_engine: Engine, tmp_path
 ) -> None:
@@ -389,8 +454,9 @@ def test_nonempty_export_preserves_types_and_excludes_opaque_payloads(
     assert dict(rebuilt.member_counts) == dict(advanced.member_counts)
     assert dict(rebuilt.member_checksums) == dict(advanced.member_checksums)
 
+    mutable_counts = cast("dict[str, int]", result.member_counts)
     with pytest.raises(TypeError):
-        result.member_counts[schema.operations.name] = 2  # ty: ignore[invalid-assignment]
+        mutable_counts[schema.operations.name] = 2
 
 
 def test_equal_snapshot_is_idempotent_and_expired_renewal_cannot_promote(

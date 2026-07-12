@@ -16,16 +16,15 @@ rows). Neither PR claims the full P5 exit gate until both have landed.
 | P5-C01 | Nonterminal current Attempts | First cancellation request | Persist immutable request identity and operator intent; mark local Attempts `CANCEL_REQUESTED`; invalidate every outstanding Claim |
 | P5-C02 | Same cancellation request and payload | Exact replay | Return the stored plan/results without repeating a successful DBOS call |
 | P5-C03 | Same request ID with unequal payload | Replay | Typed idempotency conflict; no lifecycle mutation |
-| P5-C04 | Already-sticky local Attempt | Different request | Record `ALREADY_CANCELLED`; never reactivate or rewrite terminal history |
+| P5-C04 | Already-sticky local Attempt | Different request | Return non-durable `ALREADY_CANCELLED`; never reactivate or rewrite terminal history |
 | P5-C05 | One DBOS call fails in a multi-Item request | Finalize results | Preserve logical intent; successful results remain durable and the Operation stays `CANCELLING` until every result is resolved or acknowledged |
 
-P5-C04 is isolated pending an owner decision. The frozen schema has one
-cancellation request/result tuple per Attempt, so it cannot preserve the first
-request's exact replay while also durably recording a later request. P5a fails
-closed with a typed idempotency conflict and no lifecycle mutation. Completing
-C04 requires either a durable cancellation-request ledger, explicitly
-non-durable `ALREADY_CANCELLED` responses for later requests, or acceptance of
-the fail-closed behavior.
+P5-C04 uses an explicitly non-durable `ALREADY_CANCELLED` response for a
+different request only when every current Attempt is uniformly and durably
+cancelled. The original cancellation request/result tuple remains unchanged
+and exactly replayable. Same-ID unequal payloads and nonterminal, unresolved,
+or mixed cancellation sets continue to fail closed with a typed idempotency
+conflict.
 
 ## Reference and topology safety
 
@@ -53,14 +52,15 @@ the fail-closed behavior.
 | P5-A209 | Compensation already resolved | Exact replay | No DBOS call and no mutation |
 | P5-A210 | Existing compensation identity or workflow provenance differs | Replay | Typed integrity conflict; remain degraded and fail closed |
 
-P5-A206 through P5-A208 are isolated pending an owner/schema decision. The
-frozen compensation ledger has no durable grace/count observation fields, and
-resolved rows are immutable with no append-compatible successor identity for
-a workflow that appears after `NO_WORKFLOW_FOUND`. P5b therefore leaves an
-absent call-started hazard `PENDING`, keeps health/reference creation blocked,
-and continues bounded replay. Completing these rows requires either durable
-absence observations plus a successor hazard ledger or a DBOS-side quiescence
-guard; it cannot be inferred safely from repeated absence alone.
+P5-A206 through P5-A208 use the selected durable-observation design. The
+predecessor compensation records first/last absence timestamps and an
+observation count while it remains mutable. Only an observation satisfying
+both configured grace and count resolves it as `NO_WORKFLOW_FOUND`. A later
+workflow appearance appends at most one successor hazard keyed by the exact
+predecessor identity plus `hazard_seq = 1`; it never rewrites the predecessor
+or terminal Attempt. The successor reuses the workflow lock and reference
+predicate, remains health-degrading while unresolved or failed, and resolves
+by cancellation, shared-reference skip, or terminal observation.
 
 ## Foreign cancellation provenance and retry seam
 
@@ -80,10 +80,8 @@ compensation or cancellation result is unresolved or failed.
 
 ## Exit gate
 
-P5a is complete when C01-C03, C05, R, and F scenarios pass, with C04 recorded
-as the isolated owner/schema decision above. P5b is complete when A201-A205,
-A209, and A210 pass, with A206-A208 recorded as the isolated owner/schema
-decision above. P5 as a whole is complete when
+P5a is complete when C01-C05, R, and F scenarios pass. P5b is complete when
+A201-A210 pass. P5 as a whole is complete when
 all scenarios above pass against a fresh schema; recursive
 DBOS cancellation is statically and dynamically absent; exact replay is
 idempotent; a blocked delayed DBOS commit closes A2 through bounded detection

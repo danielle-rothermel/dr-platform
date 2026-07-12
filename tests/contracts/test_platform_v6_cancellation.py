@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -16,11 +17,13 @@ from dr_platform import (
     CancellationRequest,
     PlatformSchema,
     cancel_operation,
+    health_report,
     repair_late_enqueue_compensations,
     upgrade_platform_schema,
 )
 from dr_platform.claims import (
     ClaimPageOptions,
+    PostgresClaimTransitionStore,
     claim_pending_attempts,
     start_enqueue_call,
 )
@@ -36,7 +39,11 @@ from dr_platform.reconciliation_runtime import (
     ReconciliationObservation,
     ReconciliationObservationDisposition,
 )
-from dr_platform.records import EligibilityReference, FailureSnapshot
+from dr_platform.records import (
+    EligibilityReference,
+    EnqueueClaimRecord,
+    FailureSnapshot,
+)
 from dr_platform.status import (
     AttemptEnqueueState,
     AttemptExecutionState,
@@ -51,6 +58,7 @@ from dr_platform.status import (
 )
 from dr_platform.submission import (
     RegistrationConflictError,
+    _validate_workflow_reference_guards,
     prepare_manifest,
     submit,
 )
@@ -70,10 +78,12 @@ class _Canceller:
         failing: set[str] | None = None,
     ) -> None:
         self.calls: list[tuple[str, bool]] = []
+        self.inspection_calls: list[str] = []
         self.inspections = inspections or {}
         self.failing = failing or set()
 
     def inspect(self, *, workflow_id: str) -> CancellationInspection:
+        self.inspection_calls.append(workflow_id)
         return self.inspections.get(
             workflow_id,
             CancellationInspection(
@@ -187,17 +197,51 @@ def test_cancellation_persists_intent_and_exact_replay(
             schema=schema,
             canceller=canceller,
         )
-    with pytest.raises(CancellationConflictError):
-        cancel_operation(
-            request.model_copy(update={"request_id": "later-request"}),
-            engine=pg_engine,
-            schema=schema,
-            canceller=canceller,
+    with pg_engine.connect() as connection:
+        durable_before_later_request = (
+            dict(
+                connection.execute(select(schema.operations)).mappings().one()
+            ),
+            dict(
+                connection.execute(select(schema.item_attempts))
+                .mappings()
+                .one()
+            ),
+        )
+    later_request = request.model_copy(
+        update={"request_id": "later-request", "requested_by": "other"}
+    )
+    already_cancelled = cancel_operation(
+        later_request,
+        engine=pg_engine,
+        schema=schema,
+        canceller=canceller,
+    )
+    original_replay = cancel_operation(
+        request, engine=pg_engine, schema=schema, canceller=canceller
+    )
+    with pg_engine.connect() as connection:
+        durable_after_later_request = (
+            dict(
+                connection.execute(select(schema.operations)).mappings().one()
+            ),
+            dict(
+                connection.execute(select(schema.item_attempts))
+                .mappings()
+                .one()
+            ),
         )
 
-    assert first == replay
+    assert first == replay == original_replay
     assert first.results[0].disposition == "dbos_cancelled"
+    assert already_cancelled.request == later_request
+    assert (
+        already_cancelled.results[0].disposition
+        is CancellationDisposition.ALREADY_CANCELLED
+    )
+    assert durable_after_later_request == durable_before_later_request
     assert canceller.calls == [(first.results[0].workflow_id, False)]
+    assert canceller.inspection_calls == [first.results[0].workflow_id]
     with pg_engine.connect() as connection:
         state = connection.execute(
             select(schema.item_attempts.c.execution_state)
@@ -384,6 +428,198 @@ def test_absent_late_enqueue_hazard_blocks_new_reference(
         )
 
 
+def test_absence_threshold_unblocks_and_late_appearance_appends_successor(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    schema = PlatformSchema()
+    _register_operation(
+        pg_engine,
+        schema,
+        operation_key="bounded-absence-origin",
+        item_keys=("shared",),
+    )
+    claim = claim_pending_attempts(
+        pg_engine,
+        admit_targets=lambda target_refs: None,
+        schema=schema,
+        claim_id_factory=lambda: "bounded-absence-claim",
+    ).claims[0]
+    start_enqueue_call(
+        pg_engine,
+        item_id=claim.item_id,
+        attempt=claim.attempt,
+        claim_id=claim.claim_id,
+        schema=schema,
+    )
+    absent = CancellationInspection(
+        workflow_id=claim.workflow_id,
+        disposition=CancellationInspectionDisposition.ABSENT,
+    )
+    canceller = _Canceller(inspections={claim.workflow_id: absent})
+    cancel_operation(
+        CancellationRequest(
+            operation_key="bounded-absence-origin",
+            request_id="bounded-absence-request",
+            requested_by="operator",
+        ),
+        engine=pg_engine,
+        schema=schema,
+        canceller=canceller,
+    )
+    repair_late_enqueue_compensations(
+        engine=pg_engine,
+        schema=schema,
+        canceller=canceller,
+        missing_grace_seconds=0,
+        missing_required_observations=3,
+    )
+    with pg_engine.connect() as connection:
+        below_threshold = dict(
+            connection.execute(select(schema.enqueue_compensations))
+            .mappings()
+            .one()
+        )
+    assert below_threshold["cancel_disposition"] == "pending"
+    assert below_threshold["absence_observation_count"] == 2
+    assert below_threshold["first_absent_at"] is not None
+    assert below_threshold["last_absent_at"] is not None
+    with pytest.raises(RegistrationConflictError):
+        _register_operation(
+            pg_engine,
+            schema,
+            operation_key="bounded-absence-blocked-link",
+            item_keys=("shared",),
+        )
+
+    repair_late_enqueue_compensations(
+        engine=pg_engine,
+        schema=schema,
+        canceller=canceller,
+        missing_grace_seconds=0,
+        missing_required_observations=3,
+    )
+    with pg_engine.connect() as connection:
+        predecessor = dict(
+            connection.execute(select(schema.enqueue_compensations))
+            .mappings()
+            .one()
+        )
+        terminal_attempt = dict(
+            connection.execute(select(schema.item_attempts)).mappings().one()
+        )
+    assert predecessor["cancel_disposition"] == "no_workflow_found"
+    assert predecessor["absence_observation_count"] == 3
+    with pg_engine.connect() as connection:
+        durable_claim = EnqueueClaimRecord.model_validate(
+            dict(
+                connection.execute(
+                    select(schema.enqueue_claims).where(
+                        schema.enqueue_claims.c.claim_id == claim.claim_id
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        )
+    PostgresClaimTransitionStore(
+        pg_engine, schema=schema
+    ).ensure_lost_outcome_compensation(
+        claim=durable_claim,
+        outcome=SimpleNamespace(
+            workflow_id=claim.workflow_id,
+            disposition="enqueued",
+        ),
+    )
+    with pg_engine.connect() as connection:
+        assert (
+            dict(
+                connection.execute(select(schema.enqueue_compensations))
+                .mappings()
+                .one()
+            )
+            == predecessor
+        )
+    with pg_engine.begin() as connection:
+        _validate_workflow_reference_guards(
+            connection, schema=schema, workflow_ids=[claim.workflow_id]
+        )
+
+    canceller.inspections[claim.workflow_id] = CancellationInspection(
+        workflow_id=claim.workflow_id,
+        disposition=CancellationInspectionDisposition.ACTIVE,
+    )
+    canceller.failing.add(claim.workflow_id)
+    repair_late_enqueue_compensations(
+        engine=pg_engine,
+        schema=schema,
+        canceller=canceller,
+    )
+    with pg_engine.connect() as connection:
+        successor = dict(
+            connection.execute(select(schema.enqueue_compensation_hazards))
+            .mappings()
+            .one()
+        )
+        assert (
+            dict(
+                connection.execute(select(schema.enqueue_compensations))
+                .mappings()
+                .one()
+            )
+            == predecessor
+        )
+        assert (
+            dict(
+                connection.execute(
+                    select(schema.item_attempts).where(
+                        schema.item_attempts.c.item_id == claim.item_id
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            == terminal_attempt
+        )
+    assert successor["hazard_seq"] == 1
+    assert successor["cancel_disposition"] == "failed"
+    assert (
+        health_report(
+            engine=pg_engine,
+            schema=schema,
+            now=datetime.now(tz=UTC),
+        ).incomplete_compensation_count
+        == 1
+    )
+
+    canceller.failing.clear()
+    repair_late_enqueue_compensations(
+        engine=pg_engine,
+        schema=schema,
+        canceller=canceller,
+    )
+    with pg_engine.connect() as connection:
+        resolved_successor = dict(
+            connection.execute(select(schema.enqueue_compensation_hazards))
+            .mappings()
+            .one()
+        )
+        assert (
+            connection.scalar(
+                select(func.count()).select_from(
+                    schema.enqueue_compensation_hazards
+                )
+            )
+            == 1
+        )
+    assert resolved_successor["cancel_disposition"] == "cancelled"
+    assert resolved_successor["resolved_at"] is not None
+    assert canceller.calls == [
+        (claim.workflow_id, False),
+        (claim.workflow_id, False),
+    ]
+
+
 def test_multiple_compensations_for_one_workflow_converge_without_recancel(
     pg_engine: Engine,
 ) -> None:
@@ -496,6 +732,34 @@ def test_partial_external_failure_is_durable_and_replay_retries_only_failure(
             connection.scalar(select(schema.operations.c.status))
             == "cancelling"
         )
+        attempts_before_conflict = tuple(
+            connection.execute(
+                select(schema.item_attempts).order_by(
+                    schema.item_attempts.c.item_id
+                )
+            ).mappings()
+        )
+
+    calls_before_conflict = list(canceller.calls)
+    inspections_before_conflict = list(canceller.inspection_calls)
+    with pytest.raises(CancellationConflictError):
+        cancel_operation(
+            request.model_copy(update={"request_id": "different-request"}),
+            engine=pg_engine,
+            schema=schema,
+            canceller=canceller,
+        )
+    with pg_engine.connect() as connection:
+        attempts_after_conflict = tuple(
+            connection.execute(
+                select(schema.item_attempts).order_by(
+                    schema.item_attempts.c.item_id
+                )
+            ).mappings()
+        )
+    assert attempts_after_conflict == attempts_before_conflict
+    assert canceller.calls == calls_before_conflict
+    assert canceller.inspection_calls == inspections_before_conflict
 
     canceller.failing.clear()
     replay = cancel_operation(

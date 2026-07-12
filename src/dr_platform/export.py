@@ -271,6 +271,7 @@ def _kernel_specs(
         schema.enqueue_claims,
         schema.next_attempt_requests,
         schema.enqueue_compensations,
+        schema.enqueue_compensation_hazards,
         schema.throttle_state,
         schema.missing_reobservations,
     )
@@ -993,7 +994,9 @@ def _export_application(
                         connection, options, token, snapshot_seq, specs, rows
                     )
                 )
-                destinations: list[LocalDestinationResult | PostgresDestinationResult] = [
+                destinations: list[
+                    LocalDestinationResult | PostgresDestinationResult
+                ] = [
                     LocalDestinationResult(
                         destination_id=options.destination_id,
                         status=status,
@@ -1074,7 +1077,9 @@ def _publish_application_remotes(
     )
     for fence in destinations:
         if not isinstance(fence, PostgresPublicationFence):
-            raise TypeError("remote destinations must be PostgresPublicationFence")
+            raise TypeError(
+                "remote destinations must be PostgresPublicationFence"
+            )
         try:
             fence.ensure_schema()
             lease = fence.acquire_lease(
@@ -1085,7 +1090,8 @@ def _publish_application_remotes(
             if lease.disposition == "LEASE_HELD":
                 results.append(
                     PostgresDestinationResult(
-                        destination_id=fence.destination_id, status="LEASE_HELD"
+                        destination_id=fence.destination_id,
+                        status="LEASE_HELD",
                     )
                 )
                 continue
@@ -1127,7 +1133,9 @@ def _publish_application_remotes(
                             ),
                             [
                                 {
-                                    column: _application_storage_value(row[column])
+                                    column: _application_storage_value(
+                                        row[column]
+                                    )
                                     for column in spec.columns
                                 }
                                 for row in rows[spec.member]
@@ -1136,6 +1144,11 @@ def _publish_application_remotes(
                     members.append(
                         RemoteBundleMember(
                             member=spec.member,
+                            schema_name=(
+                                "main"
+                                if destination.kind == "motherduck"
+                                else "public"
+                            ),
                             table_name=table_name,
                             key_columns=spec.unique_key,
                             row_count=counts[spec.member],
