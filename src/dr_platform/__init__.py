@@ -17,6 +17,12 @@ from dr_platform.dbos_config import (
     build_dbos_config,
     build_platform_dbos_config,
 )
+from dr_platform.export import (
+    ExportOptions,
+    ExportResult,
+    ProjectionSpec,
+    export,
+)
 from dr_platform.inspection import (
     AttemptInspection,
     HealthReport,
@@ -103,6 +109,8 @@ __all__ = [
     "ExecutionRecipeEnvelope",
     "ExecutionTarget",
     "ExecutionTargetRef",
+    "ExportOptions",
+    "ExportResult",
     "FailureClass",
     "FailureSnapshot",
     "HealthReport",
@@ -124,6 +132,7 @@ __all__ = [
     "OperationWaitTimeoutError",
     "PlatformDbosConfig",
     "PlatformSchema",
+    "ProjectionSpec",
     "RegistrationHook",
     "RegistrationResult",
     "RetryDisposition",
@@ -141,6 +150,7 @@ __all__ = [
     "build_dbos_config",
     "build_platform_dbos_config",
     "cancel_operation",
+    "export",
     "health_report",
     "inspect_operation",
     "list_attempts",

@@ -21,6 +21,7 @@ dependencies = [
     "alembic>=1.16.2",
     "dbos[otel]==2.26.0",
     "dr-serialize>=0.1.0",
+    "duckdb>=1.4,<1.5",
     "pydantic>=2.13.4",
     "sqlalchemy>=2.0.0",
 ]
@@ -35,7 +36,6 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "duckdb>=1.4,<1.5",
     "pre-commit>=4.6.0",
     "psycopg[binary]>=3.3.4",
     "pytest>=9.1.1",
