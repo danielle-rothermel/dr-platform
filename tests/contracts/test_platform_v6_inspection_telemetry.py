@@ -26,8 +26,9 @@ from tests.test_claims import _register
 
 class _StepReader:
     def read_step_history(
-        self, *, workflow_id: str
+        self, *, workflow_id: str, limit: int = 100
     ) -> tuple[DbosStepObservation, ...]:
+        assert limit > 0
         return (
             DbosStepObservation(
                 workflow_id=workflow_id,
@@ -35,6 +36,11 @@ class _StepReader:
                 function_name="run",
             ),
         )
+
+
+class _QueueHealth:
+    def configuration_drift_count(self) -> int:
+        return 2
 
 
 def test_inspection_pages_are_stable_and_dbos_timeline_is_allowlisted(
@@ -103,8 +109,9 @@ def test_health_and_wait_timeout_retain_authoritative_inspection(
         now=now,
         no_progress_after_seconds=1,
         queued_age_threshold_seconds=1,
+        queue_health=_QueueHealth(),
     )
-    assert report.queue_configuration_drift_count == 0
+    assert report.queue_configuration_drift_count == 2
     assert report.oldest_queued_age_seconds is not None
 
     calls: list[float] = []

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable  # noqa: TC003 -- Pydantic resolves it
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from pydantic import (
     BaseModel,
@@ -102,7 +102,7 @@ class HealthReport(BaseModel):
     active_throttle_hold_count: NonNegativeInt
     active_backoff_count: NonNegativeInt
     queue_priority_drift_count: NonNegativeInt
-    queue_configuration_drift_count: NonNegativeInt
+    queue_configuration_drift_count: NonNegativeInt | None
     application_version_mismatch_count: NonNegativeInt
     incomplete_cancellation_count: NonNegativeInt
     incomplete_compensation_count: NonNegativeInt
@@ -141,6 +141,12 @@ class OperationWaitTimeoutError(TimeoutError):
             f"{inspection.operation.operation_key!r} did not reach "
             "a terminal state"
         )
+
+
+class QueueHealthProbe(Protocol):
+    """Private read seam for app-owned DBOS queue configuration checks."""
+
+    def configuration_drift_count(self) -> int: ...
 
 
 def list_operations(
@@ -260,10 +266,12 @@ def list_attempts(  # noqa: PLR0913
     engine: Engine,
     cursor: tuple[str, int] | None = None,
     limit: int = DEFAULT_INSPECTION_PAGE_SIZE,
+    step_limit: int = DEFAULT_INSPECTION_PAGE_SIZE,
     schema: PlatformSchema | None = None,
     reader: LifecycleObservationReader | None = None,
 ) -> tuple[AttemptInspection, ...]:
     _validate_limit(limit)
+    _validate_limit(step_limit)
     selected = schema or PlatformSchema()
     with engine.connect() as connection:
         _require_operation(connection, selected, operation_key)
@@ -310,7 +318,9 @@ def list_attempts(  # noqa: PLR0913
             ).limit(limit)
         ).mappings()
         return tuple(
-            _attempt_inspection(connection, selected, dict(row), reader)
+            _attempt_inspection(
+                connection, selected, dict(row), reader, step_limit
+            )
             for row in rows
         )
 
@@ -322,6 +332,7 @@ def health_report(  # noqa: PLR0913
     no_progress_after_seconds: int | None = None,
     queued_age_threshold_seconds: int | None = None,
     active_age_threshold_seconds: int | None = None,
+    queue_health: QueueHealthProbe | None = None,
     schema: PlatformSchema | None = None,
 ) -> HealthReport:
     """Return health facts and explicit threshold breaches."""
@@ -523,7 +534,11 @@ def health_report(  # noqa: PLR0913
         active_throttle_hold_count=holds,
         active_backoff_count=backoff,
         queue_priority_drift_count=queue_priority_drift,
-        queue_configuration_drift_count=0,
+        queue_configuration_drift_count=(
+            None
+            if queue_health is None
+            else queue_health.configuration_drift_count()
+        ),
         application_version_mismatch_count=application_mismatch,
         incomplete_cancellation_count=incomplete_cancellation,
         incomplete_compensation_count=incomplete_compensation,
@@ -565,7 +580,8 @@ def wait_operation(  # noqa: PLR0913
             enqueue_adapter=enqueue_adapter,
             compensation_canceller=compensation_canceller,
             options=ReconcileOptions(
-                page_size=options.reconciliation_page_size
+                page_size=options.reconciliation_page_size,
+                operation_key=operation_key,
             ),
         )
         polls += 1
@@ -648,6 +664,7 @@ def _attempt_inspection(
     schema: PlatformSchema,
     row: dict[str, object],
     reader: LifecycleObservationReader | None,
+    step_limit: int,
 ) -> AttemptInspection:
     attempt = AttemptRecord.model_validate(row)
     claims = tuple(
@@ -685,7 +702,10 @@ def _attempt_inspection(
     steps = (
         ()
         if reader is None
-        else reader.read_step_history(workflow_id=attempt.workflow_id)
+        else reader.read_step_history(
+            workflow_id=attempt.workflow_id,
+            limit=step_limit,
+        )
     )
     return AttemptInspection(
         attempt=attempt,
