@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
+import subprocess
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -180,6 +182,7 @@ class RemoteBundleMember(BaseModel):
     key_columns: tuple[NonEmptyStr, ...]
     row_count: NonNegativeInt
     checksum: NonEmptyStr
+    physical_digest: NonEmptyStr | None = None
     column_schema: tuple[ProjectionColumn, ...] = ()
 
     @model_validator(mode="after")
@@ -221,8 +224,8 @@ class RemoteBundleManifest(BaseModel):
         return {member.member: member.checksum for member in self.members}
 
 
-class BundleIntegrityAttestation(BaseModel):
-    """Immutable, destination-local proof for one promoted physical bundle."""
+class SignedBundleIntegrityPayload(BaseModel):
+    """The complete, signed v1 reader contract for one physical bundle."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -230,16 +233,56 @@ class BundleIntegrityAttestation(BaseModel):
     bundle_key: NonEmptyStr
     bundle_id: NonEmptyStr
     snapshot_seq: NonNegativeInt
-    manifest_sha256: NonEmptyStr
+    integrity_version: Literal["dr-platform.bundle-integrity.v1"]
+    source_coordinates_sha256: NonEmptyStr
+    physical_digest_algorithm: NonEmptyStr
     members: tuple[RemoteBundleMember, ...]
 
     @model_validator(mode="after")
-    def validate_members(self) -> BundleIntegrityAttestation:
+    def validate_members(self) -> SignedBundleIntegrityPayload:
         if not self.members:
             raise ValueError("integrity attestation members must be non-empty")
         if len({member.member for member in self.members}) != len(self.members):
             raise ValueError("integrity attestation members must be unique")
         return self
+
+
+class BundleIntegritySigner:
+    """Injected signer; private key material never enters publication state."""
+
+    key_id: str
+
+    def sign(self, message: bytes) -> bytes:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class OpenSslEd25519Signer(BundleIntegritySigner):
+    """Ed25519 signer backed by an operator-provided PEM file."""
+
+    key_id: str
+    private_key_path: Path
+
+    def sign(self, message: bytes) -> bytes:
+        completed = subprocess.run(  # noqa: S603
+            ["/usr/bin/openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(self.private_key_path)],
+            input=message,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("Ed25519 signing failed")
+        return completed.stdout
+
+
+def canonical_integrity_payload(payload: SignedBundleIntegrityPayload) -> bytes:
+    """RFC8785-equivalent canonical JSON used by both Platform and readers."""
+
+    return _canonical(payload.model_dump(mode="json")).encode("utf-8")
+
+
+def integrity_message(payload: SignedBundleIntegrityPayload) -> bytes:
+    return b"dr-platform.bundle-integrity.v1\0" + canonical_integrity_payload(payload)
 
 
 class _StalePromotionError(RuntimeError):
@@ -254,6 +297,7 @@ class PostgresPublicationFence:
     destination_id: str
     table_name: str = "dr_platform_publication_state"
     kind: Literal["motherduck", "neon"] = "neon"
+    signer: BundleIntegritySigner | None = None
 
     def __post_init__(self) -> None:
         if not self.destination_id:
@@ -310,14 +354,18 @@ class PostgresPublicationFence:
                     "PRIMARY KEY(destination_id, bundle_key, bundle_id))"
                 )
             )
-            # This is intentionally a hard cut for readers: legacy bundle rows
-            # have no attestation and cannot be resolved after this upgrade.
-            connection.execute(
-                text(
-                    f"ALTER TABLE {self._bundles_table} ADD COLUMN IF NOT EXISTS "
-                    "integrity_attestation_json TEXT"
+            for column in (
+                "integrity_version TEXT",
+                "integrity_key_id TEXT",
+                "integrity_payload_json TEXT",
+                "integrity_signature TEXT",
+                "physical_digest_algorithm TEXT",
+            ):
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {self._bundles_table} ADD COLUMN IF NOT EXISTS {column}"
+                    )
                 )
-            )
             connection.execute(
                 text(
                     f"CREATE TABLE IF NOT EXISTS {self._pins_table} ("
@@ -532,20 +580,21 @@ class PostgresPublicationFence:
         source_coordinates: tuple[SourceCoordinate, ...],
         manifest: RemoteBundleManifest,
     ) -> None:
-        attestation = self._attestation(
+        payload, signature = self._signed_payload(
             bundle_key=bundle_key,
             bundle_id=bundle_id,
             snapshot_seq=snapshot_seq,
             manifest=manifest,
+            source_coordinates=source_coordinates,
         )
         connection.execute(
             text(
                 f"INSERT INTO {self._bundles_table} (destination_id, bundle_key, "
                 "bundle_id, snapshot_seq, source_coordinates_json, manifest_json, "
-                "integrity_attestation_json, status, owner, fencing_token) VALUES ("
+                "integrity_version, integrity_key_id, integrity_payload_json, integrity_signature, physical_digest_algorithm, status, owner, fencing_token) VALUES ("
                 "CAST(:destination AS TEXT), CAST(:bundle AS TEXT), "
                 "CAST(:bundle_id AS TEXT), CAST(:snapshot AS BIGINT), "
-                "CAST(:coordinates AS TEXT), CAST(:manifest AS TEXT), CAST(:attestation AS TEXT), "
+                "CAST(:coordinates AS TEXT), CAST(:manifest AS TEXT), CAST(:version AS TEXT), CAST(:key_id AS TEXT), CAST(:payload AS TEXT), CAST(:signature AS TEXT), CAST(:algorithm AS TEXT), "
                 "'STAGED', CAST(:run AS TEXT), CAST(:token AS BIGINT)) "
                 "ON CONFLICT DO NOTHING"
             ),
@@ -561,53 +610,43 @@ class PostgresPublicationFence:
                     ]
                 ),
                 "manifest": manifest.model_dump_json(),
-                "attestation": attestation.model_dump_json(),
+                "version": payload.integrity_version,
+                "key_id": self.signer.key_id if self.signer else "",
+                "payload": canonical_integrity_payload(payload).decode(),
+                "signature": base64.b64encode(signature).decode(),
+                "algorithm": payload.physical_digest_algorithm,
                 "run": run_id,
                 "token": fencing_token,
             },
         )
 
-    def _attestation(
+    def _signed_payload(
         self,
         *,
         bundle_key: str,
         bundle_id: str,
         snapshot_seq: int,
         manifest: RemoteBundleManifest,
-    ) -> BundleIntegrityAttestation:
-        manifest_json = manifest.model_dump_json()
-        return BundleIntegrityAttestation(
+        source_coordinates: tuple[SourceCoordinate, ...],
+    ) -> tuple[SignedBundleIntegrityPayload, bytes]:
+        if self.signer is None:
+            raise ValueError("promotion requires an injected BundleIntegritySigner")
+        algorithm = "postgres-sha256-length-framed-v1" if self.kind == "neon" else "duckdb-sha256-length-framed-v1"
+        payload = SignedBundleIntegrityPayload(
             destination_id=self.destination_id,
             bundle_key=bundle_key,
             bundle_id=bundle_id,
             snapshot_seq=snapshot_seq,
-            manifest_sha256=hashlib.sha256(manifest_json.encode()).hexdigest(),
+            integrity_version="dr-platform.bundle-integrity.v1",
+            source_coordinates_sha256=hashlib.sha256(
+                _canonical(
+                    [coordinate.model_dump(mode="json") for coordinate in source_coordinates]
+                ).encode()
+            ).hexdigest(),
+            physical_digest_algorithm=algorithm,
             members=manifest.members,
         )
-
-    def _require_attestation(
-        self,
-        *,
-        encoded: str | None,
-        bundle_key: str,
-        bundle_id: str,
-        snapshot_seq: int,
-        manifest: RemoteBundleManifest,
-    ) -> None:
-        if not encoded:
-            raise ValueError("missing bundle integrity attestation")
-        try:
-            attestation = BundleIntegrityAttestation.model_validate_json(encoded)
-        except Exception as exc:
-            raise ValueError("malformed bundle integrity attestation") from exc
-        expected = self._attestation(
-            bundle_key=bundle_key,
-            bundle_id=bundle_id,
-            snapshot_seq=snapshot_seq,
-            manifest=manifest,
-        )
-        if attestation != expected:
-            raise ValueError("stale or forged bundle integrity attestation")
+        return payload, self.signer.sign(integrity_message(payload))
 
     def stage_table_name(
         self,
@@ -997,7 +1036,7 @@ class PostgresPublicationFence:
         with self.engine.connect() as connection:
             row = connection.execute(
                 text(
-                    f"SELECT b.snapshot_seq, b.manifest_json, b.integrity_attestation_json "
+                    f"SELECT b.snapshot_seq, b.manifest_json, b.integrity_payload_json, b.integrity_signature "
                     f"FROM {self._pins_table} p "
                     f"JOIN {self._bundles_table} b ON "
                     "b.destination_id = p.destination_id "
@@ -1020,13 +1059,17 @@ class PostgresPublicationFence:
                 # Resolve only the pinned bundle's immutable record.  Never
                 # consult mutable current publication state here: a successor
                 # promotion must not change an existing pin's proof.
-                self._require_attestation(
-                    encoded=row[2],
-                    bundle_key=pin.bundle_key,
-                    bundle_id=pin.bundle_id,
-                    snapshot_seq=int(row[0]),
-                    manifest=manifest,
-                )
+                payload = SignedBundleIntegrityPayload.model_validate_json(row[2])
+                if (
+                    not row[3]
+                    or payload.destination_id != pin.destination_id
+                    or payload.bundle_key != pin.bundle_key
+                    or payload.bundle_id != pin.bundle_id
+                    or payload.snapshot_seq != int(row[0])
+                ):
+                    raise ValueError(  # noqa: TRY301
+                        "missing or mismatched signed integrity payload"
+                    )
                 self._validate_remote_manifest(connection, manifest)
             except Exception as exc:
                 raise PinnedBundleGoneError(pin.pin_id) from exc
