@@ -29,11 +29,14 @@ from dr_platform.export import (
     _PIN_TABLE,
     _STATE_TABLE,
     ProjectionColumn,
+    ProjectionSpec,
+    _application_destination_rows,
     _canonical,
     _create_destination_tables,
     _duckdb_lock,
     _normalize_application_value,
     _quoted,
+    _validate_application_rows,
 )
 
 NonEmptyStr = Annotated[StrictStr, Field(min_length=1)]
@@ -1148,25 +1151,55 @@ def resolve_local_pin(
         ).fetchone()
         if row is None or manifest_row is None or row[0] != pin.bundle_id:
             raise PinnedBundleGoneError(pin.pin_id)
-        manifest = json.loads(manifest_row[1])
+        try:
+            manifest = json.loads(manifest_row[1])
+        except (TypeError, ValueError) as exc:
+            raise PinnedBundleGoneError(pin.pin_id) from exc
+        if not isinstance(manifest, dict):
+            raise PinnedBundleGoneError(pin.pin_id)
         members: dict[str, str] = {}
         for member, facts in manifest.items():
-            table_name = str(facts["table"])
             try:
+                table_name = str(facts["table"])
                 table = _quoted(table_name)
-                columns = tuple(str(value) for value in facts["columns"])
                 unique_key = tuple(str(value) for value in facts["unique_key"])
-                rows = [
-                    dict(zip(columns, values, strict=True))
-                    for values in connection.execute(
-                        f"SELECT {', '.join(f'CAST({_quoted(column)} AS VARCHAR)' for column in columns)} "
-                        f"FROM {table} ORDER BY {', '.join(_quoted(key) for key in unique_key)}"
-                    ).fetchall()
-                ]
+                if "column_schema" in facts:
+                    column_schema = tuple(
+                        ProjectionColumn.model_validate(value)
+                        for value in facts["column_schema"]
+                    )
+                    spec = ProjectionSpec(
+                        member=str(member),
+                        columns=tuple(column.name for column in column_schema),
+                        column_schema=column_schema,
+                        unique_key=unique_key,
+                    )
+                    rows = _application_destination_rows(
+                        connection,
+                        member=spec.member,
+                        table_name=table_name,
+                        column_schema=column_schema,
+                    )
+                    _, checksums = _validate_application_rows(
+                        (spec,), {spec.member: rows}
+                    )
+                    checksum = checksums[spec.member]
+                else:
+                    columns = tuple(str(value) for value in facts["columns"])
+                    rows = [
+                        dict(zip(columns, values, strict=True))
+                        for values in connection.execute(
+                            f"SELECT {', '.join(f'CAST({_quoted(column)} AS VARCHAR)' for column in columns)} "
+                            f"FROM {table} ORDER BY {', '.join(_quoted(key) for key in unique_key)}"
+                        ).fetchall()
+                    ]
+                    checksum = hashlib.sha256(
+                        _canonical(rows).encode()
+                    ).hexdigest()
+                expected_checksum = facts["checksum"]
             except (duckdb.Error, KeyError, TypeError, ValueError) as exc:
                 raise PinnedBundleGoneError(pin.pin_id) from exc
-            checksum = hashlib.sha256(_canonical(rows).encode()).hexdigest()
-            if checksum != facts["checksum"]:
+            if checksum != expected_checksum:
                 raise PinnedBundleGoneError(pin.pin_id)
             members[str(member)] = table_name
     return PinnedBundle(

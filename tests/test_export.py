@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -26,10 +27,13 @@ from sqlalchemy import (
 from dr_platform import (
     ExportOptions,
     ExportReconciliationDependencies,
+    PinnedBundleGoneError,
     PlatformSchema,
     ProjectionColumn,
     ProjectionColumnType,
     TargetRegistry,
+    pin_local_bundle,
+    resolve_local_pin,
     upgrade_platform_schema,
 )
 from dr_platform import (
@@ -503,6 +507,25 @@ def test_application_projection_types_round_trip_and_aggregate(
         '{"labels":["a","b"]}',
     )
 
+    pin = pin_local_bundle(database, bundle_key="typed", pin_id="typed-local")
+    local_table = resolve_local_pin(database, pin).members["typed_rows"]
+    with duckdb.connect(str(database), read_only=True) as connection:
+        pinned_aggregate = connection.execute(
+            f'SELECT sum("count"), avg(score) FROM "{local_table}"'  # noqa: S608
+        ).fetchone()
+        pinned_query = (
+            "SELECT enabled, epoch(captured_at), payload "  # noqa: S608
+            f'FROM "{local_table}" '
+            "WHERE id = 'one'"
+        )
+        pinned_row = connection.execute(pinned_query).fetchone()
+    assert pinned_aggregate == (6, 2.0)
+    assert pinned_row == (
+        True,
+        captured.timestamp(),
+        '{"labels":["a","b"]}',
+    )
+
     pin = fence.pin_bundle(bundle_key="typed", pin_id="typed-fixture")
     remote_table = fence.resolve_pin(pin).members["typed_rows"]
     with pg_engine.connect() as connection:
@@ -519,6 +542,59 @@ def test_application_projection_types_round_trip_and_aggregate(
     assert remote_row[0] is True
     assert remote_row[1] == captured
     assert remote_row[2] == {"labels": ["a", "b"]}
+
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(
+            f"UPDATE \"{local_table}\" SET score = 9.5 WHERE id = 'one'"  # noqa: S608
+        )
+    with pytest.raises(PinnedBundleGoneError, match="PINNED_BUNDLE_GONE"):
+        resolve_local_pin(
+            database,
+            pin_local_bundle(
+                database, bundle_key="typed", pin_id="typed-local-tampered"
+            ),
+        )
+
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(
+            f"UPDATE \"{local_table}\" SET score = 1.5 WHERE id = 'one'"  # noqa: S608
+        )
+        manifest_row = connection.execute(
+            "SELECT manifest_json FROM __dr_platform_export_bundles "
+            "WHERE bundle_key = 'typed'"
+        ).fetchone()
+        assert manifest_row is not None
+        original_manifest = json.loads(manifest_row[0])
+
+    for pin_id, mutate_schema in (
+        (
+            "typed-local-type-drift",
+            lambda schema: [
+                {**column, "type": "text"}
+                if column["name"] == "score"
+                else column
+                for column in schema
+            ],
+        ),
+        (
+            "typed-local-order-drift",
+            lambda schema: [schema[1], schema[0], *schema[2:]],
+        ),
+    ):
+        tampered_manifest = json.loads(json.dumps(original_manifest))
+        facts = tampered_manifest["typed_rows"]
+        facts["column_schema"] = mutate_schema(facts["column_schema"])
+        with duckdb.connect(str(database)) as connection:
+            connection.execute(
+                "UPDATE __dr_platform_export_bundles SET manifest_json = ? "
+                "WHERE bundle_key = 'typed'",
+                [json.dumps(tampered_manifest)],
+            )
+        with pytest.raises(PinnedBundleGoneError, match="PINNED_BUNDLE_GONE"):
+            resolve_local_pin(
+                database,
+                pin_local_bundle(database, bundle_key="typed", pin_id=pin_id),
+            )
 
 
 def test_application_projection_schema_and_values_fail_closed(

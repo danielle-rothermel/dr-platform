@@ -1209,9 +1209,9 @@ def _stage_and_promote_application(
         manifest = {
             spec.member: {
                 "table": candidate_tables[spec.member],
-                "columns": list(spec.column_names),
-                "column_types": [
-                    column.type.value for column in spec.column_schema
+                "column_schema": [
+                    column.model_dump(mode="json")
+                    for column in spec.column_schema
                 ],
                 "unique_key": list(spec.unique_key),
                 "checksum": candidate_checksums[spec.member],
@@ -1265,43 +1265,59 @@ def _application_destination_facts(
 ) -> tuple[dict[str, int], dict[str, str]]:
     rows: dict[str, list[dict[str, Any]]] = {}
     for spec in specs:
-        table = _quoted(candidate_tables[spec.member])
-        actual_schema = tuple(
-            (item[0], item[1])
-            for item in connection.execute(f"DESCRIBE {table}").fetchall()
+        rows[spec.member] = _application_destination_rows(
+            connection,
+            member=spec.member,
+            table_name=candidate_tables[spec.member],
+            column_schema=spec.column_schema,
         )
-        expected_schema = tuple(
-            (
-                column.name,
-                _duckdb_application_describe_type(column.type),
+    return _validate_application_rows(specs, rows)
+
+
+def _application_destination_rows(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    member: str,
+    table_name: str,
+    column_schema: tuple[ProjectionColumn, ...],
+) -> list[dict[str, Any]]:
+    """Read one DuckDB application member with its declared typed semantics."""
+
+    table = _quoted(table_name)
+    actual_schema = tuple(
+        (item[0], item[1])
+        for item in connection.execute(f"DESCRIBE {table}").fetchall()
+    )
+    expected_schema = tuple(
+        (column.name, _duckdb_application_describe_type(column.type))
+        for column in column_schema
+    )
+    if actual_schema != expected_schema:
+        raise ValueError(f"{member} failed destination schema validation")
+    return [
+        {
+            column.name: _normalize_application_value(
+                value, column.type, destination=True
             )
-            for column in spec.column_schema
-        )
-        if actual_schema != expected_schema:
-            raise ValueError(
-                f"{spec.member} failed destination schema validation"
-            )
-        rows[spec.member] = [
-            dict(zip(spec.column_names, row, strict=True))
-            for row in connection.execute(
-                "SELECT "
-                + ", ".join(
-                    (
-                        f"CAST({_quoted(column.name)} AS VARCHAR)"
-                        if column.type
-                        in {
-                            ProjectionColumnType.TIMESTAMP,
-                            ProjectionColumnType.JSON,
-                        }
-                        else _quoted(column.name)
-                    )
-                    for column in spec.column_schema
+            for column, value in zip(column_schema, values, strict=True)
+        }
+        for values in connection.execute(
+            "SELECT "
+            + ", ".join(
+                (
+                    f"CAST({_quoted(column.name)} AS VARCHAR)"
+                    if column.type
+                    in {
+                        ProjectionColumnType.TIMESTAMP,
+                        ProjectionColumnType.JSON,
+                    }
+                    else _quoted(column.name)
                 )
-                + f" FROM {table}"
-            ).fetchall()
-        ]
-    normalized = _normalize_application_rows(specs, rows, destination=True)
-    return _validate_application_rows(specs, normalized)
+                for column in column_schema
+            )
+            + f" FROM {table}"
+        ).fetchall()
+    ]
 
 
 def _validate_destination_member(
