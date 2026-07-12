@@ -127,12 +127,8 @@ def export(source: Engine, options: ExportOptions, **kwargs):  # type: ignore[no
         options = options.model_copy(
             update={"integrity_signer": signed_integrity_test_material()[0]}
         )
-    return _export(
-        source,
-        options,
-        reconciliation=_reconciliation(source),
-        **kwargs,
-    )
+    kwargs.setdefault("reconciliation", _reconciliation(source))
+    return _export(source, options, **kwargs)
 
 
 def _text_schema(*names: str) -> tuple[ProjectionColumn, ...]:
@@ -324,6 +320,8 @@ def test_application_bundle_promotes_and_resolves_remote_fence(
         pg_engine,
         destination_id="remote-fixture",
         table_name="remote_fixture_state",
+        signer=signed_integrity_test_material()[0],
+        public_key_ring=signed_integrity_test_material()[1],
     )
     result = export(
         pg_engine,
@@ -473,6 +471,8 @@ def test_application_projection_types_round_trip_and_aggregate(
         pg_engine,
         destination_id="typed-remote",
         table_name="typed_remote_state",
+        signer=signed_integrity_test_material()[0],
+        public_key_ring=signed_integrity_test_material()[1],
     )
     database = tmp_path / "typed.duckdb"
     result = export(
@@ -1019,7 +1019,7 @@ def test_export_drives_terminal_reconciliation_before_capture(
             )
 
     database = tmp_path / "reconciled.duckdb"
-    result = _export(
+    result = export(
         pg_engine,
         ExportOptions(destination_path=str(database)),
         schema=schema,
@@ -1173,6 +1173,8 @@ def test_kernel_remote_stages_every_member_and_retries_independently(
         pg_engine,
         destination_id="remote-kernel",
         table_name="remote_kernel_state",
+        signer=signed_integrity_test_material()[0],
+        public_key_ring=signed_integrity_test_material()[1],
     )
     retry = export(
         pg_engine,
@@ -1229,6 +1231,8 @@ def test_kernel_remote_runs_when_local_destination_is_unavailable(
         pg_engine,
         destination_id="remote-while-local-held",
         table_name="remote_while_local_held_state",
+        signer=signed_integrity_test_material()[0],
+        public_key_ring=signed_integrity_test_material()[1],
     )
     result = export(
         pg_engine,

@@ -80,11 +80,16 @@ def pg_url() -> str:
 
 @pytest.fixture
 def clean_pg(pg_url: str) -> str:
-    """A scratch database wiped before each test."""
+    """A scratch database with pgcrypto restored after each schema reset."""
     engine = create_engine(pg_url)
     with engine.begin() as connection:
+        # pgcrypto installs its functions in public. Dropping public without
+        # removing the extension leaves a catalog entry whose functions no
+        # longer exist, so recreate the extension after the schema reset.
+        connection.execute(text("DROP EXTENSION IF EXISTS pgcrypto"))
         connection.execute(text("DROP SCHEMA public CASCADE"))
         connection.execute(text("CREATE SCHEMA public"))
+        connection.execute(text("CREATE EXTENSION pgcrypto"))
     engine.dispose()
     return pg_url
 

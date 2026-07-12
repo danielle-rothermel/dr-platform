@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from typing import Literal, cast
+from typing import Literal
 from uuid import uuid4
 
 import duckdb
 import pytest
-from sqlalchemy import Connection, Engine, text
+from sqlalchemy import Connection, Engine, create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from dr_platform import (
@@ -177,11 +179,15 @@ def test_combined_remote_promotion_fails_before_staging(
 def test_combined_remote_promotion_accepts_same_database_source_families(
     pg_engine: Engine,
 ) -> None:
+    _require_pgcrypto(pg_engine)
     suffix = uuid4().hex[:12]
+    signer, key_ring = signed_integrity_test_material()
     fence = PostgresPublicationFence(
         pg_engine,
         destination_id=f"same-database-{suffix}",
         table_name=f"same_database_state_{suffix}",
+        signer=signer,
+        public_key_ring=key_ring,
     )
     fence.ensure_schema()
     captured = datetime.now(UTC) - timedelta(seconds=1)
@@ -356,17 +362,19 @@ def test_remote_bad_builder_cannot_name_an_unowned_candidate_table(
     assert committed == 0
 
 
-@pytest.mark.parametrize("kind", ["motherduck", "neon"])
-def test_postgres_fence_rejects_stale_stage_and_uses_returning(
-    pg_engine: Engine, kind: str
+def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
+    engine: Engine, kind: Literal["motherduck", "neon"]
 ) -> None:
     suffix = uuid4().hex[:12]
     state_table = f"publication_state_{suffix}"
+    signer, key_ring = signed_integrity_test_material()
     fence = PostgresPublicationFence(
-        pg_engine,
+        engine,
         destination_id=f"{kind}-test",
         table_name=state_table,
-        kind=cast("Literal['motherduck', 'neon']", kind),
+        kind=kind,
+        signer=signer,
+        public_key_ring=key_ring,
     )
     fence.ensure_schema()
     staged_table = fence.stage_table_name(
@@ -406,7 +414,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
         )
 
         coordinate = capture_source_coordinate(
-            pg_engine, source_id="application", snapshot_seq=1
+            engine, source_id="application", snapshot_seq=1
         )
 
         def create_stale_stage(
@@ -440,7 +448,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
             stage=create_stale_stage,
         )
         assert stale.disposition == "STALE_PROMOTION"
-        with pg_engine.connect() as connection:
+        with engine.connect() as connection:
             exists = connection.execute(
                 text("SELECT to_regclass(:name)"), {"name": staged_table}
             ).scalar_one()
@@ -561,7 +569,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
             cursors={"member": 2},
             source_coordinates=(
                 capture_source_coordinate(
-                    pg_engine, source_id="application", snapshot_seq=2
+                    engine, source_id="application", snapshot_seq=2
                 ),
             ),
             source_families=("application",),
@@ -573,13 +581,13 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
         # The old pin reads bundle-one's attestation rather than the mutable
         # current-state pointer now owned by bundle-two.
         assert fence.resolve_pin(pin).bundle_id == "bundle-one"
-        with pg_engine.begin() as connection:
+        with engine.begin() as connection:
             connection.execute(
                 text(f'INSERT INTO "{promoted_table}" VALUES (1)')
             )
         with pytest.raises(PinnedBundleGoneError):
             fence.resolve_pin(pin)
-        with pg_engine.begin() as connection:
+        with engine.begin() as connection:
             connection.execute(text(f'DELETE FROM "{promoted_table}"'))
 
         cleaner = fence.acquire_lease(
@@ -594,7 +602,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
         assert "bundle-one" not in deleted
         assert fence.resolve_pin(pin).bundle_id == "bundle-one"
     finally:
-        with pg_engine.begin() as connection:
+        with engine.begin() as connection:
             connection.execute(text(f'DROP TABLE IF EXISTS "{staged_table}"'))
             connection.execute(text(f'DROP TABLE IF EXISTS "{expired_table}"'))
             connection.execute(
@@ -611,6 +619,44 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
                 text(f'DROP TABLE IF EXISTS "{state_table}_bundles"')
             )
             connection.execute(text(f'DROP TABLE IF EXISTS "{state_table}"'))
+
+
+def test_postgres_fence_rejects_stale_stage_and_uses_returning(
+    pg_engine: Engine,
+) -> None:
+    _require_pgcrypto(pg_engine)
+    _assert_remote_fence_rejects_stale_stage_and_uses_returning(
+        pg_engine, "neon"
+    )
+
+
+@pytest.fixture
+def motherduck_engine() -> Iterator[Engine]:
+    """Opt-in endpoint used to execute MotherDuck's native sha256 aggregate."""
+
+    url = os.environ.get("DR_PLATFORM_MOTHERDUCK_TEST_DATABASE_URL")
+    if url is None:
+        pytest.skip(
+            "MotherDuck capability test requires "
+            "DR_PLATFORM_MOTHERDUCK_TEST_DATABASE_URL"
+        )
+    engine = create_engine(url)
+    try:
+        with engine.connect():
+            pass
+    except SQLAlchemyError as exc:
+        engine.dispose()
+        pytest.skip(f"MotherDuck unavailable: {exc}")
+    yield engine
+    engine.dispose()
+
+
+def test_motherduck_fence_rejects_stale_stage_and_uses_returning(
+    motherduck_engine: Engine,
+) -> None:
+    _assert_remote_fence_rejects_stale_stage_and_uses_returning(
+        motherduck_engine, "motherduck"
+    )
 
 
 def test_active_pin_survives_cleanup_then_missing_bundle_is_typed(
@@ -669,9 +715,12 @@ def test_active_pin_survives_cleanup_then_missing_bundle_is_typed(
         run_id="integrity-backfill",
         fencing_token=2,
     ) == (first.destinations[0].bundle_id,)
-    assert resolve_local_pin(
-        database, pin, public_key_ring=signed_integrity_test_material()[1]
-    ).bundle_id == first.destinations[0].bundle_id
+    assert (
+        resolve_local_pin(
+            database, pin, public_key_ring=signed_integrity_test_material()[1]
+        ).bundle_id
+        == first.destinations[0].bundle_id
+    )
 
     with duckdb.connect(str(database)) as destination:
         destination.execute(
@@ -688,11 +737,13 @@ def test_active_pin_survives_cleanup_then_missing_bundle_is_typed(
 
 def _require_pgcrypto(pg_engine: Engine) -> None:
     try:
-        with pg_engine.begin() as connection:
-            connection.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
-            assert connection.execute(
-                text("SELECT encode(digest('', 'sha256'), 'hex')")
-            ).scalar_one() == hashlib.sha256(b"").hexdigest()
+        with pg_engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT encode(digest('', 'sha256'), 'hex')")
+                ).scalar_one()
+                == hashlib.sha256(b"").hexdigest()
+            )
     except SQLAlchemyError as exc:  # pragma: no cover - dev DB privileges
         pytest.skip(f"Postgres pgcrypto unavailable: {exc}")
 
