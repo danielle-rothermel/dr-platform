@@ -1,23 +1,38 @@
-"""DBOS config/bootstrap helpers and the single DBOS-private shim.
+"""DBOS config/bootstrap helpers and pinned DBOS-private shims.
 
 DBOS does not expose public exception classes for workflow start
 races; the private import is deliberately isolated here so every
-caller shares one compatibility point if DBOS renames them.
+caller shares one compatibility point if DBOS renames them. DBOS also
+does not expose its tracer configuration boundary, which is isolated here so
+optional exporter failure cannot swallow unrelated runtime startup failures.
 """
 
 from __future__ import annotations
 
 import os
 from enum import StrEnum
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from dbos import DBOS, DBOSConfig
+from dbos._dbos_config import (
+    process_config,
+    translate_dbos_config_to_config_file,
+)
 from dbos._error import (
     DBOSConflictingWorkflowError,
     DBOSQueueDeduplicatedError,
     DBOSWorkflowConflictIDError,
 )
+from dbos._tracer import dbos_tracer
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
+
+from dr_platform.telemetry import (
+    TelemetryInitializationResult,
+    initialize_telemetry_safely,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 DATABASE_URL_ENV = "DATABASE_URL"
 DBOS_SYSTEM_DATABASE_URL_ENV = "DBOS_SYSTEM_DATABASE_URL"
@@ -148,6 +163,50 @@ def build_dbos_config(
     if config.otlp_traces_endpoints:
         result["otlp_traces_endpoints"] = list(config.otlp_traces_endpoints)
     return result
+
+
+def initialize_dbos_runtime(
+    config: PlatformDbosConfig,
+    *,
+    app_name: str,
+    runtime_initializer: Callable[[DBOSConfig], None] | None = None,
+    telemetry_initializer: Callable[[DBOSConfig], None] | None = None,
+) -> TelemetryInitializationResult:
+    """Construct DBOS and fail open only for enabled OTLP initialization.
+
+    DBOS launch remains application-owned because workflows and queue listeners
+    must be registered between construction and launch. Its database and
+    migration failures are therefore outside this fail-open boundary.
+    """
+    initialize = runtime_initializer or _initialize_dbos_runtime
+    initialize_telemetry = telemetry_initializer or _initialize_dbos_telemetry
+    disabled = config.model_copy(update={"enable_otlp": False})
+    disabled_dbos_config = build_dbos_config(disabled, app_name=app_name)
+
+    # DBOS construction and its config validation are never fail-open.
+    initialize(disabled_dbos_config)
+    if not config.enable_otlp:
+        return TelemetryInitializationResult(enabled=False, healthy=True)
+
+    enabled_dbos_config = build_dbos_config(config, app_name=app_name)
+    result = initialize_telemetry_safely(
+        enabled=True,
+        initializer=lambda: initialize_telemetry(enabled_dbos_config),
+    )
+    if not result.healthy:
+        initialize_telemetry(disabled_dbos_config)
+    return result
+
+
+def _initialize_dbos_runtime(config: DBOSConfig) -> None:
+    DBOS(config=config)
+
+
+def _initialize_dbos_telemetry(config: DBOSConfig) -> None:
+    processed = process_config(
+        data=translate_dbos_config_to_config_file(config), silent=True
+    )
+    dbos_tracer.config(processed)
 
 
 def destroy_dbos_runtime() -> None:

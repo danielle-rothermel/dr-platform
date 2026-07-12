@@ -42,6 +42,7 @@ from dr_platform.status import (
     AttemptExecutionState,
     RetryDisposition,
 )
+from dr_platform.telemetry import TelemetryInitializationResult
 
 if TYPE_CHECKING:
     from dr_platform.cancellation import WorkflowCanceller
@@ -119,6 +120,7 @@ class HealthReport(BaseModel):
     application_version_ambiguous_count: NonNegativeInt
     incomplete_cancellation_count: NonNegativeInt
     incomplete_compensation_count: NonNegativeInt
+    telemetry: TelemetryInitializationResult
     threshold_breaches: tuple[StrictStr, ...]
 
 
@@ -347,6 +349,7 @@ def health_report(  # noqa: PLR0913
     active_age_threshold_seconds: int | None = None,
     queue_health: QueueHealthProbe | None = None,
     workflow_metadata_reader: WorkflowMetadataReader | None = None,
+    telemetry: TelemetryInitializationResult | None = None,
     schema: PlatformSchema | None = None,
 ) -> HealthReport:
     """Return health facts and explicit threshold breaches."""
@@ -557,6 +560,11 @@ def health_report(  # noqa: PLR0913
         application_version_ambiguous_count=application_ambiguous,
         incomplete_cancellation_count=incomplete_cancellation,
         incomplete_compensation_count=incomplete_compensation,
+        telemetry=(
+            telemetry
+            if telemetry is not None
+            else TelemetryInitializationResult(enabled=False, healthy=True)
+        ),
         threshold_breaches=breaches,
     )
 

@@ -25,6 +25,7 @@ from dr_platform.reconciliation_runtime import (
     WorkflowMetadataObservation,
 )
 from dr_platform.status import ServiceClass
+from dr_platform.telemetry import TelemetryInitializationResult
 from tests.test_claims import _register
 
 
@@ -135,9 +136,18 @@ def test_health_and_wait_timeout_retain_authoritative_inspection(
         no_progress_after_seconds=1,
         queued_age_threshold_seconds=1,
         queue_health=_QueueHealth(),
+        telemetry=TelemetryInitializationResult(
+            enabled=True,
+            healthy=False,
+            error_type="RuntimeError",
+            message="OTLP initialization failed",
+        ),
     )
     assert report.queue_configuration_drift_count == 2
     assert report.oldest_queued_age_seconds is not None
+    assert report.telemetry.enabled
+    assert not report.telemetry.healthy
+    assert report.model_dump(mode="json")["telemetry"]["healthy"] is False
 
     calls: list[float] = []
     ticks = iter((now, now + timedelta(seconds=2)))

@@ -39,6 +39,7 @@ from dr_platform.dbos_config import (
     PlatformDbosConfig,
     build_dbos_config,
     build_platform_dbos_config,
+    initialize_dbos_runtime,
 )
 from dr_platform.export import (
     ApplicationSnapshot,
@@ -235,6 +236,7 @@ __all__ = [
     "export",
     "health_report",
     "hold_throttle_delay",
+    "initialize_dbos_runtime",
     "inspect_operation",
     "list_attempts",
     "list_items",
