@@ -181,6 +181,7 @@ def export(
     options: ExportOptions,
     *,
     schema: PlatformSchema | None = None,
+    remote_destinations: Sequence[Any] = (),
 ) -> ExportResult:
     """Capture and publish the seven platform kernel members to local DuckDB.
 
@@ -192,7 +193,7 @@ def export(
     if options.projections and any(
         spec.full_rebuild_builder is not None for spec in options.projections
     ):
-        return _export_application(source, options)
+        return _export_application(source, options, remote_destinations)
     selected = schema or PlatformSchema()
     members = _kernel_specs(selected, options.projections)
     database_path = Path(options.destination_path)
@@ -954,7 +955,7 @@ def _empty_result(
 
 
 def _export_application(
-    source: Engine, options: ExportOptions
+    source: Engine, options: ExportOptions, remote_destinations: Sequence[Any]
 ) -> ExportResult:
     """Publish one application-owned full-rebuild bundle to local DuckDB.
 
@@ -991,20 +992,34 @@ def _export_application(
                         connection, options, token, snapshot_seq, specs, rows
                     )
                 )
+                destinations: list[LocalDestinationResult | PostgresDestinationResult] = [
+                    LocalDestinationResult(
+                        destination_id=options.destination_id,
+                        status=status,
+                        bundle_id=bundle_id,
+                        fencing_token=token,
+                    )
+                ]
+                destinations.extend(
+                    _publish_application_remotes(
+                        remote_destinations,
+                        options,
+                        specs,
+                        rows,
+                        source_name,
+                        captured_at,
+                        snapshot_seq,
+                        counts,
+                        checksums,
+                    )
+                )
                 return ExportResult(
                     source_database=source_name,
                     source_captured_at=captured_at,
                     snapshot_seq=snapshot_seq,
                     member_counts=counts,
                     member_checksums=checksums,
-                    destinations=(
-                        LocalDestinationResult(
-                            destination_id=options.destination_id,
-                            status=status,
-                            bundle_id=bundle_id,
-                            fencing_token=token,
-                        ),
-                    ),
+                    destinations=tuple(destinations),
                 )
             except Exception as exc:
                 _release_lease(connection, options, token)
@@ -1022,6 +1037,144 @@ def _export_application(
                 )
         finally:
             connection.close()
+
+
+def _publish_application_remotes(
+    destinations: Sequence[Any],
+    options: ExportOptions,
+    specs: tuple[ProjectionSpec, ...],
+    rows: Mapping[str, list[dict[str, Any]]],
+    source_name: str,
+    captured_at: datetime,
+    snapshot_seq: int,
+    counts: Mapping[str, int],
+    checksums: Mapping[str, str],
+) -> tuple[PostgresDestinationResult, ...]:
+    """Promote an already captured application bundle to fenced destinations.
+
+    This adapter deliberately knows only the public publication protocol.  It
+    does not name an application, inspect application tables, or re-run a
+    builder: every destination receives the same bounded source coordinates.
+    """
+
+    from dr_platform.publication import (  # noqa: PLC0415 -- import cycle
+        PostgresPublicationFence,
+        RemoteBundleManifest,
+        RemoteBundleMember,
+        SourceCoordinate,
+    )
+
+    results: list[PostgresDestinationResult] = []
+    coordinate = SourceCoordinate(
+        source_id=f"application:{source_name}",
+        database_server=source_name,
+        captured_at=captured_at,
+        snapshot_seq=snapshot_seq,
+    )
+    for fence in destinations:
+        if not isinstance(fence, PostgresPublicationFence):
+            raise TypeError("remote destinations must be PostgresPublicationFence")
+        try:
+            fence.ensure_schema()
+            lease = fence.acquire_lease(
+                bundle_key=options.bundle_key,
+                run_id=options.run_id,
+                lease_seconds=options.lease_seconds,
+            )
+            if lease.disposition == "LEASE_HELD":
+                results.append(
+                    PostgresDestinationResult(
+                        destination_id=fence.destination_id, status="LEASE_HELD"
+                    )
+                )
+                continue
+            assert lease.fencing_token is not None
+
+            def stage(
+                connection: Connection,
+                *,
+                destination: Any = fence,
+                token: int = lease.fencing_token,
+            ) -> Any:
+                members: list[RemoteBundleMember] = []
+                for spec in specs:
+                    table_name = destination.stage_table_name(
+                        member=spec.member,
+                        run_id=options.run_id,
+                        fencing_token=token,
+                        snapshot_seq=snapshot_seq,
+                    )
+                    connection.execute(
+                        text(
+                            f"CREATE TABLE {_pg_identifier(table_name)} ("
+                            + ", ".join(
+                                f"{_pg_identifier(column)} TEXT"
+                                for column in spec.columns
+                            )
+                            + ")"
+                        )
+                    )
+                    if rows[spec.member]:
+                        placeholders = ", ".join(
+                            f":{column}" for column in spec.columns
+                        )
+                        connection.execute(
+                            text(
+                                f"INSERT INTO {_pg_identifier(table_name)} "
+                                f"({', '.join(_pg_identifier(column) for column in spec.columns)}) "
+                                f"VALUES ({placeholders})"
+                            ),
+                            [
+                                {
+                                    column: _application_storage_value(row[column])
+                                    for column in spec.columns
+                                }
+                                for row in rows[spec.member]
+                            ],
+                        )
+                    members.append(
+                        RemoteBundleMember(
+                            member=spec.member,
+                            table_name=table_name,
+                            key_columns=spec.unique_key,
+                            row_count=counts[spec.member],
+                            checksum=checksums[spec.member],
+                        )
+                    )
+                return RemoteBundleManifest(
+                    members=tuple(members), source_families=("application",)
+                )
+
+            promoted = fence.promote(
+                bundle_key=options.bundle_key,
+                run_id=options.run_id,
+                fencing_token=lease.fencing_token,
+                snapshot_seq=snapshot_seq,
+                bundle_id=(
+                    f"application_{snapshot_seq}_{lease.fencing_token}_{options.run_id}"
+                ),
+                cursors={spec.member: snapshot_seq for spec in specs},
+                source_coordinates=(coordinate,),
+                source_families=("application",),
+                stage=stage,
+            )
+            results.append(
+                PostgresDestinationResult(
+                    destination_id=fence.destination_id,
+                    status=promoted.disposition,
+                    bundle_id=promoted.bundle_id,
+                    fencing_token=lease.fencing_token,
+                )
+            )
+        except Exception as exc:
+            results.append(
+                PostgresDestinationResult(
+                    destination_id=fence.destination_id,
+                    status="FAILED",
+                    error=type(exc).__name__,
+                )
+            )
+    return tuple(results)
 
 
 def _application_specs(

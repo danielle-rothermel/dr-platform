@@ -36,6 +36,7 @@ from dr_platform.export import (
     _stage_and_promote,
     capture_dbos_publication_telemetry,
 )
+from dr_platform.publication import PostgresPublicationFence
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
 from tests.contracts.test_platform_v6_cancellation import _register_operation
 
@@ -187,6 +188,64 @@ def test_application_projection_bundle_builds_one_snapshot(
             "WHERE bundle_key = 'application-fixture' ORDER BY member"
         ).fetchall()
     assert members == [("children",), ("roots",)]
+
+
+def test_application_bundle_promotes_and_resolves_remote_fence(
+    pg_engine: Engine, tmp_path
+) -> None:
+    """One public export captures once and independently promotes Postgres."""
+
+    upgrade_platform_schema(str(pg_engine.url))
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE remote_application (id TEXT PRIMARY KEY)")
+        )
+        connection.execute(
+            text("INSERT INTO remote_application VALUES ('root')")
+        )
+
+    def roots(
+        connection: Connection, snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, str], ...]:
+        del snapshot
+        return tuple(
+            {"id": row["id"]}
+            for row in connection.execute(
+                text("SELECT id FROM remote_application")
+            ).mappings()
+        )
+
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id="remote-fixture",
+        table_name="remote_fixture_state",
+    )
+    result = export(
+        pg_engine,
+        ExportOptions(
+            destination_path=str(tmp_path / "remote-local.duckdb"),
+            bundle_key="remote-application",
+            full_rebuild=True,
+            projections=(
+                ProjectionSpec(
+                    member="roots",
+                    columns=("id",),
+                    unique_key=("id",),
+                    full_rebuild_builder=roots,
+                ),
+            ),
+        ),
+        remote_destinations=(fence,),
+    )
+
+    assert [destination.status for destination in result.destinations] == [
+        "PROMOTED",
+        "PROMOTED",
+    ]
+    pin = fence.pin_bundle(bundle_key="remote-application", pin_id="fixture")
+    resolved = fence.resolve_pin(pin)
+    assert resolved.snapshot_seq == result.snapshot_seq
+    assert set(resolved.members) == {"roots"}
 
 
 def test_application_projection_rejects_missing_builder_and_invalid_closure(
