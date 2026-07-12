@@ -15,6 +15,7 @@ from sqlalchemy import (
     null,
     or_,
     select,
+    text,
     update,
 )
 
@@ -223,22 +224,42 @@ def repair_late_enqueue_compensations(
         candidates = [dict(row) for row in rows]
     repaired = 0
     for candidate in candidates:
-        prepared = _prepare_compensation_repair(
-            engine=engine, schema=selected_schema, candidate=candidate
-        )
-        if prepared is None:
-            continue
-        repaired += 1
-        disposition, failure = _perform_compensation_cancel(
-            canceller=canceller, workflow_id=str(candidate["workflow_id"])
-        )
-        _finalize_compensation_repair(
-            engine=engine,
-            schema=selected_schema,
-            candidate=candidate,
-            disposition=disposition,
-            failure=failure,
-        )
+        with engine.connect() as guard:
+            workflow_id = str(candidate["workflow_id"])
+            guard.execute(
+                text(
+                    "SELECT pg_advisory_lock("
+                    "hashtextextended(:workflow_id, 1))"
+                ),
+                {"workflow_id": workflow_id},
+            )
+            guard.commit()
+            try:
+                prepared = _prepare_compensation_repair(
+                    engine=engine, schema=selected_schema, candidate=candidate
+                )
+                if prepared is None:
+                    continue
+                repaired += 1
+                disposition, failure = _perform_compensation_cancel(
+                    canceller=canceller, workflow_id=workflow_id
+                )
+                _finalize_compensation_repair(
+                    engine=engine,
+                    schema=selected_schema,
+                    candidate=candidate,
+                    disposition=disposition,
+                    failure=failure,
+                )
+            finally:
+                guard.execute(
+                    text(
+                        "SELECT pg_advisory_unlock("
+                        "hashtextextended(:workflow_id, 1))"
+                    ),
+                    {"workflow_id": workflow_id},
+                )
+                guard.commit()
     return repaired
 
 
@@ -906,6 +927,42 @@ def _prepare_compensation_repair(
                 )
             if compensation["resolved_at"] is not None:
                 return None
+        resolved_sibling = connection.execute(
+            select(schema.enqueue_compensations.c.cancel_disposition)
+            .where(
+                and_(
+                    schema.enqueue_compensations.c.workflow_id
+                    == candidate["workflow_id"],
+                    schema.enqueue_compensations.c.resolved_at.is_not(None),
+                    schema.enqueue_compensations.c.cancel_disposition.in_(
+                        [
+                            EnqueueCompensationDisposition.CANCELLED.value,
+                            EnqueueCompensationDisposition.OBSERVED_TERMINAL.value,
+                        ]
+                    ),
+                    or_(
+                        schema.enqueue_compensations.c.item_id
+                        != candidate["item_id"],
+                        schema.enqueue_compensations.c.attempt
+                        != candidate["attempt"],
+                        schema.enqueue_compensations.c.claim_id
+                        != candidate["claim_id"],
+                    ),
+                )
+            )
+            .order_by(schema.enqueue_compensations.c.created_at)
+            .limit(1)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if resolved_sibling is not None:
+            _resolve_compensation(
+                connection,
+                schema=schema,
+                candidate=candidate,
+                disposition=EnqueueCompensationDisposition(resolved_sibling),
+                failure=None,
+            )
+            return None
         if _has_other_reference(
             connection,
             schema=schema,

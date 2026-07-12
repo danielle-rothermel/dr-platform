@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import Engine, func, select, update
+from sqlalchemy import Engine, func, insert, select, update
 
 from dr_platform import (
     CancellationConflictError,
@@ -16,6 +16,7 @@ from dr_platform import (
     CancellationRequest,
     PlatformSchema,
     cancel_operation,
+    repair_late_enqueue_compensations,
     upgrade_platform_schema,
 )
 from dr_platform.claims import (
@@ -376,6 +377,78 @@ def test_absent_late_enqueue_hazard_blocks_new_reference(
             operation_key="hazard-link",
             item_keys=("shared",),
         )
+
+
+def test_multiple_compensations_for_one_workflow_converge_without_recancel(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    schema = PlatformSchema()
+    _register_operation(
+        pg_engine,
+        schema,
+        operation_key="multi-compensation",
+        item_keys=("shared",),
+    )
+    claim = claim_pending_attempts(
+        pg_engine,
+        admit_targets=lambda target_refs: None,
+        schema=schema,
+        claim_id_factory=lambda: "first-claim",
+    ).claims[0]
+    start_enqueue_call(
+        pg_engine,
+        item_id=claim.item_id,
+        attempt=claim.attempt,
+        claim_id=claim.claim_id,
+        schema=schema,
+    )
+    canceller = _Canceller()
+    cancel_operation(
+        CancellationRequest(
+            operation_key="multi-compensation",
+            request_id="multi-cancel",
+            requested_by="operator",
+        ),
+        engine=pg_engine,
+        schema=schema,
+        canceller=canceller,
+    )
+    now = datetime.now(tz=UTC)
+    with pg_engine.begin() as connection:
+        connection.execute(
+            insert(schema.enqueue_claims).values(
+                item_id=claim.item_id,
+                attempt=claim.attempt,
+                claim_id="second-claim",
+                workflow_id=claim.workflow_id,
+                enqueue_try=2,
+                claimed_at=now,
+                lease_expires_at=now + timedelta(seconds=60),
+                enqueue_call_started_at=now,
+                disposition="invalidated",
+                invalidated_at=now,
+                invalidated_by="multi-cancel",
+                resolved_at=now,
+                created_at=now,
+            )
+        )
+
+    repair_late_enqueue_compensations(
+        engine=pg_engine,
+        schema=schema,
+        canceller=canceller,
+    )
+
+    with pg_engine.connect() as connection:
+        dispositions = list(
+            connection.scalars(
+                select(schema.enqueue_compensations.c.cancel_disposition)
+                .order_by(schema.enqueue_compensations.c.claim_id)
+            )
+        )
+    assert dispositions == ["cancelled", "cancelled"]
+    assert canceller.calls == [(claim.workflow_id, False)]
 
 
 def test_partial_external_failure_is_durable_and_replay_retries_only_failure(
