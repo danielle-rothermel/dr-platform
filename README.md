@@ -28,6 +28,6 @@ Install the locked environment and run the repository checks:
 ```bash
 uv sync
 uv run ruff check .
-uv run pyright
+uv run ty check
 uv run pytest
 ```

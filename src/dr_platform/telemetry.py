@@ -10,11 +10,16 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 _FORBIDDEN_KEY_PARTS = (
+    "access_token",
+    "api_key",
+    "auth_token",
+    "authorization",
     "credential",
     "database_url",
     "error_payload",
     "output",
     "password",
+    "private_key",
     "prompt",
     "raw_metadata",
     "secret",
@@ -25,6 +30,7 @@ _FORBIDDEN_VALUE_MARKERS = (
     "apikey=",
     "password=",
     "token=",
+    "bearer ",
 )
 
 

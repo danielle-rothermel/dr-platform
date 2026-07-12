@@ -79,6 +79,9 @@ def test_telemetry_attributes_allow_safe_facts_and_reject_payloads() -> None:
         {"platform.prompt": "hello"},
         {"whetstone.output": "answer"},
         {"platform.database_url": "redacted"},
+        {"platform.api_key": "redacted"},
+        {"platform.authorization": "redacted"},
+        {"platform.operation_key": "Bearer secret"},
         {"platform.operation_key": "postgresql://secret"},
         {"other.operation_key": "operation-1"},
     ):
