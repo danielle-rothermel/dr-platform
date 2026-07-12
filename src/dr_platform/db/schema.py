@@ -686,8 +686,7 @@ class PlatformSchema:
                 name=name("ck_claims_invalidation"),
             ),
             CheckConstraint(
-                "(disposition = 'invalidated') "
-                "= (invalidated_at IS NOT NULL)",
+                "(disposition = 'invalidated') = (invalidated_at IS NOT NULL)",
                 name=name("ck_claims_invalidation_disposition"),
             ),
             CheckConstraint(
@@ -695,6 +694,13 @@ class PlatformSchema:
                 "('outcome_recorded', 'expired', 'replaced', 'invalidated')) "
                 "= (resolved_at IS NOT NULL)",
                 name=name("ck_claims_resolution"),
+            ),
+            UniqueConstraint(
+                "item_id",
+                "attempt",
+                "claim_id",
+                "workflow_id",
+                name=name("uq_claims_workflow_provenance"),
             ),
         )
 
@@ -790,11 +796,12 @@ class PlatformSchema:
             Column("resolved_at", DateTime(timezone=True)),
             Column("change_seq", BigInteger, nullable=False),
             ForeignKeyConstraint(
-                ["item_id", "attempt", "claim_id"],
+                ["item_id", "attempt", "claim_id", "workflow_id"],
                 [
                     f"{self.enqueue_claims.name}.item_id",
                     f"{self.enqueue_claims.name}.attempt",
                     f"{self.enqueue_claims.name}.claim_id",
+                    f"{self.enqueue_claims.name}.workflow_id",
                 ],
                 ondelete="RESTRICT",
                 name=name("fk_compensations_claim"),

@@ -240,18 +240,28 @@ def test_claim_and_compensation_keys_are_exact() -> None:
         column.name for column in compensations.primary_key.columns
     )
     assert compensation_primary_key == ("item_id", "attempt", "claim_id")
+    claim_unique_sets = {
+        tuple(_constraint_columns(constraint))
+        for constraint in claims.constraints
+        if constraint.__class__.__name__ == "UniqueConstraint"
+    }
+    assert (
+        "item_id",
+        "attempt",
+        "claim_id",
+        "workflow_id",
+    ) in claim_unique_sets
     claim_foreign_key = next(
         constraint
         for constraint in compensations.foreign_key_constraints
         if _constraint_columns(constraint)
-        == ("item_id", "attempt", "claim_id")
-        and tuple(
-            element.target_fullname for element in constraint.elements
-        )
+        == ("item_id", "attempt", "claim_id", "workflow_id")
+        and tuple(element.target_fullname for element in constraint.elements)
         == (
             f"{PREFIX}_enqueue_claims.item_id",
             f"{PREFIX}_enqueue_claims.attempt",
             f"{PREFIX}_enqueue_claims.claim_id",
+            f"{PREFIX}_enqueue_claims.workflow_id",
         )
     )
     assert claim_foreign_key is not None
@@ -310,7 +320,7 @@ def test_every_change_tracked_table_has_change_sequence_first_index() -> None:
         ), suffix
 
 
-def test_migration_lineage_is_one_fresh_baseline() -> None:
+def test_migration_lineage_has_fresh_baseline_and_p3_provenance() -> None:
     from dr_platform.db import migrate
 
     versions_dir = (
@@ -322,7 +332,10 @@ def test_migration_lineage_is_one_fresh_baseline() -> None:
         if path.name != "__init__.py"
     )
 
-    assert versions == ["0001_platform_baseline.py"]
+    assert versions == [
+        "0001_platform_baseline.py",
+        "0002_claim_workflow_provenance.py",
+    ]
     assert not hasattr(migrate, "stamp_platform_schema")
     assert not hasattr(dr_platform, "stamp_platform_schema")
     upgrade_parameters = inspect.signature(

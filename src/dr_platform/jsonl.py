@@ -31,6 +31,11 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from dr_platform.db import PlatformSchema
+    from dr_platform.enqueue_runtime import (
+        PhysicalEnqueueAdapter,
+        QueueLookup,
+        WorkflowObserver,
+    )
     from dr_platform.items import SubmittableItem
     from dr_platform.manifests import OperationManifest
     from dr_platform.targets import ExecutionTarget, TargetResolver
@@ -285,6 +290,9 @@ def submit_jsonl(  # noqa: PLR0913 -- explicit public facade contract
     options: SubmitOptions | None = None,
     source_application_version: str = "unknown",
     schema: PlatformSchema | None = None,
+    queue_lookup: QueueLookup | None = None,
+    enqueue_adapter: PhysicalEnqueueAdapter | None = None,
+    workflow_observer: WorkflowObserver | None = None,
 ) -> SubmitResult:
     """Submit a fresh JSONL read through the sole registration pipeline."""
     selected_options = options or SubmitOptions(page_size=manifest.page_size)
@@ -307,6 +315,9 @@ def submit_jsonl(  # noqa: PLR0913 -- explicit public facade contract
         options=selected_options,
         source_application_version=source_application_version,
         schema=schema,
+        queue_lookup=queue_lookup,
+        enqueue_adapter=enqueue_adapter,
+        workflow_observer=workflow_observer,
     )
 
 
