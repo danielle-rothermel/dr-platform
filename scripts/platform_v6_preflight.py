@@ -30,6 +30,7 @@ DEFAULT_MOTHERDUCK_USER = "postgres"
 DEFAULT_SAMPLE_COUNT = 100
 MAX_CAPTURE_SKEW_CAP_MS = 5_000
 BOUND_INCREMENT_MS = 100
+PINNED_MAX_CAPTURE_SKEW_MS = 100
 PROJECT_HASH_LENGTH = 12
 TEMP_SCHEMA_PREFIX = "platform_v6_preflight"
 PUBLISHED_PROBE_VALUE = 42
@@ -44,13 +45,20 @@ class ProviderKind(StrEnum):
     POSTGRES = "postgres"
 
 
+class EndpointRelationship(StrEnum):
+    SAME_ENDPOINT_FALLBACK = "same-endpoint-fallback"
+    SAME_ENDPOINT_EXPLICIT = "same-endpoint-explicit"
+    DISTINCT_ENDPOINTS = "distinct-endpoints"
+
+
 class FencingProbeResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     provider: ProviderKind
     project_hash: str
     renewal_cas: bool
-    stale_writer_rejected: bool
+    current_promotion_succeeded: bool
+    stale_promotion_rejected: bool
     atomic_bundle_pointer: bool
     independent_writer_connections: bool
 
@@ -67,6 +75,15 @@ class CaptureSkewResult(BaseModel):
     cap_exceeded: bool
     system_url_fell_back_to_application: bool
     raw_skew_ms: tuple[float, ...]
+
+
+class CaptureSkewVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    identity_matches: bool
+    relationship_matches: bool
+    configured_bound_matches: bool
+    measured_within_bound: bool
 
 
 class ParityViewModel(BaseModel):
@@ -165,9 +182,23 @@ def run_fencing_probe(engine: Engine) -> FencingProbeResult:
                 text(
                     f'INSERT INTO "{schema}".lease '
                     "(destination, owner, fencing_token, expires_at) "
-                    "VALUES ('analysis', :owner, :token, CURRENT_TIMESTAMP)"
+                    "VALUES ('analysis', :owner, :token, "
+                    "CURRENT_TIMESTAMP + INTERVAL '5 minutes')"
                 ),
                 {"owner": owner, "token": token},
+            )
+            connection.execute(
+                text(
+                    f'INSERT INTO "{schema}".bundle (bundle_id, value) '
+                    "VALUES ('bundle-0', 0)"
+                )
+            )
+            connection.execute(
+                text(
+                    f'INSERT INTO "{schema}".pointer '
+                    "(destination, bundle_id) "
+                    "VALUES ('analysis', 'bundle-0')"
+                )
             )
 
         with (
@@ -182,21 +213,13 @@ def run_fencing_probe(engine: Engine) -> FencingProbeResult:
                 renewal = owner_connection.execute(
                     text(
                         f'UPDATE "{schema}".lease '
-                        "SET expires_at = CURRENT_TIMESTAMP "
+                        "SET expires_at = CURRENT_TIMESTAMP + "
+                        "INTERVAL '5 minutes' "
                         "WHERE destination = 'analysis' AND owner = :owner "
-                        "AND fencing_token = :token"
+                        "AND fencing_token = :token "
+                        "AND expires_at > CURRENT_TIMESTAMP"
                     ),
                     {"owner": owner, "token": token},
-                ).rowcount
-            with stale_connection.begin():
-                stale = stale_connection.execute(
-                    text(
-                        f'UPDATE "{schema}".lease '
-                        "SET expires_at = CURRENT_TIMESTAMP "
-                        "WHERE destination = 'analysis' AND owner = :owner "
-                        "AND fencing_token = :token"
-                    ),
-                    {"owner": owner, "token": token - 1},
                 ).rowcount
             with owner_connection.begin():
                 owner_connection.execute(
@@ -205,13 +228,43 @@ def run_fencing_probe(engine: Engine) -> FencingProbeResult:
                         "VALUES ('bundle-1', 42)"
                     )
                 )
-                owner_connection.execute(
+                current_promotion = owner_connection.execute(
                     text(
-                        f'INSERT INTO "{schema}".pointer '
-                        "(destination, bundle_id) "
-                        "VALUES ('analysis', 'bundle-1')"
+                        f'UPDATE "{schema}".pointer AS pointer '
+                        "SET bundle_id = 'bundle-1' "
+                        "WHERE pointer.destination = 'analysis' "
+                        "AND pointer.bundle_id = 'bundle-0' AND EXISTS ("
+                        f'SELECT 1 FROM "{schema}".lease AS lease '
+                        "WHERE lease.destination = pointer.destination "
+                        "AND lease.owner = :owner "
+                        "AND lease.fencing_token = :token "
+                        "AND lease.expires_at > CURRENT_TIMESTAMP) "
+                        "RETURNING pointer.bundle_id"
+                    ),
+                    {"owner": owner, "token": token},
+                ).one_or_none()
+            with stale_connection.begin():
+                stale_connection.execute(
+                    text(
+                        f'INSERT INTO "{schema}".bundle (bundle_id, value) '
+                        "VALUES ('bundle-stale', -1)"
                     )
                 )
+                stale_promotion = stale_connection.execute(
+                    text(
+                        f'UPDATE "{schema}".pointer AS pointer '
+                        "SET bundle_id = 'bundle-stale' "
+                        "WHERE pointer.destination = 'analysis' "
+                        "AND pointer.bundle_id = 'bundle-1' AND EXISTS ("
+                        f'SELECT 1 FROM "{schema}".lease AS lease '
+                        "WHERE lease.destination = pointer.destination "
+                        "AND lease.owner = :owner "
+                        "AND lease.fencing_token = :token "
+                        "AND lease.expires_at > CURRENT_TIMESTAMP) "
+                        "RETURNING pointer.bundle_id"
+                    ),
+                    {"owner": owner, "token": token - 1},
+                ).one_or_none()
             published = stale_connection.execute(
                 text(
                     f'SELECT b.value FROM "{schema}".pointer p '
@@ -223,7 +276,8 @@ def run_fencing_probe(engine: Engine) -> FencingProbeResult:
             provider=provider_kind(engine),
             project_hash=project_hash(engine),
             renewal_cas=renewal == 1,
-            stale_writer_rejected=stale == 0,
+            current_promotion_succeeded=current_promotion == ("bundle-1",),
+            stale_promotion_rejected=stale_promotion is None,
             atomic_bundle_pointer=published == PUBLISHED_PROBE_VALUE,
             independent_writer_connections=independent_writer_connections,
         )
@@ -278,30 +332,38 @@ def run_motherduck_fencing_probe(token_env: str) -> FencingProbeResult:
                 schema_sql(
                     "INSERT INTO {schema}.lease "
                     "(destination, owner, fencing_token, expires_at) "
-                    "VALUES ('analysis', %s, %s, CURRENT_TIMESTAMP)",
+                    "VALUES ('analysis', %s, %s, "
+                    "CURRENT_TIMESTAMP + INTERVAL '5 minutes')",
                     schema,
                 ),
                 (owner, token),
             )
+            owner_connection.execute(
+                schema_sql(
+                    "INSERT INTO {schema}.bundle (bundle_id, value) "
+                    "VALUES ('bundle-0', 0)",
+                    schema,
+                )
+            )
+            owner_connection.execute(
+                schema_sql(
+                    "INSERT INTO {schema}.pointer (destination, bundle_id) "
+                    "VALUES ('analysis', 'bundle-0')",
+                    schema,
+                )
+            )
             renewal = owner_connection.execute(
                 schema_sql(
                     "UPDATE {schema}.lease "
-                    "SET expires_at = CURRENT_TIMESTAMP "
+                    "SET expires_at = CURRENT_TIMESTAMP + "
+                    "INTERVAL '5 minutes' "
                     "WHERE destination = 'analysis' AND owner = %s "
-                    "AND fencing_token = %s RETURNING fencing_token",
+                    "AND fencing_token = %s "
+                    "AND expires_at > CURRENT_TIMESTAMP "
+                    "RETURNING fencing_token",
                     schema,
                 ),
                 (owner, token),
-            ).fetchall()
-            stale = stale_connection.execute(
-                schema_sql(
-                    "UPDATE {schema}.lease "
-                    "SET expires_at = CURRENT_TIMESTAMP "
-                    "WHERE destination = 'analysis' AND owner = %s "
-                    "AND fencing_token = %s RETURNING fencing_token",
-                    schema,
-                ),
-                (owner, token - 1),
             ).fetchall()
             with owner_connection.transaction():
                 owner_connection.execute(
@@ -311,14 +373,44 @@ def run_motherduck_fencing_probe(token_env: str) -> FencingProbeResult:
                         schema,
                     )
                 )
-                owner_connection.execute(
+                current_promotion = owner_connection.execute(
                     schema_sql(
-                        "INSERT INTO {schema}.pointer "
-                        "(destination, bundle_id) "
-                        "VALUES ('analysis', 'bundle-1')",
+                        "UPDATE {schema}.pointer AS pointer "
+                        "SET bundle_id = 'bundle-1' "
+                        "WHERE pointer.destination = 'analysis' "
+                        "AND pointer.bundle_id = 'bundle-0' AND EXISTS ("
+                        "SELECT 1 FROM {schema}.lease AS lease "
+                        "WHERE lease.destination = pointer.destination "
+                        "AND lease.owner = %s AND lease.fencing_token = %s "
+                        "AND lease.expires_at > CURRENT_TIMESTAMP) "
+                        "RETURNING pointer.bundle_id",
+                        schema,
+                    ),
+                    (owner, token),
+                ).fetchall()
+            with stale_connection.transaction():
+                stale_connection.execute(
+                    schema_sql(
+                        "INSERT INTO {schema}.bundle (bundle_id, value) "
+                        "VALUES ('bundle-stale', -1)",
                         schema,
                     )
                 )
+                stale_promotion = stale_connection.execute(
+                    schema_sql(
+                        "UPDATE {schema}.pointer AS pointer "
+                        "SET bundle_id = 'bundle-stale' "
+                        "WHERE pointer.destination = 'analysis' "
+                        "AND pointer.bundle_id = 'bundle-1' AND EXISTS ("
+                        "SELECT 1 FROM {schema}.lease AS lease "
+                        "WHERE lease.destination = pointer.destination "
+                        "AND lease.owner = %s AND lease.fencing_token = %s "
+                        "AND lease.expires_at > CURRENT_TIMESTAMP) "
+                        "RETURNING pointer.bundle_id",
+                        schema,
+                    ),
+                    (owner, token - 1),
+                ).fetchall()
             published = stale_connection.execute(
                 schema_sql(
                     "SELECT b.value FROM {schema}.pointer p "
@@ -334,7 +426,9 @@ def run_motherduck_fencing_probe(token_env: str) -> FencingProbeResult:
                     :PROJECT_HASH_LENGTH
                 ],
                 renewal_cas=renewal == [(token,)],
-                stale_writer_rejected=stale == [],
+                current_promotion_succeeded=current_promotion
+                == [("bundle-1",)],
+                stale_promotion_rejected=stale_promotion == [],
                 atomic_bundle_pointer=published[0] == PUBLISHED_PROBE_VALUE,
                 independent_writer_connections=independent_writer_connections,
             )
@@ -407,13 +501,52 @@ def measure_capture_skew(
     )
 
 
+def endpoint_relationship(result: CaptureSkewResult) -> EndpointRelationship:
+    if result.application_project_hash != result.system_project_hash:
+        return EndpointRelationship.DISTINCT_ENDPOINTS
+    if result.system_url_fell_back_to_application:
+        return EndpointRelationship.SAME_ENDPOINT_FALLBACK
+    return EndpointRelationship.SAME_ENDPOINT_EXPLICIT
+
+
+def verify_capture_skew_result(
+    result: CaptureSkewResult,
+    *,
+    expected_application_project_hash: str,
+    expected_system_project_hash: str,
+    expected_relationship: EndpointRelationship,
+    configured_max_capture_skew_ms: int,
+) -> CaptureSkewVerification:
+    return CaptureSkewVerification(
+        identity_matches=(
+            result.application_project_hash
+            == expected_application_project_hash
+            and result.system_project_hash == expected_system_project_hash
+        ),
+        relationship_matches=(
+            endpoint_relationship(result) == expected_relationship
+        ),
+        configured_bound_matches=(
+            configured_max_capture_skew_ms == PINNED_MAX_CAPTURE_SKEW_MS
+            and result.max_capture_skew_ms == PINNED_MAX_CAPTURE_SKEW_MS
+        ),
+        measured_within_bound=(
+            result.p99_skew_ms <= PINNED_MAX_CAPTURE_SKEW_MS
+        ),
+    )
+
+
 def render_fencing(result: FencingProbeResult) -> None:
     typer.echo(f"provider={result.provider}")
     typer.echo(f"project_hash={result.project_hash}")
     typer.echo(f"renewal_cas={'PASS' if result.renewal_cas else 'FAIL'}")
     typer.echo(
-        "stale_writer_rejected="
-        f"{'PASS' if result.stale_writer_rejected else 'FAIL'}"
+        "current_promotion_succeeded="
+        f"{'PASS' if result.current_promotion_succeeded else 'FAIL'}"
+    )
+    typer.echo(
+        "stale_promotion_rejected="
+        f"{'PASS' if result.stale_promotion_rejected else 'FAIL'}"
     )
     typer.echo(
         "atomic_bundle_pointer="
@@ -425,7 +558,8 @@ def render_fencing(result: FencingProbeResult) -> None:
     )
     if not (
         result.renewal_cas
-        and result.stale_writer_rejected
+        and result.current_promotion_succeeded
+        and result.stale_promotion_rejected
         and result.atomic_bundle_pointer
         and result.independent_writer_connections
     ):
@@ -551,7 +685,57 @@ def capture_skew(
         "raw_skew_ms="
         + ",".join(f"{sample:.3f}" for sample in result.raw_skew_ms)
     )
-    if result.cap_exceeded:
+
+
+@app.command("verify-capture-skew")
+def verify_capture_skew(
+    expected_application_project_hash: Annotated[str, typer.Option()],
+    expected_system_project_hash: Annotated[str, typer.Option()],
+    expected_relationship: Annotated[
+        EndpointRelationship, typer.Option()
+    ] = EndpointRelationship.SAME_ENDPOINT_FALLBACK,
+    configured_max_capture_skew_ms: Annotated[
+        int, typer.Option(min=0)
+    ] = PINNED_MAX_CAPTURE_SKEW_MS,
+    sample_count: Annotated[int, typer.Option(min=1)] = DEFAULT_SAMPLE_COUNT,
+) -> None:
+    """Verify the pinned endpoint topology and 100 ms capture-skew contract."""
+    application_url = require_environment("DATABASE_URL")
+    system_url = os.environ.get("DBOS_SYSTEM_DATABASE_URL")
+    fell_back = system_url is None
+    if system_url is None:
+        system_url = application_url
+    application_engine = create_engine(
+        normalize_postgresql_driver_url(application_url)
+    )
+    system_engine = create_engine(normalize_postgresql_driver_url(system_url))
+    try:
+        result = measure_capture_skew(
+            application_engine,
+            system_engine,
+            sample_count=sample_count,
+            system_url_fell_back_to_application=fell_back,
+        )
+    finally:
+        application_engine.dispose()
+        system_engine.dispose()
+
+    verification = verify_capture_skew_result(
+        result,
+        expected_application_project_hash=expected_application_project_hash,
+        expected_system_project_hash=expected_system_project_hash,
+        expected_relationship=expected_relationship,
+        configured_max_capture_skew_ms=configured_max_capture_skew_ms,
+    )
+    typer.echo(f"application_project_hash={result.application_project_hash}")
+    typer.echo(f"system_project_hash={result.system_project_hash}")
+    typer.echo(f"relationship={endpoint_relationship(result)}")
+    typer.echo(f"sample_count={result.sample_count}")
+    typer.echo(f"p99_skew_ms={result.p99_skew_ms:.3f}")
+    typer.echo(f"pinned_max_capture_skew_ms={PINNED_MAX_CAPTURE_SKEW_MS}")
+    for field, passed in verification.model_dump().items():
+        typer.echo(f"{field}={'PASS' if passed else 'FAIL'}")
+    if not all(verification.model_dump().values()):
         raise typer.Exit(code=2)
 
 

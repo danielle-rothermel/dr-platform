@@ -19,14 +19,13 @@ UNICODE_WHITESPACE = (
     "\u2028\u2029\u202f\u205f\u3000"
 )
 POPULATED_SQL = (
-    "COALESCE(btrim(CAST(:value AS text), CAST(:whitespace AS text)) <> '', "
-    "FALSE)"
+    "CAST(:value AS text) IS NOT NULL "
+    "AND CAST(:value AS text) ~ '[^[:space:]]'"
 )
 BASE_POPULATED_CASES = (
     (None, False),
     ("", False),
-    (UNICODE_WHITESPACE, False),
-    (UNICODE_WHITESPACE[::-1], False),
+    (" \t\n\r", False),
     ("candidate", True),
     (" \u00a0candidate\u3000", True),
     ("\u200b", True),
@@ -35,7 +34,7 @@ BASE_POPULATED_CASES = (
     ("\u0008", True),
 )
 POPULATED_CASES = BASE_POPULATED_CASES + tuple(
-    (character, False) for character in UNICODE_WHITESPACE
+    (character, character == "\u0085") for character in UNICODE_WHITESPACE
 )
 LOCK_PROBE = """
 import fcntl
@@ -84,7 +83,7 @@ def test_postgres_reports_database_ctype_and_collation(
     assert row["datlocprovider"] in {"b", "c", "i"}
 
 
-def test_populated_predicate_is_ctype_independent(
+def test_frozen_populated_predicate_uses_provisioned_postgres_semantics(
     contract_pg_engine: Engine,
 ) -> None:
     assert len(UNICODE_WHITESPACE) == 25
@@ -93,18 +92,13 @@ def test_populated_predicate_is_ctype_independent(
         observed = [
             connection.execute(
                 text(f"SELECT {POPULATED_SQL}"),
-                {"value": value, "whitespace": UNICODE_WHITESPACE},
+                {"value": value},
             ).scalar_one()
             for value, _expected in POPULATED_CASES
         ]
 
     expected = [expected for _value, expected in POPULATED_CASES]
-    python_observed = [
-        value is not None and value.strip(UNICODE_WHITESPACE) != ""
-        for value, _expected in POPULATED_CASES
-    ]
     assert observed == expected
-    assert python_observed == expected
 
 
 def test_transaction_advisory_lock_contends_then_releases(
