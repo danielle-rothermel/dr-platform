@@ -24,6 +24,7 @@ from dr_platform.db import PlatformSchema
 from dr_platform.reconciliation_runtime import (
     DbosStepObservation,
     ReconcileOptions,
+    WorkflowMetadataDisposition,
     reconcile,
 )
 from dr_platform.records import (
@@ -35,6 +36,7 @@ from dr_platform.records import (
     OperationRecord,
 )
 from dr_platform.status import (
+    CONFIRMED_ENQUEUE_STATES,
     TERMINAL_OPERATION_STATUSES,
     AttemptEnqueueState,
     AttemptExecutionState,
@@ -48,7 +50,10 @@ if TYPE_CHECKING:
         QueueLookup,
         WorkflowObserver,
     )
-    from dr_platform.reconciliation_runtime import LifecycleObservationReader
+    from dr_platform.reconciliation_runtime import (
+        LifecycleObservationReader,
+        WorkflowMetadataReader,
+    )
     from dr_platform.targets import TargetResolver
 
 NonEmptyStr = Annotated[StrictStr, Field(min_length=1)]
@@ -110,6 +115,8 @@ class HealthReport(BaseModel):
     queue_priority_drift_count: NonNegativeInt
     queue_configuration_drift_count: NonNegativeInt | None
     application_version_mismatch_count: NonNegativeInt
+    application_version_unavailable_count: NonNegativeInt
+    application_version_ambiguous_count: NonNegativeInt
     incomplete_cancellation_count: NonNegativeInt
     incomplete_compensation_count: NonNegativeInt
     threshold_breaches: tuple[StrictStr, ...]
@@ -339,6 +346,7 @@ def health_report(  # noqa: PLR0913
     queued_age_threshold_seconds: int | None = None,
     active_age_threshold_seconds: int | None = None,
     queue_health: QueueHealthProbe | None = None,
+    workflow_metadata_reader: WorkflowMetadataReader | None = None,
     schema: PlatformSchema | None = None,
 ) -> HealthReport:
     """Return health facts and explicit threshold breaches."""
@@ -475,28 +483,19 @@ def health_report(  # noqa: PLR0913
                 ),
             )
         )
-        application_mismatch = _count(
-            connection,
-            select(func.count())
-            .select_from(operations)
-            .where(
+        version_references = tuple(
+            connection.execute(
                 select(
-                    func.count(
-                        func.distinct(attempts.c.source_application_version)
+                    attempts.c.workflow_id,
+                    attempts.c.source_application_version,
+                ).where(
+                    attempts.c.enqueue_state.in_(
+                        tuple(
+                            state.value for state in CONFIRMED_ENQUEUE_STATES
+                        )
                     )
                 )
-                .select_from(attempts)
-                .join(
-                    selected.items,
-                    selected.items.c.item_id == attempts.c.item_id,
-                )
-                .where(
-                    selected.items.c.operation_key
-                    == operations.c.operation_key
-                )
-                .scalar_subquery()
-                > 1
-            ),
+            )
         )
         incomplete_cancellation = incomplete_cancellation_count(
             connection, schema=selected
@@ -504,6 +503,26 @@ def health_report(  # noqa: PLR0913
         incomplete_compensation = incomplete_compensation_count(
             connection, schema=selected
         )
+    application_mismatch = 0
+    application_unavailable = 0
+    application_ambiguous = 0
+    metadata_by_workflow = {}
+    for workflow_id, expected_version in version_references:
+        metadata = metadata_by_workflow.get(workflow_id)
+        if metadata is None and workflow_metadata_reader is not None:
+            metadata = workflow_metadata_reader.read_workflow_metadata(
+                workflow_id=workflow_id
+            )
+            metadata_by_workflow[workflow_id] = metadata
+        if metadata is None or (
+            metadata.disposition is WorkflowMetadataDisposition.UNAVAILABLE
+        ):
+            application_unavailable += 1
+        elif metadata.disposition is WorkflowMetadataDisposition.AMBIGUOUS:
+            application_ambiguous += 1
+        elif metadata.application_version != expected_version:
+            application_mismatch += 1
+
     queued_age = _age_seconds(now, queued_start)
     active_age = _age_seconds(now, active_start)
     breaches = _health_breaches(
@@ -534,6 +553,8 @@ def health_report(  # noqa: PLR0913
             else queue_health.configuration_drift_count()
         ),
         application_version_mismatch_count=application_mismatch,
+        application_version_unavailable_count=application_unavailable,
+        application_version_ambiguous_count=application_ambiguous,
         incomplete_cancellation_count=incomplete_cancellation,
         incomplete_compensation_count=incomplete_compensation,
         threshold_breaches=breaches,

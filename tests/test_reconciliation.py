@@ -595,7 +595,14 @@ def test_terminal_missing_candidate_is_loaded_but_not_rewritten(
     assert candidates[0].attempt.execution_state.value == "missing"
     assert result.changed_count == 0
     assert uncertain_result.changed_count == 0
-    assert marker_after_uncertain == marker_before_uncertain
+    assert (
+        marker_after_uncertain["observation_count"]
+        == marker_before_uncertain["observation_count"] + 1
+    )
+    assert (
+        marker_after_uncertain["last_reobserved_at"]
+        >= marker_before_uncertain["last_reobserved_at"]
+    )
 
 
 def test_terminal_missing_cannot_starve_later_actionable_attempt(

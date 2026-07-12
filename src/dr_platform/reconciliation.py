@@ -809,7 +809,6 @@ def _apply_one_observation(  # noqa: PLR0911,PLR0912,PLR0913,PLR0915
             if (
                 attempt["execution_state"]
                 == AttemptExecutionState.MISSING.value
-                and observation.disposition.value != "uncertain"
             ):
                 _record_missing_reobservation(
                     connection,

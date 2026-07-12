@@ -444,9 +444,16 @@ def test_terminal_missing_reobservation_rotates_oldest_without_rewrite(
         apply_reconciliation_observations(
             pg_engine,
             observations={
-                selected[0].attempt.workflow_id: _observation(
-                    selected[0].attempt.workflow_id,
-                    ReconciliationObservationDisposition.SUCCEEDED,
+                selected[0].attempt.workflow_id: ReconciliationObservation(
+                    workflow_id=selected[0].attempt.workflow_id,
+                    disposition=(
+                        ReconciliationObservationDisposition.UNCERTAIN
+                    ),
+                    failure=FailureSnapshot(
+                        failure_class=FailureClass.UNKNOWN,
+                        error_type="DbosWorkflowLookupUnavailable",
+                        message="authoritative lookup unavailable",
+                    ),
                 )
             },
             resolver=registry,
@@ -582,7 +589,6 @@ def test_ambiguous_lookup_is_uncertain_and_does_not_mutate(
         cast("Any", AmbiguousDbosClient())
     ).observe(
         workflow_id=workflow_id,
-        classify_error=lambda error: _failure(FailureClass.TRANSIENT),
     )
 
     result = apply_reconciliation_observations(
