@@ -6,7 +6,7 @@ Every risk starts open. A risk closes only when the owning PR links its executab
 | --- | --- | --- | --- |
 | A1 — authorized `PARTIAL` acceptance | W4-W5 | Truthful selected-partial-policy state, immutable authorization and digest, exact run/Attempt proof, provenance, promotion/current-read fixtures. | Open |
 | A2 — delayed enqueue after `NO_WORKFLOW_FOUND` | P3-P5 | Late-enqueue successor/escalation, periodic re-observation, claimant-success path, exclusivity re-check, blocked-enqueue delayed-commit fixture. | Open |
-| A3 — independent application/DBOS source cuts | P0, P7, W7 | Truthful coordinates/timestamps, deterministic bound, transition-between-captures fixture, measured skew, fail-closed outcomes. | Open |
-| L1 — exact populated-only predicate | P0, W3 | Pinned database character semantics, one ctype-independent boundary, aligned Python behavior, ASCII and non-ASCII corpus. | Open |
+| A3 — independent application/DBOS source cuts | P0, P7, W7 | Truthful coordinates/timestamps, deterministic bound, transition-between-captures fixture, measured skew, fail-closed outcomes. | P0 same-endpoint/separate-schema topology pinned and measured; open through P7/W7 verification. |
+| L1 — exact populated-only predicate | P0, W3 | Pinned database character semantics, one ctype-independent boundary, aligned Python behavior, ASCII and non-ASCII corpus. | P0 closed 25-code-point set pinned; open through W3 adoption. |
 | L2 — plural membership versus accepted run | W3-W5 | Complete eligible Manifest membership, separately derived pinned winner, `SUPERSEDED_GENERATION` provenance. | Open |
 | V1 — pinned-bundle survival or typed loss | P7, W7 | Active-pin retention, cleanup race, integrity loss, `PINNED_BUNDLE_GONE`, explicit COPRO restart. | Open |

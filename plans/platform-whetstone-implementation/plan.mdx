@@ -96,6 +96,8 @@ No production implementation slice begins until Phase 0 is green.
    - Unitbench Node runtime, server-only `DATABASE_URL`/`ANALYSIS_DATABASE_URL`, independent missing-secret behavior, no native DuckDB in the Vercel bundle, and same-fixture local-versus-deployed query parity.
 5. Record provider/project identifiers without secrets. Any infeasible contract blocks the entire production stack before P1.
 
+Phase 0 is a feasibility gate over installed contracts, live provider primitives, secret/runtime boundaries, and representative same-query/view-model probes. It does not require the production adapters or export path to exist before P1; their full end-to-end parity remains the owning U1/U2/U5 and P7 exit gate. For this implementation, application and DBOS system data use the same configured Postgres endpoint through independent connections and separate schemas. Phase 0 pins that topology and its measured bound; P7 repeats the measurement as verification. Changing the endpoint topology or bound is a reviewed configuration-contract change.
+
 ## Open v6 risk register
 
 The checked-in risk register starts open and closes only with linked matrix rows, implementation decisions, focused tests, runtime observability/escalation, and a fresh-agent review checkpoint.
