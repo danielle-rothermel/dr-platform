@@ -1135,7 +1135,9 @@ def _refresh_operation_lifecycle(
         connection.execute(
             select(
                 schema.item_attempts.c.enqueue_state,
+                schema.item_attempts.c.enqueue_try,
                 schema.item_attempts.c.execution_state,
+                schema.item_attempts.c.failure,
             )
             .select_from(schema.items)
             .join(
@@ -1155,6 +1157,21 @@ def _refresh_operation_lifecycle(
     enqueue_states = [
         AttemptEnqueueState(row["enqueue_state"]) for row in rows
     ]
+    retry_policy = RetryPolicy.model_validate(
+        connection.execute(
+            select(schema.operations.c.retry_policy).where(
+                schema.operations.c.operation_key == operation_key
+            )
+        ).scalar_one()
+    )
+    retryable_enqueue_errors = [
+        enqueue_state is AttemptEnqueueState.ENQUEUE_ERROR
+        and row["enqueue_try"] < retry_policy.max_enqueue_tries
+        and row["failure"] is not None
+        and row["failure"].get("failure_class")
+        in retry_policy.retryable_failure_classes
+        for enqueue_state, row in zip(enqueue_states, rows, strict=True)
+    ]
     enqueued = enqueue_states.count(AttemptEnqueueState.ENQUEUED)
     workflow_already_present = enqueue_states.count(
         AttemptEnqueueState.WORKFLOW_ALREADY_PRESENT
@@ -1163,21 +1180,38 @@ def _refresh_operation_lifecycle(
     succeeded = execution_states.count(AttemptExecutionState.SUCCEEDED)
     cancelled = execution_states.count(AttemptExecutionState.CANCELLED)
     terminal_failed = sum(
-        state
+        execution_state
         in {
             AttemptExecutionState.ERROR,
             AttemptExecutionState.RECOVERY_EXHAUSTED,
             AttemptExecutionState.MISSING,
         }
-        for state in execution_states
+        or (
+            enqueue_state is AttemptEnqueueState.ENQUEUE_ERROR
+            and not retryable_enqueue_error
+        )
+        for execution_state, enqueue_state, retryable_enqueue_error in zip(
+            execution_states,
+            enqueue_states,
+            retryable_enqueue_errors,
+            strict=True,
+        )
     )
     active = sum(
-        state not in TERMINAL_EXECUTION_STATES for state in execution_states
+        enqueue_state
+        in {
+            AttemptEnqueueState.ENQUEUED,
+            AttemptEnqueueState.WORKFLOW_ALREADY_PRESENT,
+        }
+        and execution_state not in TERMINAL_EXECUTION_STATES
+        for execution_state, enqueue_state in zip(
+            execution_states, enqueue_states, strict=True
+        )
     )
     if any(
         state in {AttemptEnqueueState.PENDING, AttemptEnqueueState.CLAIMING}
         for state in enqueue_states
-    ):
+    ) or any(retryable_enqueue_errors):
         status = OperationStatus.ENQUEUEING
     elif active:
         status = OperationStatus.RUNNING

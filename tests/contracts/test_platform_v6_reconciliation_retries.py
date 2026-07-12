@@ -607,11 +607,16 @@ def test_ambiguous_lookup_is_uncertain_and_does_not_mutate(
 
 
 @pytest.mark.parametrize(
-    ("enqueue_try", "failure_class", "expected_state"),
+    (
+        "enqueue_try",
+        "failure_class",
+        "expected_state",
+        "expected_operation_status",
+    ),
     [
-        (2, FailureClass.TRANSIENT, "pending"),
-        (3, FailureClass.TRANSIENT, "enqueue_error"),
-        (1, FailureClass.PERMANENT, "enqueue_error"),
+        (2, FailureClass.TRANSIENT, "pending", "enqueuing"),
+        (3, FailureClass.TRANSIENT, "enqueue_error", None),
+        (1, FailureClass.PERMANENT, "enqueue_error", None),
     ],
 )
 def test_enqueue_retry_reuses_attempt_and_respects_bound(
@@ -619,6 +624,7 @@ def test_enqueue_retry_reuses_attempt_and_respects_bound(
     enqueue_try: int,
     failure_class: FailureClass,
     expected_state: str,
+    expected_operation_status: str | None,
 ) -> None:
     schema, target = _register(
         pg_engine,
@@ -662,6 +668,55 @@ def test_enqueue_retry_reuses_attempt_and_respects_bound(
     )
     assert operation.enqueued_count == 0
     assert operation.workflow_already_present_count == 0
+    if expected_operation_status is not None:
+        assert operation.status == expected_operation_status
+
+
+def test_success_with_permanent_enqueue_failure_is_partial(
+    pg_engine: Engine,
+) -> None:
+    schema, target = _register(
+        pg_engine,
+        service_classes=(ServiceClass.STANDARD,) * 2,
+    )
+    item_ids = _item_ids(pg_engine, schema)
+    succeeded_id, failed_id = item_ids
+    _confirm_enqueued(pg_engine, schema, item_ids=(succeeded_id,))
+    with pg_engine.begin() as connection:
+        connection.execute(
+            update(schema.item_attempts)
+            .where(schema.item_attempts.c.item_id == failed_id)
+            .values(
+                enqueue_state="enqueue_error",
+                enqueue_try=1,
+                failure=_failure(FailureClass.PERMANENT).model_dump(
+                    mode="json"
+                ),
+                updated_at=text("clock_timestamp()"),
+            )
+        )
+    workflow_id = _workflow_id(pg_engine, schema, item_id=succeeded_id)
+
+    apply_reconciliation_observations(
+        pg_engine,
+        observations={
+            workflow_id: _observation(
+                workflow_id,
+                ReconciliationObservationDisposition.SUCCEEDED,
+            )
+        },
+        resolver=_registry(target),
+        options=ReconcileOptions(page_size=2),
+        schema=schema,
+    )
+
+    with pg_engine.connect() as connection:
+        operation = (
+            connection.execute(select(schema.operations)).mappings().one()
+        )
+    assert operation.status == "partial"
+    assert operation.succeeded_count == 1
+    assert operation.terminal_failed_count == 1
 
 
 @pytest.mark.parametrize(

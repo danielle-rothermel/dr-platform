@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 
 import pytest
 from sqlalchemy import Connection, Engine, inspect, text
@@ -217,6 +218,15 @@ def test_missing_reobservation_schedule_upgrades_existing_schema(
             "platform_enqueue_compensations"
         )
     )
+
+
+def test_attempt_retry_reason_downgrade_is_explicitly_irreversible() -> None:
+    migration = import_module(
+        "dr_platform.db.alembic.versions.0003_attempt_retry_reason"
+    )
+
+    with pytest.raises(RuntimeError, match="fresh schema"):
+        migration.downgrade()
 
 
 def test_prefix_rejects_generated_identifiers_over_postgres_limit(

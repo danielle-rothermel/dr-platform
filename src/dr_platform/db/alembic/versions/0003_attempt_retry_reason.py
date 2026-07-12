@@ -59,15 +59,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    prefix = _prefix()
-    attempts = f"{prefix}_item_attempts"
-    check_name = f"{prefix}_ck_attempts_retry_reason"
-    _execute(
-        f"""
-        ALTER TABLE {attempts} DROP CONSTRAINT {check_name};
-        ALTER TABLE {attempts} ADD CONSTRAINT {check_name}
-          CHECK (retry_reason IS NULL OR retry_reason IN (
-            'domain_outcome', 'operator_cancel_retry'
-          ));
-        """
+    raise RuntimeError(
+        "0003_attempt_retry_reason is irreversible under the final hard cut; "
+        "rollback uses source control and a fresh schema"
     )
