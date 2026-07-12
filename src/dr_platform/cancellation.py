@@ -132,10 +132,13 @@ def _persist_intent(
     engine: Engine, *, request: CancellationRequest, schema: PlatformSchema
 ) -> list[dict[str, Any]]:
     with engine.begin() as connection:
+        # Retry creation and current-Attempt advancement also take this lock.
+        # Select the cancellation set only after acquiring it so the locked
+        # hierarchy cannot be based on a stale current_attempt pointer.
+        _acquire_export_writer_lock(connection)
         candidates = _current_attempts(
             connection, schema=schema, operation_key=request.operation_key
         )
-        _acquire_export_writer_lock(connection)
         _acquire_workflow_reference_locks(
             connection, [row["workflow_id"] for row in candidates]
         )
