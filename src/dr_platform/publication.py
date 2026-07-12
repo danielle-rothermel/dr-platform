@@ -47,6 +47,13 @@ PositiveInt = Annotated[StrictInt, Field(gt=0)]
 _IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 _MINIMUM_COMPATIBLE_SOURCES = 2
 _COMBINED_SOURCE_FAMILIES = frozenset({"application", "dbos"})
+_MAX_JAVASCRIPT_SAFE_INTEGER = 9_007_199_254_740_991
+
+
+def _quote_identifier(identifier: str) -> str:
+    if _IDENTIFIER.fullmatch(identifier) is None:
+        raise ValueError("unsafe SQL identifier")
+    return f'"{identifier}"'
 
 
 class SourceCoordinate(BaseModel):
@@ -244,6 +251,8 @@ class SignedBundleIntegrityPayload(BaseModel):
             raise ValueError("integrity attestation members must be non-empty")
         if len({member.member for member in self.members}) != len(self.members):
             raise ValueError("integrity attestation members must be unique")
+        if any(member.physical_digest is None for member in self.members):
+            raise ValueError("integrity attestation members require physical digests")
         return self
 
 
@@ -276,9 +285,39 @@ class OpenSslEd25519Signer(BundleIntegritySigner):
 
 
 def canonical_integrity_payload(payload: SignedBundleIntegrityPayload) -> bytes:
-    """RFC8785-equivalent canonical JSON used by both Platform and readers."""
+    """Constrained JCS contract shared with Unitbench.
 
-    return _canonical(payload.model_dump(mode="json")).encode("utf-8")
+    Integrity facts deliberately contain no floating-point values.  This keeps
+    Python and JavaScript number rendering out of the signed boundary; callers
+    must encode 64-bit facts as decimal strings before constructing a payload.
+    """
+
+    def encode(value: object) -> str:  # noqa: PLR0911 -- constrained JSON types
+        if value is None:
+            return "null"
+        if value is True:
+            return "true"
+        if value is False:
+            return "false"
+        if isinstance(value, str):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(value, int):
+            if abs(value) > _MAX_JAVASCRIPT_SAFE_INTEGER:
+                raise ValueError("unsafe integer in signed integrity payload")
+            return str(value)
+        if isinstance(value, float):
+            raise TypeError("floats are forbidden in signed integrity payload")
+        if isinstance(value, tuple | list):
+            return "[" + ",".join(encode(item) for item in value) + "]"
+        if isinstance(value, dict):
+            if not all(isinstance(key, str) for key in value):
+                raise ValueError("signed integrity object keys must be strings")
+            return "{" + ",".join(
+                f"{encode(key)}:{encode(value[key])}" for key in sorted(value)
+            ) + "}"
+        raise ValueError(f"unsupported signed integrity value: {type(value).__name__}")
+
+    return encode(payload.model_dump(mode="json")).encode("utf-8")
 
 
 def integrity_message(payload: SignedBundleIntegrityPayload) -> bytes:
@@ -342,40 +381,63 @@ class PostgresPublicationFence:
                     "PRIMARY KEY(destination_id, bundle_key))"
                 )
             )
+
             connection.execute(
                 text(
                     f"CREATE TABLE IF NOT EXISTS {self._bundles_table} ("
-                    "destination_id TEXT NOT NULL, bundle_key TEXT NOT NULL, "
-                    "bundle_id TEXT NOT NULL, snapshot_seq BIGINT NOT NULL, "
-                    "source_coordinates_json TEXT NOT NULL, "
-                    "manifest_json TEXT NOT NULL, status TEXT NOT NULL, "
-                    "owner TEXT NOT NULL, fencing_token BIGINT NOT NULL, "
-                    f"created_at TIMESTAMPTZ NOT NULL DEFAULT {self._now}, "
-                    "PRIMARY KEY(destination_id, bundle_key, bundle_id))"
+                    "destination_id TEXT NOT NULL, bundle_key TEXT NOT NULL, bundle_id TEXT NOT NULL, "
+                    "snapshot_seq BIGINT NOT NULL, source_coordinates_json TEXT NOT NULL, manifest_json TEXT NOT NULL, "
+                    "status TEXT NOT NULL, owner TEXT NOT NULL, fencing_token BIGINT NOT NULL, "
+                    f"created_at TIMESTAMPTZ NOT NULL DEFAULT {self._now}, PRIMARY KEY(destination_id, bundle_key, bundle_id))"
                 )
             )
-            for column in (
-                "integrity_version TEXT",
-                "integrity_key_id TEXT",
-                "integrity_payload_json TEXT",
-                "integrity_signature TEXT",
-                "physical_digest_algorithm TEXT",
-            ):
-                connection.execute(
-                    text(
-                        f"ALTER TABLE {self._bundles_table} ADD COLUMN IF NOT EXISTS {column}"
-                    )
+            for column in ("integrity_version TEXT", "integrity_key_id TEXT", "integrity_payload_json TEXT", "integrity_signature TEXT", "physical_digest_algorithm TEXT"):
+                connection.execute(text(f"ALTER TABLE {self._bundles_table} ADD COLUMN IF NOT EXISTS {column}"))
+            connection.execute(text(
+                f"CREATE TABLE IF NOT EXISTS {self._pins_table} (destination_id TEXT NOT NULL, bundle_key TEXT NOT NULL, "
+                "pin_id TEXT NOT NULL, bundle_id TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, "
+                f"created_at TIMESTAMPTZ NOT NULL DEFAULT {self._now}, PRIMARY KEY(destination_id, bundle_key, pin_id))"
+            ))
+
+    def backfill_protected_integrity(self) -> tuple[str, ...]:
+        """Fence and sign every currently readable legacy bundle.
+
+        This intentionally includes all promoted rows (a safe superset of the
+        current, retention-window, and active-pin sets).  Pins are neither
+        deleted nor retargeted.  One invalid member aborts the transaction.
+        Run this before enabling reader enforcement.
+        """
+
+        if self.signer is None:
+            raise ValueError("backfill requires an injected BundleIntegritySigner")
+        with self.engine.begin() as connection:
+            rows = connection.execute(text(
+                f"SELECT bundle_key, bundle_id, snapshot_seq, source_coordinates_json, manifest_json "
+                f"FROM {self._bundles_table} WHERE destination_id = CAST(:destination AS TEXT) "
+                "AND status = 'PROMOTED' FOR UPDATE"
+            ), {"destination": self.destination_id}).mappings().all()
+            completed: list[str] = []
+            for row in rows:
+                manifest = RemoteBundleManifest.model_validate_json(row["manifest_json"])
+                coordinates = tuple(SourceCoordinate.model_validate(value) for value in json.loads(row["source_coordinates_json"]))
+                signed_manifest = self._with_physical_digests(connection, manifest)
+                payload, signature = self._signed_payload(
+                    bundle_key=str(row["bundle_key"]), bundle_id=str(row["bundle_id"]),
+                    snapshot_seq=int(row["snapshot_seq"]), manifest=signed_manifest,
+                    source_coordinates=coordinates,
                 )
-            connection.execute(
-                text(
-                    f"CREATE TABLE IF NOT EXISTS {self._pins_table} ("
-                    "destination_id TEXT NOT NULL, bundle_key TEXT NOT NULL, "
-                    "pin_id TEXT NOT NULL, bundle_id TEXT NOT NULL, "
-                    "expires_at TIMESTAMPTZ NOT NULL, "
-                    f"created_at TIMESTAMPTZ NOT NULL DEFAULT {self._now}, "
-                    "PRIMARY KEY(destination_id, bundle_key, pin_id))"
-                )
-            )
+                connection.execute(text(
+                    f"UPDATE {self._bundles_table} SET manifest_json = CAST(:manifest AS TEXT), "
+                    "integrity_version = CAST(:version AS TEXT), integrity_key_id = CAST(:key_id AS TEXT), "
+                    "integrity_payload_json = CAST(:payload AS TEXT), integrity_signature = CAST(:signature AS TEXT), "
+                    "physical_digest_algorithm = CAST(:algorithm AS TEXT) WHERE destination_id = CAST(:destination AS TEXT) "
+                    "AND bundle_key = CAST(:bundle AS TEXT) AND bundle_id = CAST(:bundle_id AS TEXT)"
+                ), {"manifest": signed_manifest.model_dump_json(), "version": payload.integrity_version,
+                    "key_id": self.signer.key_id, "payload": canonical_integrity_payload(payload).decode(),
+                    "signature": base64.b64encode(signature).decode(), "algorithm": payload.physical_digest_algorithm,
+                    "destination": self.destination_id, "bundle": row["bundle_key"], "bundle_id": row["bundle_id"]})
+                completed.append(str(row["bundle_id"]))
+            return tuple(completed)
 
     def acquire_lease(
         self, *, bundle_key: str, run_id: str, lease_seconds: int
@@ -544,7 +606,7 @@ class PostgresPublicationFence:
                     raise ValueError(
                         "manifest source families do not match promotion"
                     )
-                self._record_remote_stage(
+                signed_manifest = self._record_remote_stage(
                     connection,
                     bundle_key=bundle_key,
                     bundle_id=bundle_id,
@@ -563,7 +625,7 @@ class PostgresPublicationFence:
                     bundle_id=bundle_id,
                     cursors=cursors,
                     source_coordinates=source_coordinates,
-                    manifest=manifest,
+                    manifest=signed_manifest,
                 )
         except _StalePromotionError:
             return RemotePromotionResult(disposition="STALE_PROMOTION")
@@ -579,7 +641,8 @@ class PostgresPublicationFence:
         fencing_token: int,
         source_coordinates: tuple[SourceCoordinate, ...],
         manifest: RemoteBundleManifest,
-    ) -> None:
+    ) -> RemoteBundleManifest:
+        manifest = self._with_physical_digests(connection, manifest)
         payload, signature = self._signed_payload(
             bundle_key=bundle_key,
             bundle_id=bundle_id,
@@ -599,26 +662,56 @@ class PostgresPublicationFence:
                 "ON CONFLICT DO NOTHING"
             ),
             {
-                "destination": self.destination_id,
-                "bundle": bundle_key,
-                "bundle_id": bundle_id,
-                "snapshot": snapshot_seq,
-                "coordinates": _canonical(
-                    [
-                        coordinate.model_dump(mode="json")
-                        for coordinate in source_coordinates
-                    ]
-                ),
-                "manifest": manifest.model_dump_json(),
-                "version": payload.integrity_version,
+                "destination": self.destination_id, "bundle": bundle_key,
+                "bundle_id": bundle_id, "snapshot": snapshot_seq,
+                "coordinates": _canonical([coordinate.model_dump(mode="json") for coordinate in source_coordinates]),
+                "manifest": manifest.model_dump_json(), "version": payload.integrity_version,
                 "key_id": self.signer.key_id if self.signer else "",
                 "payload": canonical_integrity_payload(payload).decode(),
                 "signature": base64.b64encode(signature).decode(),
-                "algorithm": payload.physical_digest_algorithm,
-                "run": run_id,
+                "algorithm": payload.physical_digest_algorithm, "run": run_id,
                 "token": fencing_token,
             },
         )
+        return manifest
+
+    def _with_physical_digests(
+        self, connection: Connection, manifest: RemoteBundleManifest
+    ) -> RemoteBundleManifest:
+        """Read the destination-native aggregate before the member is signed."""
+
+        algorithm = (
+            "postgres-pgcrypto-row-json-length-framed-sha256-v1"
+            if self.kind == "neon"
+            else "duckdb-json-length-framed-sha256-v1"
+        )
+        members: list[RemoteBundleMember] = []
+        for member in manifest.members:
+            table = f'{_quote_identifier(member.schema_name)}.{_quote_identifier(member.table_name)}'
+            ordering = ", ".join(_quote_identifier(key) for key in member.key_columns)
+            if self.kind == "neon":
+                aggregate = (
+                    "encode(digest(COALESCE(string_agg(length(row_to_json(t)::text)::text "
+                    f"|| ':' || row_to_json(t)::text, '' ORDER BY {ordering}), ''), "
+                    "'sha256'), 'hex')"
+                )
+            else:
+                aggregate = (
+                    "sha256(COALESCE(string_agg(length(to_json(t)::VARCHAR)::VARCHAR "
+                    f"|| ':' || to_json(t)::VARCHAR, '' ORDER BY {ordering}), ''))"
+                )
+            row = connection.execute(
+                text(f"SELECT COUNT(*) AS row_count, {aggregate} AS physical_digest FROM {table} t")
+            ).mappings().one()
+            digest = row["physical_digest"]
+            if int(row["row_count"]) != member.row_count or not isinstance(digest, str) or not digest:
+                raise ValueError("destination physical digest validation failed")
+            members.append(member.model_copy(update={"physical_digest": digest}))
+        # The algorithm is carried by the signed payload; this method exists to
+        # make capability failures happen before any immutable bundle record.
+        if not members or not algorithm:
+            raise ValueError("destination lacks a physical digest capability")
+        return manifest.model_copy(update={"members": tuple(members)})
 
     def _signed_payload(
         self,
@@ -631,7 +724,7 @@ class PostgresPublicationFence:
     ) -> tuple[SignedBundleIntegrityPayload, bytes]:
         if self.signer is None:
             raise ValueError("promotion requires an injected BundleIntegritySigner")
-        algorithm = "postgres-sha256-length-framed-v1" if self.kind == "neon" else "duckdb-sha256-length-framed-v1"
+        algorithm = "postgres-pgcrypto-row-json-length-framed-sha256-v1" if self.kind == "neon" else "duckdb-json-length-framed-sha256-v1"
         payload = SignedBundleIntegrityPayload(
             destination_id=self.destination_id,
             bundle_key=bundle_key,
