@@ -176,7 +176,9 @@ class ExportOptions(BaseModel):
     full_rebuild: StrictBool = False
     projections: tuple[ProjectionSpec, ...] = ()
     source_change_sequence: NonEmptyStr = "platform_change_seq"
-    integrity_signer: LocalBundleIntegritySigner | None = None
+    # Every new local promotion is attested. Legacy rows are signed by the
+    # explicit backfill API before readers begin enforcing this rule.
+    integrity_signer: Any = None
 
 
 class DestinationResult(BaseModel):
@@ -941,11 +943,13 @@ def _local_signed_integrity(
     specs: Sequence[ProjectionSpec],
     candidate_tables: Mapping[str, str],
     checksums: Mapping[str, str],
-) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+) -> tuple[str, str, str, str, str]:
     """Sign native DuckDB facts without moving the mutable current pointer."""
 
     if options.integrity_signer is None:
-        return None, None, None, None, None
+        raise ValueError(
+            "local promotion requires an injected integrity signer"
+        )
     # Avoid an import cycle: publication owns the shared wire payload while
     # export owns DuckDB's physical tables.
     from dr_platform.publication import (  # noqa: PLC0415

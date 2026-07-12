@@ -63,6 +63,7 @@ from dr_platform.reconciliation_runtime import (
     ReconciliationObservationDisposition,
 )
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
+from tests.conftest import signed_integrity_test_material
 from tests.contracts.test_platform_v6_cancellation import _register_operation
 from tests.contracts.test_platform_v6_enqueue_claims import _target
 
@@ -122,6 +123,10 @@ def _reconciliation(
 
 
 def export(source: Engine, options: ExportOptions, **kwargs):  # type: ignore[no-untyped-def]
+    if options.integrity_signer is None:
+        options = options.model_copy(
+            update={"integrity_signer": signed_integrity_test_material()[0]}
+        )
     return _export(
         source,
         options,
@@ -508,7 +513,9 @@ def test_application_projection_types_round_trip_and_aggregate(
     )
 
     pin = pin_local_bundle(database, bundle_key="typed", pin_id="typed-local")
-    local_table = resolve_local_pin(database, pin).members["typed_rows"]
+    local_table = resolve_local_pin(
+        database, pin, public_key_ring=signed_integrity_test_material()[1]
+    ).members["typed_rows"]
     with duckdb.connect(str(database), read_only=True) as connection:
         pinned_aggregate = connection.execute(
             f'SELECT sum("count"), avg(score) FROM "{local_table}"'  # noqa: S608
@@ -670,7 +677,11 @@ def test_local_lease_fence_and_fault_preserve_pointer(tmp_path) -> None:
     """A stale token and a failed stage cannot replace a readable pointer."""
 
     database = tmp_path / "fence.duckdb"
-    options = ExportOptions(destination_path=str(database), run_id="owner")
+    options = ExportOptions(
+        destination_path=str(database),
+        run_id="owner",
+        integrity_signer=signed_integrity_test_material()[0],
+    )
     with duckdb.connect(str(database)) as destination:
         _create_destination_tables(destination)
         lease = _acquire_lease(destination, options)
@@ -814,7 +825,9 @@ def test_equal_snapshot_is_idempotent_and_expired_renewal_cannot_promote(
     with duckdb.connect(str(database)) as destination:
         _create_destination_tables(destination)
         first_options = ExportOptions(
-            destination_path=str(database), run_id="first"
+            destination_path=str(database),
+            run_id="first",
+            integrity_signer=signed_integrity_test_material()[0],
         )
         first_lease = _acquire_lease(destination, first_options)
         assert first_lease is not None
@@ -824,7 +837,9 @@ def test_equal_snapshot_is_idempotent_and_expired_renewal_cannot_promote(
         assert first_status == "PROMOTED"
 
         replay_options = ExportOptions(
-            destination_path=str(database), run_id="replay"
+            destination_path=str(database),
+            run_id="replay",
+            integrity_signer=signed_integrity_test_material()[0],
         )
         replay_lease = _acquire_lease(destination, replay_options)
         assert replay_lease is not None

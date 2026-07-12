@@ -32,6 +32,7 @@ from dr_platform import (
 from dr_platform import (
     export as _export,
 )
+from tests.conftest import signed_integrity_test_material
 from tests.contracts.test_platform_v6_cancellation import _register_operation
 from tests.test_export import _reconciliation
 
@@ -39,6 +40,10 @@ _EMPTY_CHECKSUM = hashlib.sha256(b"[]").hexdigest()
 
 
 def export(source: Engine, options: ExportOptions, **kwargs):  # type: ignore[no-untyped-def]
+    if options.integrity_signer is None:
+        options = options.model_copy(
+            update={"integrity_signer": signed_integrity_test_material()[0]}
+        )
     return _export(
         source,
         options,
@@ -550,9 +555,11 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
             snapshot_seq=2,
             bundle_id="bundle-two",
             cursors={"member": 2},
-            source_coordinates=(capture_source_coordinate(
-                pg_engine, source_id="application", snapshot_seq=2
-            ),),
+            source_coordinates=(
+                capture_source_coordinate(
+                    pg_engine, source_id="application", snapshot_seq=2
+                ),
+            ),
             source_families=("application",),
             stage=lambda connection: _empty_candidate_manifest(
                 connection, successor_table
@@ -624,7 +631,9 @@ def test_active_pin_survives_cleanup_then_missing_bundle_is_typed(
     assert second.snapshot_seq > first.snapshot_seq
 
     assert cleanup_local_bundles(database) == ()
-    resolved = resolve_local_pin(database, pin)
+    resolved = resolve_local_pin(
+        database, pin, public_key_ring=signed_integrity_test_material()[1]
+    )
     assert resolved.bundle_id == first.destinations[0].bundle_id
     assert schema.operations.name in resolved.members
 
