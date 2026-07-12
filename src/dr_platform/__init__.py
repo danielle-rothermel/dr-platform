@@ -52,6 +52,8 @@ from dr_platform.export import (
     ProjectionColumn,
     ProjectionColumnType,
     ProjectionSpec,
+    ReconcileBeforeCapture,
+    ReconciledCutProof,
     capture_dbos_publication_telemetry,
     export,
 )
@@ -204,6 +206,8 @@ __all__ = [
     "ProjectionColumn",
     "ProjectionColumnType",
     "ProjectionSpec",
+    "ReconcileBeforeCapture",
+    "ReconciledCutProof",
     "RegistrationHook",
     "RegistrationPageContext",
     "RegistrationResult",

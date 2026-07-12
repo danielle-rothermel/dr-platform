@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
-from typing import cast
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from unittest.mock import patch
 
 import duckdb
@@ -27,8 +27,11 @@ from dr_platform import (
     PlatformSchema,
     ProjectionColumn,
     ProjectionColumnType,
-    export,
+    ReconciledCutProof,
     upgrade_platform_schema,
+)
+from dr_platform import (
+    export as _export,
 )
 from dr_platform.export import (
     ApplicationSnapshot,
@@ -45,6 +48,30 @@ from dr_platform.publication import (
 )
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
 from tests.contracts.test_platform_v6_cancellation import _register_operation
+
+
+def _reconcile_before_capture(
+    engine: Engine, _schema: PlatformSchema
+) -> ReconciledCutProof:
+    with engine.connect() as connection:
+        source_database, reconciled_at = connection.execute(
+            text("SELECT current_database(), clock_timestamp()")
+        ).one()
+    return ReconciledCutProof(
+        source_id=f"dbos:{source_database}",
+        database_server=source_database,
+        reconciled_at=reconciled_at,
+        scope="all-platform-lifecycle",
+    )
+
+
+def export(source: Engine, options: ExportOptions, **kwargs):  # type: ignore[no-untyped-def]
+    return _export(
+        source,
+        options,
+        reconcile_before_capture=_reconcile_before_capture,
+        **kwargs,
+    )
 
 
 def _text_schema(*names: str) -> tuple[ProjectionColumn, ...]:
@@ -793,6 +820,40 @@ def test_structured_failure_preserves_populated_pointer(
         )
     assert failed.destinations[0].status == "FAILED"
     assert failed.destinations[0].error == "RuntimeError"
+
+    incompatible_fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id="incompatible-cut",
+        table_name="incompatible_cut_state",
+    )
+
+    def stale_proof(
+        engine: Engine, _schema: PlatformSchema
+    ) -> ReconciledCutProof:
+        with engine.connect() as connection:
+            source_database, observed_at = connection.execute(
+                text("SELECT current_database(), clock_timestamp()")
+            ).one()
+        return ReconciledCutProof(
+            source_id=f"dbos:{source_database}",
+            database_server=source_database,
+            reconciled_at=observed_at - timedelta(seconds=1),
+            scope="all-platform-lifecycle",
+        )
+
+    incompatible = _export(
+        pg_engine,
+        ExportOptions(destination_path=str(tmp_path / "incompatible.duckdb")),
+        reconcile_before_capture=stale_proof,
+        remote_destinations=(incompatible_fence,),
+    )
+    assert [item.status for item in incompatible.destinations] == [
+        "FAILED",
+        "FAILED",
+    ]
+    assert {item.error for item in incompatible.destinations} == {
+        "IncompatibleSnapshotError"
+    }
     with duckdb.connect(str(database), read_only=True) as destination:
         pointer = destination.execute(
             "SELECT committed_snapshot_seq, bundle_id "
@@ -802,3 +863,204 @@ def test_structured_failure_preserves_populated_pointer(
         first.snapshot_seq,
         first.destinations[0].bundle_id,
     )
+
+
+def test_reconciliation_transition_is_captured_and_proof_fails_closed(
+    pg_engine: Engine, tmp_path
+) -> None:
+    schema = PlatformSchema()
+    upgrade_platform_schema(str(pg_engine.url))
+    _register_operation(
+        pg_engine,
+        schema,
+        operation_key="reconciled-export",
+        item_keys=("item",),
+    )
+
+    def reconcile_transition(
+        engine: Engine, _schema: PlatformSchema
+    ) -> ReconciledCutProof:
+        with engine.begin() as connection:
+            connection.execute(
+                update(schema.item_attempts).values(
+                    execution_state="succeeded",
+                    terminal_at=text("clock_timestamp()"),
+                    updated_at=text("clock_timestamp()"),
+                )
+            )
+            source_database, reconciled_at = connection.execute(
+                text("SELECT current_database(), clock_timestamp()")
+            ).one()
+        return ReconciledCutProof(
+            source_id=f"dbos:{source_database}",
+            database_server=source_database,
+            reconciled_at=reconciled_at,
+            scope="all-platform-lifecycle",
+        )
+
+    database = tmp_path / "reconciled.duckdb"
+    result = _export(
+        pg_engine,
+        ExportOptions(destination_path=str(database)),
+        schema=schema,
+        reconcile_before_capture=reconcile_transition,
+    )
+    assert result.destinations[0].status == "PROMOTED"
+    with duckdb.connect(str(database), read_only=True) as destination:
+        table_name = destination.execute(
+            "SELECT table_name FROM __dr_platform_export_members "
+            "WHERE member = ?",
+            [schema.item_attempts.name],
+        ).fetchone()
+        assert table_name is not None
+        assert destination.execute(
+            f'SELECT execution_state FROM "{table_name[0]}"'  # noqa: S608
+        ).fetchone() == ("succeeded",)
+
+    missing = _export(
+        pg_engine,
+        ExportOptions(destination_path=str(tmp_path / "missing-proof.duckdb")),
+        reconcile_before_capture=cast("Any", lambda _engine, _schema: None),
+    )
+    assert missing.destinations[0].status == "FAILED"
+    assert missing.destinations[0].error == "TypeError"
+
+    def unavailable(
+        _engine: Engine, _schema: PlatformSchema
+    ) -> ReconciledCutProof:
+        raise RuntimeError("DBOS lifecycle unavailable")
+
+    failed = _export(
+        pg_engine,
+        ExportOptions(
+            destination_path=str(tmp_path / "failed-reconciliation.duckdb")
+        ),
+        reconcile_before_capture=unavailable,
+    )
+    assert failed.destinations[0].status == "FAILED"
+    assert failed.destinations[0].error == "RuntimeError"
+
+
+def test_kernel_remote_stages_every_member_and_retries_independently(
+    pg_engine: Engine, tmp_path
+) -> None:
+    schema = PlatformSchema()
+    upgrade_platform_schema(str(pg_engine.url))
+    _register_operation(
+        pg_engine,
+        schema,
+        operation_key="remote-kernel",
+        item_keys=("item",),
+    )
+
+    class FailingFence(PostgresPublicationFence):
+        def promote(self, **_kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("transient destination failure")
+
+    failing = FailingFence(
+        pg_engine,
+        destination_id="remote-kernel",
+        table_name="remote_kernel_state",
+    )
+    options = ExportOptions(
+        destination_path=str(tmp_path / "remote-kernel.duckdb"),
+        run_id="remote_kernel_retry",
+    )
+    first = export(
+        pg_engine,
+        options,
+        schema=schema,
+        remote_destinations=(failing,),
+    )
+    assert [item.status for item in first.destinations] == [
+        "PROMOTED",
+        "FAILED",
+    ], first
+
+    recovered = PostgresPublicationFence(
+        pg_engine,
+        destination_id="remote-kernel",
+        table_name="remote_kernel_state",
+    )
+    retry = export(
+        pg_engine,
+        options,
+        schema=schema,
+        remote_destinations=(recovered,),
+    )
+    assert [item.status for item in retry.destinations] == [
+        "PROMOTED",
+        "PROMOTED",
+    ]
+    pin = recovered.pin_bundle(
+        bundle_key=options.bundle_key, pin_id="kernel-members"
+    )
+    resolved = recovered.resolve_pin(pin)
+    assert set(resolved.members) == {
+        "platform_operations",
+        "platform_items",
+        "platform_item_attempts",
+        "platform_enqueue_claims",
+        "platform_next_attempt_requests",
+        "platform_enqueue_compensations",
+        "platform_enqueue_compensation_hazards",
+        "platform_throttle_state",
+        "platform_missing_reobservations",
+    }
+
+
+def test_kernel_remote_runs_when_local_destination_is_unavailable(
+    pg_engine: Engine, tmp_path
+) -> None:
+    schema = PlatformSchema()
+    upgrade_platform_schema(str(pg_engine.url))
+    _register_operation(
+        pg_engine,
+        schema,
+        operation_key="remote-with-local-held",
+        item_keys=("item",),
+    )
+    database = tmp_path / "local-held.duckdb"
+    with duckdb.connect(str(database)) as destination:
+        _create_destination_tables(destination)
+        assert (
+            _acquire_lease(
+                destination,
+                ExportOptions(
+                    destination_path=str(database), run_id="foreign_owner"
+                ),
+            )
+            is not None
+        )
+
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id="remote-while-local-held",
+        table_name="remote_while_local_held_state",
+    )
+    result = export(
+        pg_engine,
+        ExportOptions(
+            destination_path=str(database), run_id="remote_only_runner"
+        ),
+        schema=schema,
+        remote_destinations=(fence,),
+    )
+    assert [item.status for item in result.destinations] == [
+        "LEASE_HELD",
+        "PROMOTED",
+    ]
+    resolved = fence.resolve_pin(
+        fence.pin_bundle(bundle_key="platform-kernel", pin_id="remote-only")
+    )
+    assert set(resolved.members) == {
+        "platform_operations",
+        "platform_items",
+        "platform_item_attempts",
+        "platform_enqueue_claims",
+        "platform_next_attempt_requests",
+        "platform_enqueue_compensations",
+        "platform_enqueue_compensation_hazards",
+        "platform_throttle_state",
+        "platform_missing_reobservations",
+    }

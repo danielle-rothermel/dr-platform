@@ -47,6 +47,9 @@ FullRebuildBuilder = Callable[
     [Connection, "ApplicationSnapshot"], Sequence[Mapping[str, Any]]
 ]
 DbosTelemetryHook = Callable[[Mapping[str, str | int | float | bool]], None]
+ReconcileBeforeCapture = Callable[
+    [Engine, PlatformSchema], "ReconciledCutProof"
+]
 
 
 class ProjectionSpec(BaseModel):
@@ -96,6 +99,23 @@ class ApplicationSnapshot(BaseModel):
     source_database: NonEmptyStr
     captured_at: datetime
     snapshot_seq: NonNegativeInt
+
+
+class ReconciledCutProof(BaseModel):
+    """Immutable evidence that DBOS lifecycle truth was refreshed for export."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_id: NonEmptyStr
+    database_server: NonEmptyStr
+    reconciled_at: datetime
+    scope: Literal["all-platform-lifecycle"]
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.source_id.startswith("dbos:"):
+            raise ValueError("reconciled source identity must be DBOS")
+        if self.reconciled_at.tzinfo is None:
+            raise ValueError("reconciled_at must be timezone-aware")
 
 
 class ExportOptions(BaseModel):
@@ -210,6 +230,7 @@ def export(
     source: Engine,
     options: ExportOptions,
     *,
+    reconcile_before_capture: ReconcileBeforeCapture,
     schema: PlatformSchema | None = None,
     remote_destinations: Sequence[Any] = (),
 ) -> ExportResult:
@@ -220,11 +241,18 @@ def export(
     while a retry captures the same uncommitted delta again.
     """
 
+    selected = schema or PlatformSchema()
+    _validate_remote_destinations(remote_destinations)
     if options.projections and any(
         spec.full_rebuild_builder is not None for spec in options.projections
     ):
-        return _export_application(source, options, remote_destinations)
-    selected = schema or PlatformSchema()
+        return _export_application(
+            source,
+            options,
+            remote_destinations,
+            reconciliation_schema=selected,
+            reconcile_before_capture=reconcile_before_capture,
+        )
     members = _kernel_specs(selected, options.projections)
     database_path = Path(options.destination_path)
     database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -233,46 +261,34 @@ def export(
         try:
             _create_destination_tables(connection)
             lease = _acquire_lease(connection, options)
-            if lease is None:
+            if lease is None and not remote_destinations:
                 return _empty_result(
                     selected, options, "", 0, {}, {}, "LEASE_HELD"
                 )
-            token, cursors = lease
+            token, cursors = lease if lease is not None else (None, {})
             source_name = ""
             captured_at: datetime | None = None
             high_water = 0
             counts: dict[str, int] = {}
             checksums: dict[str, str] = {}
             try:
-                source_name, captured_at, high_water, rows = _capture_source(
-                    source, selected, members, cursors, options.full_rebuild
+                proof = reconcile_before_capture(source, selected)
+                _validate_reconciled_cut_proof(proof)
+                source_name, captured_at, high_water, rows, remote_rows = (
+                    _capture_source(
+                        source,
+                        selected,
+                        members,
+                        cursors,
+                        options.full_rebuild if lease is not None else True,
+                        proof=proof,
+                        capture_complete_bundle=bool(remote_destinations),
+                    )
                 )
                 counts, checksums = _validate_members(members, rows)
-                status, bundle_id, counts, checksums = _stage_and_promote(
-                    connection,
-                    options,
-                    token,
-                    high_water,
-                    members,
-                    rows,
-                )
-                return ExportResult(
-                    source_database=source_name,
-                    source_captured_at=captured_at,
-                    snapshot_seq=high_water,
-                    member_counts=counts,
-                    member_checksums=checksums,
-                    destinations=(
-                        LocalDestinationResult(
-                            destination_id=options.destination_id,
-                            status=status,
-                            bundle_id=bundle_id,
-                            fencing_token=token,
-                        ),
-                    ),
-                )
-            except Exception as exc:  # destination errors are structured
-                _release_lease(connection, options, token)
+            except Exception as exc:
+                if token is not None:
+                    _release_lease(connection, options, token)
                 return _empty_result(
                     selected,
                     options,
@@ -280,13 +296,279 @@ def export(
                     high_water,
                     counts,
                     checksums,
-                    "FAILED",
+                    "FAILED" if lease is not None else "LEASE_HELD",
                     token=token,
                     error=type(exc).__name__,
                     captured_at=captured_at,
+                    failed_remotes=remote_destinations,
                 )
+
+            destinations: list[
+                LocalDestinationResult | PostgresDestinationResult
+            ]
+            if token is None:
+                destinations = [
+                    LocalDestinationResult(
+                        destination_id=options.destination_id,
+                        status="LEASE_HELD",
+                    )
+                ]
+            else:
+                try:
+                    status, bundle_id, counts, checksums = _stage_and_promote(
+                        connection,
+                        options,
+                        token,
+                        high_water,
+                        members,
+                        rows,
+                    )
+                    destinations = [
+                        LocalDestinationResult(
+                            destination_id=options.destination_id,
+                            status=status,
+                            bundle_id=bundle_id,
+                            fencing_token=token,
+                        )
+                    ]
+                except Exception as exc:
+                    _release_lease(connection, options, token)
+                    destinations = [
+                        LocalDestinationResult(
+                            destination_id=options.destination_id,
+                            status="FAILED",
+                            fencing_token=token,
+                            error=type(exc).__name__,
+                        )
+                    ]
+
+            destinations.extend(
+                _publish_kernel_remotes(
+                    remote_destinations,
+                    options,
+                    members,
+                    remote_rows,
+                    source_name,
+                    captured_at,
+                    high_water,
+                    proof,
+                )
+            )
+            return ExportResult(
+                source_database=source_name,
+                source_captured_at=captured_at,
+                snapshot_seq=high_water,
+                member_counts=counts,
+                member_checksums=checksums,
+                destinations=tuple(destinations),
+            )
         finally:
             connection.close()
+
+
+def _validate_reconciled_cut_proof(proof: ReconciledCutProof) -> None:
+    if not isinstance(proof, ReconciledCutProof):
+        raise TypeError(
+            "reconcile_before_capture must return ReconciledCutProof"
+        )
+
+
+def _validate_reconciled_capture(
+    proof: ReconciledCutProof,
+    source_database: str,
+    captured_at: datetime,
+) -> None:
+    """Consume the proof by binding it to the captured application cut."""
+
+    from dr_platform.publication import (  # noqa: PLC0415 -- import cycle
+        SourceCoordinate,
+        require_compatible_snapshot,
+    )
+
+    require_compatible_snapshot(
+        (
+            SourceCoordinate(
+                source_id=f"application:{source_database}",
+                database_server=source_database,
+                captured_at=captured_at,
+            ),
+            SourceCoordinate(
+                source_id=proof.source_id,
+                database_server=proof.database_server,
+                captured_at=proof.reconciled_at,
+            ),
+        )
+    )
+
+
+def _validate_remote_destinations(destinations: Sequence[Any]) -> None:
+    from dr_platform.publication import (  # noqa: PLC0415 -- import cycle
+        PostgresPublicationFence,
+    )
+
+    if any(
+        not isinstance(destination, PostgresPublicationFence)
+        for destination in destinations
+    ):
+        raise TypeError("remote destinations must be PostgresPublicationFence")
+
+
+def _publish_kernel_remotes(
+    destinations: Sequence[Any],
+    options: ExportOptions,
+    members: tuple[tuple[ProjectionSpec, Table], ...],
+    rows: Mapping[str, list[dict[str, Any]]],
+    source_name: str,
+    captured_at: datetime,
+    snapshot_seq: int,
+    proof: ReconciledCutProof,
+) -> tuple[PostgresDestinationResult, ...]:
+    """Physically stage and fenced-promote the complete canonical kernel."""
+
+    from dr_platform.publication import (  # noqa: PLC0415 -- import cycle
+        RemoteBundleManifest,
+        RemoteBundleMember,
+        SourceCoordinate,
+    )
+
+    coordinates = (
+        SourceCoordinate(
+            source_id=f"application:{source_name}",
+            database_server=source_name,
+            captured_at=captured_at,
+            snapshot_seq=snapshot_seq,
+        ),
+        SourceCoordinate(
+            source_id=proof.source_id,
+            database_server=proof.database_server,
+            captured_at=proof.reconciled_at,
+        ),
+    )
+    results: list[PostgresDestinationResult] = []
+    for fence in destinations:
+        token: int | None = None
+        try:
+            fence.ensure_schema()
+            lease = fence.acquire_lease(
+                bundle_key=options.bundle_key,
+                run_id=options.run_id,
+                lease_seconds=options.lease_seconds,
+            )
+            if lease.disposition == "LEASE_HELD":
+                results.append(
+                    PostgresDestinationResult(
+                        destination_id=fence.destination_id,
+                        status="LEASE_HELD",
+                    )
+                )
+                continue
+            assert lease.fencing_token is not None
+            token = lease.fencing_token
+            normalized_rows = {
+                spec.member: [
+                    {
+                        column: _storage_value(
+                            row[column], source_table.c[column].type
+                        )
+                        for column in spec.columns
+                    }
+                    for row in rows[spec.member]
+                ]
+                for spec, source_table in members
+            }
+            counts, checksums = _validate_members(members, normalized_rows)
+
+            def stage(
+                connection: Connection,
+                *,
+                destination: Any = fence,
+                fencing_token: int = lease.fencing_token,
+                staged_rows: Mapping[
+                    str, list[dict[str, Any]]
+                ] = normalized_rows,
+                staged_counts: Mapping[str, int] = counts,
+                staged_checksums: Mapping[str, str] = checksums,
+            ) -> RemoteBundleManifest:
+                staged: list[RemoteBundleMember] = []
+                for spec, source_table in members:
+                    table_name = destination.stage_table_name(
+                        member=spec.member,
+                        run_id=options.run_id,
+                        fencing_token=fencing_token,
+                        snapshot_seq=snapshot_seq,
+                    )
+                    connection.execute(
+                        text(
+                            f"CREATE TABLE {_pg_identifier(table_name)} ("
+                            + ", ".join(
+                                f"{_pg_identifier(column)} "
+                                f"{_remote_kernel_sql_type(source_table.c[column].type)}"
+                                for column in spec.columns
+                            )
+                            + ")"
+                        )
+                    )
+                    member_rows = staged_rows[spec.member]
+                    if member_rows:
+                        placeholders = ", ".join(
+                            f":{column}" for column in spec.columns
+                        )
+                        connection.execute(
+                            text(
+                                f"INSERT INTO {_pg_identifier(table_name)} "
+                                f"({', '.join(_pg_identifier(column) for column in spec.columns)}) "
+                                f"VALUES ({placeholders})"
+                            ),
+                            member_rows,
+                        )
+                    staged.append(
+                        RemoteBundleMember(
+                            member=spec.member,
+                            schema_name=(
+                                "main"
+                                if destination.kind == "motherduck"
+                                else "public"
+                            ),
+                            table_name=table_name,
+                            key_columns=spec.unique_key,
+                            row_count=staged_counts[spec.member],
+                            checksum=staged_checksums[spec.member],
+                        )
+                    )
+                return RemoteBundleManifest(
+                    members=tuple(staged),
+                    source_families=("application", "dbos"),
+                )
+
+            promoted = fence.promote(
+                bundle_key=options.bundle_key,
+                run_id=options.run_id,
+                fencing_token=token,
+                snapshot_seq=snapshot_seq,
+                bundle_id=(f"kernel_{snapshot_seq}_{token}_{options.run_id}"),
+                cursors={spec.member: snapshot_seq for spec, _ in members},
+                source_coordinates=coordinates,
+                source_families=("application", "dbos"),
+                stage=stage,
+            )
+            results.append(
+                PostgresDestinationResult(
+                    destination_id=fence.destination_id,
+                    status=promoted.disposition,
+                    bundle_id=promoted.bundle_id,
+                    fencing_token=token,
+                )
+            )
+        except Exception as exc:
+            results.append(
+                PostgresDestinationResult(
+                    destination_id=fence.destination_id,
+                    status="FAILED",
+                    fencing_token=token,
+                    error=type(exc).__name__,
+                )
+            )
+    return tuple(results)
 
 
 def _kernel_specs(
@@ -350,7 +632,16 @@ def _capture_source(
     members: tuple[tuple[ProjectionSpec, Table], ...],
     cursors: Mapping[str, int],
     full_rebuild: bool,
-) -> tuple[str, datetime, int, dict[str, list[dict[str, Any]]]]:
+    *,
+    proof: ReconciledCutProof,
+    capture_complete_bundle: bool,
+) -> tuple[
+    str,
+    datetime,
+    int,
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[dict[str, Any]]],
+]:
     # A session-level exclusive lock must precede the repeatable-read BEGIN.
     with source.connect() as connection:
         connection.execute(
@@ -370,6 +661,7 @@ def _capture_source(
                 captured_at = connection.execute(
                     text("SELECT clock_timestamp()")
                 ).scalar_one()
+                _validate_reconciled_capture(proof, source_name, captured_at)
                 sequence_name = f"{schema.prefix}_change_seq"
                 # Allocate the cut while writers are excluded.  All preceding
                 # committed mutations are below H and every later mutation is
@@ -382,6 +674,7 @@ def _capture_source(
                     ).scalar_one()
                 )
                 output: dict[str, list[dict[str, Any]]] = {}
+                complete: dict[str, list[dict[str, Any]]] = {}
                 for spec, table in members:
                     statement = (
                         table.select()
@@ -390,21 +683,29 @@ def _capture_source(
                         )
                         .where(table.c.change_seq <= high_water)
                     )
-                    if not full_rebuild:
-                        statement = statement.where(
-                            table.c.change_seq > cursors.get(spec.member, 0)
-                        )
-                    output[spec.member] = [
+                    captured_rows = [
                         dict(row)
                         for row in connection.execute(statement).mappings()
                     ]
+                    output[spec.member] = (
+                        captured_rows
+                        if full_rebuild
+                        else [
+                            row
+                            for row in captured_rows
+                            if row["change_seq"] > cursors.get(spec.member, 0)
+                        ]
+                    )
+                    complete[spec.member] = (
+                        captured_rows if capture_complete_bundle else []
+                    )
         finally:
             connection.execute(
                 text("SELECT pg_advisory_unlock(:lock_key)"),
                 {"lock_key": EXPORT_BARRIER_ADVISORY_KEY},
             )
             connection.commit()
-    return source_name, captured_at, high_water, output
+    return source_name, captured_at, high_water, output, complete
 
 
 def _validate_members(
@@ -992,26 +1293,41 @@ def _empty_result(
     token: int | None = None,
     error: str | None = None,
     captured_at: datetime | None = None,
+    failed_remotes: Sequence[Any] = (),
 ) -> ExportResult:
+    destinations: list[LocalDestinationResult | PostgresDestinationResult] = [
+        LocalDestinationResult(
+            destination_id=options.destination_id,
+            status=status,
+            fencing_token=token,
+            error=error,
+        )
+    ]
+    destinations.extend(
+        PostgresDestinationResult(
+            destination_id=destination.destination_id,
+            status="FAILED",
+            error=error,
+        )
+        for destination in failed_remotes
+    )
     return ExportResult(
         source_database=source_name or schema.prefix,
         source_captured_at=captured_at or datetime.now().astimezone(),
         snapshot_seq=snapshot_seq,
         member_counts=counts,
         member_checksums=checksums,
-        destinations=(
-            LocalDestinationResult(
-                destination_id=options.destination_id,
-                status=status,
-                fencing_token=token,
-                error=error,
-            ),
-        ),
+        destinations=tuple(destinations),
     )
 
 
 def _export_application(
-    source: Engine, options: ExportOptions, remote_destinations: Sequence[Any]
+    source: Engine,
+    options: ExportOptions,
+    remote_destinations: Sequence[Any],
+    *,
+    reconciliation_schema: PlatformSchema,
+    reconcile_before_capture: ReconcileBeforeCapture,
 ) -> ExportResult:
     """Publish one application-owned full-rebuild bundle to local DuckDB.
 
@@ -1039,8 +1355,12 @@ def _export_application(
             counts: dict[str, int] = {}
             checksums: dict[str, str] = {}
             try:
+                proof = reconcile_before_capture(source, reconciliation_schema)
+                _validate_reconciled_cut_proof(proof)
                 source_name, captured_at, snapshot_seq, rows = (
-                    _capture_application_source(source, specs, options)
+                    _capture_application_source(
+                        source, specs, options, proof=proof
+                    )
                 )
                 rows = _normalize_application_rows(specs, rows)
                 counts, checksums = _validate_application_rows(specs, rows)
@@ -1093,6 +1413,7 @@ def _export_application(
                     token=token,
                     error=type(exc).__name__,
                     captured_at=captured_at,
+                    failed_remotes=remote_destinations,
                 )
         finally:
             connection.close()
@@ -1291,7 +1612,11 @@ def _application_specs(
 
 
 def _capture_application_source(
-    source: Engine, specs: tuple[ProjectionSpec, ...], options: ExportOptions
+    source: Engine,
+    specs: tuple[ProjectionSpec, ...],
+    options: ExportOptions,
+    *,
+    proof: ReconciledCutProof,
 ) -> tuple[str, datetime, int, dict[str, list[dict[str, Any]]]]:
     sequence = _pg_identifier(options.source_change_sequence)
     with source.connect() as connection:
@@ -1311,6 +1636,7 @@ def _capture_application_source(
                 captured_at = connection.execute(
                     text("SELECT clock_timestamp()")
                 ).scalar_one()
+                _validate_reconciled_capture(proof, source_name, captured_at)
                 snapshot_seq = int(
                     connection.execute(
                         text(f"SELECT nextval('{sequence}'::regclass)")
@@ -1406,6 +1732,20 @@ def _duckdb_type(source_type: sqltypes.TypeEngine[Any]) -> str:
     if isinstance(source_type, sqltypes.Numeric):
         return "DECIMAL"
     return "VARCHAR"
+
+
+def _remote_kernel_sql_type(source_type: sqltypes.TypeEngine[Any]) -> str:
+    if isinstance(source_type, sqltypes.DateTime):
+        return "TIMESTAMPTZ" if source_type.timezone else "TIMESTAMP"
+    if isinstance(source_type, sqltypes.Boolean):
+        return "BOOLEAN"
+    if isinstance(source_type, sqltypes.Integer):
+        return "BIGINT"
+    if isinstance(source_type, sqltypes.Float):
+        return "DOUBLE PRECISION"
+    if isinstance(source_type, sqltypes.Numeric):
+        return "NUMERIC"
+    return "TEXT"
 
 
 def _storage_value(value: Any, source_type: sqltypes.TypeEngine[Any]) -> Any:

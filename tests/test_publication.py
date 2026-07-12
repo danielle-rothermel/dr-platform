@@ -18,21 +18,48 @@ from dr_platform import (
     PinnedBundleGoneError,
     PlatformSchema,
     PostgresPublicationFence,
+    ReconciledCutProof,
     RemoteBundleManifest,
     RemoteBundleMember,
     SourceCoordinate,
     capture_source_coordinate,
     check_snapshot_compatibility,
     cleanup_local_bundles,
-    export,
     pin_local_bundle,
     require_compatible_snapshot,
     resolve_local_pin,
     upgrade_platform_schema,
 )
+from dr_platform import (
+    export as _export,
+)
 from tests.contracts.test_platform_v6_cancellation import _register_operation
 
 _EMPTY_CHECKSUM = hashlib.sha256(b"[]").hexdigest()
+
+
+def _reconcile_before_capture(
+    engine: Engine, _schema: PlatformSchema
+) -> ReconciledCutProof:
+    with engine.connect() as connection:
+        source_database, reconciled_at = connection.execute(
+            text("SELECT current_database(), clock_timestamp()")
+        ).one()
+    return ReconciledCutProof(
+        source_id=f"dbos:{source_database}",
+        database_server=source_database,
+        reconciled_at=reconciled_at,
+        scope="all-platform-lifecycle",
+    )
+
+
+def export(source: Engine, options: ExportOptions, **kwargs):  # type: ignore[no-untyped-def]
+    return _export(
+        source,
+        options,
+        reconcile_before_capture=_reconcile_before_capture,
+        **kwargs,
+    )
 
 
 def _empty_candidate_manifest(
