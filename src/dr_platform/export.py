@@ -13,7 +13,7 @@ import json
 import os
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime
 from enum import Enum
@@ -31,7 +31,7 @@ from pydantic import (
     StrictStr,
     field_serializer,
 )
-from sqlalchemy import Engine, Table, text
+from sqlalchemy import Connection, Engine, Table, text
 from sqlalchemy.sql import sqltypes
 
 from dr_platform.db import PlatformSchema
@@ -41,7 +41,9 @@ from dr_platform.telemetry import validated_telemetry_attributes
 NonEmptyStr = Annotated[StrictStr, Field(min_length=1)]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
-FullRebuildBuilder = Callable[[], None]
+FullRebuildBuilder = Callable[
+    [Connection, "ApplicationSnapshot"], Sequence[Mapping[str, Any]]
+]
 DbosTelemetryHook = Callable[[Mapping[str, str | int | float | bool]], None]
 
 
@@ -55,6 +57,16 @@ class ProjectionSpec(BaseModel):
     unique_key: tuple[NonEmptyStr, ...]
     references: tuple[tuple[NonEmptyStr, NonEmptyStr, NonEmptyStr], ...] = ()
     full_rebuild_builder: FullRebuildBuilder | None = None
+
+
+class ApplicationSnapshot(BaseModel):
+    """One repeatable-read application source cut shared by every builder."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_database: NonEmptyStr
+    captured_at: datetime
+    snapshot_seq: NonNegativeInt
 
 
 class ExportOptions(BaseModel):
@@ -177,6 +189,10 @@ def export(
     while a retry captures the same uncommitted delta again.
     """
 
+    if options.projections and any(
+        spec.full_rebuild_builder is not None for spec in options.projections
+    ):
+        return _export_application(source, options)
     selected = schema or PlatformSchema()
     members = _kernel_specs(selected, options.projections)
     database_path = Path(options.destination_path)
@@ -679,6 +695,174 @@ def _stage_and_promote(
         raise
 
 
+def _stage_and_promote_application(
+    connection: duckdb.DuckDBPyConnection,
+    options: ExportOptions,
+    token: int,
+    snapshot_seq: int,
+    specs: tuple[ProjectionSpec, ...],
+    rows: Mapping[str, list[dict[str, Any]]],
+) -> tuple[
+    Literal["PROMOTED", "IDEMPOTENT", "STALE_PROMOTION"],
+    str | None,
+    dict[str, int],
+    dict[str, str],
+]:
+    """Build and fence the complete application bundle in one transaction."""
+
+    connection.execute("BEGIN TRANSACTION")
+    try:
+        state = connection.execute(
+            f"SELECT committed_snapshot_seq, checksums_json, bundle_id, owner, fencing_token, lease_expires_at "
+            f"FROM {_STATE_TABLE} WHERE destination_id = ? AND bundle_key = ?",
+            [options.destination_id, options.bundle_key],
+        ).fetchone()
+        if state is None or state[3] != options.run_id or state[4] != token:
+            connection.execute("ROLLBACK")
+            return "STALE_PROMOTION", None, {}, {}
+        if state[5] <= _duckdb_scalar(connection, "SELECT epoch_ms(now())"):
+            connection.execute("ROLLBACK")
+            return "STALE_PROMOTION", None, {}, {}
+        committed = int(state[0] or 0)
+        if state[2] is not None and snapshot_seq < committed:
+            connection.execute("ROLLBACK")
+            return "STALE_PROMOTION", None, {}, {}
+        candidate_tables: dict[str, str] = {}
+        bundle_id = f"application_{snapshot_seq}_{token}_{options.run_id}"
+        for spec in specs:
+            if not _renew_lease(connection, options, token):
+                connection.execute("ROLLBACK")
+                return "STALE_PROMOTION", None, {}, {}
+            stage = _quoted(f"__dr_platform_stage_{token}_{spec.member}")
+            target = _quoted(f"__dr_platform_bundle_{bundle_id}_{spec.member}")
+            connection.execute(
+                f"CREATE TABLE {stage} ("
+                + ", ".join(
+                    f"{_quoted(column)} VARCHAR" for column in spec.columns
+                )
+                + ")"
+            )
+            values = [
+                tuple(
+                    _application_storage_value(row[column])
+                    for column in spec.columns
+                )
+                for row in rows[spec.member]
+            ]
+            if values:
+                connection.executemany(
+                    f"INSERT INTO {stage} VALUES ({', '.join('?' for _ in spec.columns)})",
+                    values,
+                )
+            connection.execute(
+                f"CREATE TABLE {target} AS SELECT * FROM {stage}"
+            )
+            connection.execute(f"DROP TABLE {stage}")
+            candidate_tables[spec.member] = target.strip('"')
+        candidate_counts, candidate_checksums = _application_destination_facts(
+            connection, specs, candidate_tables
+        )
+        old_checksums = json.loads(state[1] or "{}")
+        if state[2] is not None and snapshot_seq == committed:
+            connection.execute("ROLLBACK")
+            _release_lease(connection, options, token)
+            if old_checksums == candidate_checksums:
+                return (
+                    "IDEMPOTENT",
+                    str(state[2]),
+                    candidate_counts,
+                    candidate_checksums,
+                )
+            return (
+                "STALE_PROMOTION",
+                None,
+                candidate_counts,
+                candidate_checksums,
+            )
+        for spec in specs:
+            connection.execute(
+                f"INSERT OR REPLACE INTO {_MEMBER_TABLE} VALUES (?, ?, ?, ?)",
+                [
+                    options.destination_id,
+                    options.bundle_key,
+                    spec.member,
+                    candidate_tables[spec.member],
+                ],
+            )
+        manifest = {
+            spec.member: {
+                "table": candidate_tables[spec.member],
+                "columns": list(spec.columns),
+                "unique_key": list(spec.unique_key),
+                "checksum": candidate_checksums[spec.member],
+            }
+            for spec in specs
+        }
+        connection.execute(
+            f"INSERT INTO {_BUNDLE_TABLE} VALUES (?, ?, ?, ?, ?, epoch_ms(now()))",
+            [
+                options.destination_id,
+                options.bundle_key,
+                bundle_id,
+                snapshot_seq,
+                _canonical(manifest),
+            ],
+        )
+        promoted = connection.execute(
+            f"UPDATE {_STATE_TABLE} SET committed_snapshot_seq = ?, cursors_json = ?, checksums_json = ?, bundle_id = ?, owner = NULL, lease_expires_at = NULL, updated_at = epoch_ms(now()) "
+            "WHERE destination_id = ? AND bundle_key = ? AND owner = ? AND fencing_token = ? "
+            "AND lease_expires_at > epoch_ms(now()) RETURNING fencing_token",
+            [
+                snapshot_seq,
+                _canonical({spec.member: snapshot_seq for spec in specs}),
+                _canonical(candidate_checksums),
+                bundle_id,
+                options.destination_id,
+                options.bundle_key,
+                options.run_id,
+                token,
+            ],
+        ).fetchone()
+        if promoted is None:
+            connection.execute("ROLLBACK")
+            return (
+                "STALE_PROMOTION",
+                None,
+                candidate_counts,
+                candidate_checksums,
+            )
+        connection.execute("COMMIT")
+        return "PROMOTED", bundle_id, candidate_counts, candidate_checksums
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+
+
+def _application_destination_facts(
+    connection: duckdb.DuckDBPyConnection,
+    specs: tuple[ProjectionSpec, ...],
+    candidate_tables: Mapping[str, str],
+) -> tuple[dict[str, int], dict[str, str]]:
+    rows: dict[str, list[dict[str, Any]]] = {}
+    for spec in specs:
+        table = _quoted(candidate_tables[spec.member])
+        actual_columns = tuple(
+            item[0]
+            for item in connection.execute(f"DESCRIBE {table}").fetchall()
+        )
+        if actual_columns != spec.columns:
+            raise ValueError(
+                f"{spec.member} failed destination schema validation"
+            )
+        rows[spec.member] = [
+            dict(zip(spec.columns, row, strict=True))
+            for row in connection.execute(
+                f"SELECT {', '.join(_quoted(column) for column in spec.columns)} FROM {table}"
+            ).fetchall()
+        ]
+    return _validate_application_rows(specs, rows)
+
+
 def _validate_destination_member(
     connection: duckdb.DuckDBPyConnection,
     table: str,
@@ -769,6 +953,205 @@ def _empty_result(
     )
 
 
+def _export_application(
+    source: Engine, options: ExportOptions
+) -> ExportResult:
+    """Publish one application-owned full-rebuild bundle to local DuckDB.
+
+    Builders execute together in the application repeatable-read transaction.
+    The same destination Lease, fencing token, and reader-visible pointer used
+    by kernel publication then promote every validated member atomically.
+    """
+
+    specs = _application_specs(options)
+    database_path = Path(options.destination_path)
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    with _duckdb_lock(database_path):
+        connection = duckdb.connect(str(database_path))
+        try:
+            _create_destination_tables(connection)
+            lease = _acquire_lease(connection, options)
+            if lease is None:
+                return _empty_result(
+                    PlatformSchema(), options, "", 0, {}, {}, "LEASE_HELD"
+                )
+            token, _ = lease
+            source_name = ""
+            captured_at: datetime | None = None
+            snapshot_seq = 0
+            counts: dict[str, int] = {}
+            checksums: dict[str, str] = {}
+            try:
+                source_name, captured_at, snapshot_seq, rows = (
+                    _capture_application_source(source, specs)
+                )
+                counts, checksums = _validate_application_rows(specs, rows)
+                status, bundle_id, counts, checksums = (
+                    _stage_and_promote_application(
+                        connection, options, token, snapshot_seq, specs, rows
+                    )
+                )
+                return ExportResult(
+                    source_database=source_name,
+                    source_captured_at=captured_at,
+                    snapshot_seq=snapshot_seq,
+                    member_counts=counts,
+                    member_checksums=checksums,
+                    destinations=(
+                        LocalDestinationResult(
+                            destination_id=options.destination_id,
+                            status=status,
+                            bundle_id=bundle_id,
+                            fencing_token=token,
+                        ),
+                    ),
+                )
+            except Exception as exc:
+                _release_lease(connection, options, token)
+                return _empty_result(
+                    PlatformSchema(),
+                    options,
+                    source_name,
+                    snapshot_seq,
+                    counts,
+                    checksums,
+                    "FAILED",
+                    token=token,
+                    error=type(exc).__name__,
+                    captured_at=captured_at,
+                )
+        finally:
+            connection.close()
+
+
+def _application_specs(
+    options: ExportOptions,
+) -> tuple[ProjectionSpec, ...]:
+    if not options.full_rebuild:
+        raise ValueError("application projections require full_rebuild=True")
+    if not options.projections:
+        raise ValueError("application publication requires projections")
+    names = [spec.member for spec in options.projections]
+    if len(names) != len(set(names)):
+        raise ValueError("application projection members must be unique")
+    for spec in options.projections:
+        if spec.full_rebuild_builder is None:
+            raise ValueError("every application member requires a builder")
+        if not spec.unique_key or not set(spec.unique_key).issubset(
+            spec.columns
+        ):
+            raise ValueError(f"{spec.member} has an invalid unique key")
+        for local, target, target_column in spec.references:
+            target_spec = next(
+                (
+                    item
+                    for item in options.projections
+                    if item.member == target
+                ),
+                None,
+            )
+            if (
+                local not in spec.columns
+                or target_spec is None
+                or target_column not in target_spec.columns
+            ):
+                raise ValueError(
+                    f"{spec.member} has an invalid member reference"
+                )
+    return options.projections
+
+
+def _capture_application_source(
+    source: Engine, specs: tuple[ProjectionSpec, ...]
+) -> tuple[str, datetime, int, dict[str, list[dict[str, Any]]]]:
+    with source.connect() as connection:
+        connection.execute(
+            text("SELECT pg_advisory_lock(:lock_key)"),
+            {"lock_key": EXPORT_BARRIER_ADVISORY_KEY},
+        )
+        connection.commit()
+        try:
+            connection.execution_options(isolation_level="REPEATABLE READ")
+            with connection.begin():
+                source_name = str(
+                    connection.execute(
+                        text("SELECT current_database()")
+                    ).scalar_one()
+                )
+                captured_at = connection.execute(
+                    text("SELECT clock_timestamp()")
+                ).scalar_one()
+                snapshot_seq = int(
+                    connection.execute(
+                        text("SELECT nextval('platform_change_seq'::regclass)")
+                    ).scalar_one()
+                )
+                snapshot = ApplicationSnapshot(
+                    source_database=source_name,
+                    captured_at=captured_at,
+                    snapshot_seq=snapshot_seq,
+                )
+                rows = {
+                    spec.member: [
+                        dict(row)
+                        for row in spec.full_rebuild_builder(
+                            connection, snapshot
+                        )
+                    ]
+                    for spec in specs
+                    if spec.full_rebuild_builder is not None
+                }
+        finally:
+            connection.execute(
+                text("SELECT pg_advisory_unlock(:lock_key)"),
+                {"lock_key": EXPORT_BARRIER_ADVISORY_KEY},
+            )
+            connection.commit()
+    return source_name, captured_at, snapshot_seq, rows
+
+
+def _validate_application_rows(
+    specs: tuple[ProjectionSpec, ...], rows: Mapping[str, list[dict[str, Any]]]
+) -> tuple[dict[str, int], dict[str, str]]:
+    if set(rows) != {spec.member for spec in specs}:
+        raise ValueError(
+            "application builders returned an incomplete inventory"
+        )
+    counts: dict[str, int] = {}
+    checksums: dict[str, str] = {}
+    for spec in specs:
+        member_rows = rows[spec.member]
+        if any(set(row) != set(spec.columns) for row in member_rows):
+            raise ValueError(
+                f"{spec.member} does not match its declared schema"
+            )
+        keys = [
+            tuple(row[key] for key in spec.unique_key) for row in member_rows
+        ]
+        if len(keys) != len({_canonical(key) for key in keys}):
+            raise ValueError(f"{spec.member} contains duplicate declared keys")
+        counts[spec.member] = len(member_rows)
+        checksums[spec.member] = hashlib.sha256(
+            _canonical(
+                sorted(
+                    member_rows,
+                    key=lambda row: _canonical(
+                        tuple(row[key] for key in spec.unique_key)
+                    ),
+                )
+            ).encode()
+        ).hexdigest()
+    for spec in specs:
+        for local, target, target_column in spec.references:
+            target_values = {row[target_column] for row in rows[target]}
+            if any(
+                row[local] is not None and row[local] not in target_values
+                for row in rows[spec.member]
+            ):
+                raise ValueError(f"{spec.member} failed reference validation")
+    return counts, checksums
+
+
 def _quoted(identifier: str) -> str:
     if not _IDENTIFIER.fullmatch(identifier):
         raise ValueError(f"unsafe identifier: {identifier}")
@@ -811,6 +1194,18 @@ def _storage_value(value: Any, source_type: sqltypes.TypeEngine[Any]) -> Any:
     if isinstance(value, uuid.UUID):
         return str(value)
     return value
+
+
+def _application_storage_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (dict, list, tuple)):
+        return _canonical(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return str(value.value)
+    return str(value)
 
 
 def _duckdb_scalar(connection: duckdb.DuckDBPyConnection, query: str) -> Any:

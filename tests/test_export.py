@@ -11,6 +11,7 @@ import duckdb
 import pytest
 from sqlalchemy import (
     Column,
+    Connection,
     Engine,
     Integer,
     MetaData,
@@ -27,6 +28,7 @@ from dr_platform import (
     upgrade_platform_schema,
 )
 from dr_platform.export import (
+    ApplicationSnapshot,
     ProjectionSpec,
     _acquire_lease,
     _create_destination_tables,
@@ -77,8 +79,11 @@ def test_empty_kernel_export_promotes_and_replays(
 def test_projection_full_rebuild_contract_and_dbos_telemetry_are_frozen() -> (
     None
 ):
-    def rebuild() -> None:
-        return None
+    def rebuild(
+        connection: Connection, snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, str], ...]:
+        del connection, snapshot
+        return ()
 
     spec = ProjectionSpec(
         member="projection",
@@ -101,6 +106,105 @@ def test_projection_full_rebuild_contract_and_dbos_telemetry_are_frozen() -> (
             "platform.publication.snapshot_seq": 7,
         }
     ]
+
+
+def test_application_projection_bundle_builds_one_snapshot(
+    pg_engine: Engine, tmp_path
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE application_roots (id TEXT PRIMARY KEY)")
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE application_children "
+                "(id TEXT PRIMARY KEY, root_id TEXT NOT NULL)"
+            )
+        )
+        connection.execute(
+            text("INSERT INTO application_roots VALUES ('root')")
+        )
+        connection.execute(
+            text("INSERT INTO application_children VALUES ('child', 'root')")
+        )
+
+    snapshots: list[int] = []
+
+    def roots(
+        connection: Connection, snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, str], ...]:
+        snapshots.append(snapshot.snapshot_seq)
+        return tuple(
+            {"id": row["id"]}
+            for row in connection.execute(
+                text("SELECT id FROM application_roots")
+            ).mappings()
+        )
+
+    def children(
+        connection: Connection, snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, str], ...]:
+        snapshots.append(snapshot.snapshot_seq)
+        return tuple(
+            {"id": row["id"], "root_id": row["root_id"]}
+            for row in connection.execute(
+                text("SELECT id, root_id FROM application_children")
+            ).mappings()
+        )
+
+    database = tmp_path / "application.duckdb"
+    result = export(
+        pg_engine,
+        ExportOptions(
+            destination_path=str(database),
+            bundle_key="application-fixture",
+            full_rebuild=True,
+            projections=(
+                ProjectionSpec(
+                    member="roots",
+                    columns=("id",),
+                    unique_key=("id",),
+                    full_rebuild_builder=roots,
+                ),
+                ProjectionSpec(
+                    member="children",
+                    columns=("id", "root_id"),
+                    unique_key=("id",),
+                    references=(("root_id", "roots", "id"),),
+                    full_rebuild_builder=children,
+                ),
+            ),
+        ),
+    )
+
+    assert result.destinations[0].status == "PROMOTED", result
+    assert snapshots == [result.snapshot_seq, result.snapshot_seq]
+    assert dict(result.member_counts) == {"roots": 1, "children": 1}
+    with duckdb.connect(str(database), read_only=True) as destination:
+        members = destination.execute(
+            "SELECT member FROM __dr_platform_export_members "
+            "WHERE bundle_key = 'application-fixture' ORDER BY member"
+        ).fetchall()
+    assert members == [("children",), ("roots",)]
+
+
+def test_application_projection_rejects_missing_builder_and_invalid_closure(
+    pg_engine: Engine, tmp_path
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    options = ExportOptions(
+        destination_path=str(tmp_path / "invalid.duckdb"),
+        bundle_key="application-invalid",
+        full_rebuild=True,
+        projections=(
+            ProjectionSpec(
+                member="roots", columns=("id",), unique_key=("id",)
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="unknown kernel projection members"):
+        export(pg_engine, options)
 
 
 def test_local_lease_fence_and_fault_preserve_pointer(tmp_path) -> None:

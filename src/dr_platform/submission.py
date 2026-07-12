@@ -152,6 +152,23 @@ class RegistrationResult(BaseModel):
     items: tuple[RegistrationItemResult, ...]
 
 
+class RegistrationPageContext(BaseModel):
+    """Frozen page facts available to a registration hook.
+
+    ``is_final_page`` is authoritative only for this transaction: the
+    completion cursor CAS immediately follows the hook and rolls its work back
+    if the lease or cursor is no longer current.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    manifest_digest: NonEmptyStr
+    page_index: NonNegativeInt
+    page_count: PositiveInt
+    next_registration_cursor: PositiveInt
+    is_final_page: bool
+
+
 @runtime_checkable
 class RegistrationHook(Protocol):
     def __call__(
@@ -160,6 +177,7 @@ class RegistrationHook(Protocol):
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult: ...
 
 
@@ -701,11 +719,20 @@ def _register_page(  # noqa: PLR0913
             schema=schema,
             workflow_ids=workflow_ids,
         )
+        next_cursor = page.page_index + 1
+        is_final = next_cursor == len(manifest.pages)
         hook_result = _invoke_registration_hook(
             connection=connection,
             target=target,
             operation_key=manifest.operation_key,
             items=candidate_items,
+            page=RegistrationPageContext(
+                manifest_digest=manifest.manifest_digest,
+                page_index=page.page_index,
+                page_count=len(manifest.pages),
+                next_registration_cursor=next_cursor,
+                is_final_page=is_final,
+            ),
         )
         _validate_hook_result(items=candidate_items, result=hook_result)
         now = _database_now(connection)
@@ -763,8 +790,6 @@ def _register_page(  # noqa: PLR0913
             for result in hook_result.items
         )
         already_present = len(hook_result.items) - inserted
-        next_cursor = page.page_index + 1
-        is_final = next_cursor == len(manifest.pages)
         cas_now = func.clock_timestamp()
         values: dict[str, Any] = {
             "registration_cursor": next_cursor,
@@ -1156,6 +1181,7 @@ def _invoke_registration_hook(
     target: ExecutionTarget,
     operation_key: str,
     items: tuple[RegistrationItem, ...],
+    page: RegistrationPageContext,
 ) -> RegistrationResult:
     if target.registration_hook is None:
         return RegistrationResult(
@@ -1176,6 +1202,7 @@ def _invoke_registration_hook(
             connection,
             operation_key=operation_key,
             items=hook_items,
+            page=page,
         )
     )
     if any(

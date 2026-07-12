@@ -41,9 +41,11 @@ from dr_platform.dbos_config import (
     build_platform_dbos_config,
 )
 from dr_platform.export import (
+    ApplicationSnapshot,
     DestinationResult,
     ExportOptions,
     ExportResult,
+    FullRebuildBuilder,
     LocalDestinationResult,
     PostgresDestinationResult,
     ProjectionSpec,
@@ -124,6 +126,7 @@ from dr_platform.status import (
 )
 from dr_platform.submission import (
     RegistrationHook,
+    RegistrationPageContext,
     RegistrationResult,
     SubmitOptions,
     SubmitResult,
@@ -139,6 +142,7 @@ from dr_platform.targets import (
 
 __all__ = [
     "RETRYABLE_BACKOFF_FAILURES",
+    "ApplicationSnapshot",
     "AttemptEnqueueState",
     "AttemptExecutionState",
     "AttemptInspection",
@@ -162,6 +166,7 @@ __all__ = [
     "ExportResult",
     "FailureClass",
     "FailureSnapshot",
+    "FullRebuildBuilder",
     "HealthReport",
     "IncompatibleSnapshotError",
     "ItemInsertStatus",
@@ -193,6 +198,7 @@ __all__ = [
     "PostgresPublicationFence",
     "ProjectionSpec",
     "RegistrationHook",
+    "RegistrationPageContext",
     "RegistrationResult",
     "RemoteBundleManifest",
     "RemoteBundleMember",
