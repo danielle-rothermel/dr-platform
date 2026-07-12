@@ -33,3 +33,19 @@ semantics. Whetstone-specific Analysis and Detail builders remain W7-owned.
 Deterministic local tests are blocking. MotherDuck, Neon, and live DBOS source
 checks are reported separately when credentials or endpoints are unavailable;
 no secret or DSN enters export models, logs, or bundle metadata.
+
+P7 verification on 2026-07-12:
+
+- MotherDuck project hash `493872f2ab39`: the production fence acquired and
+  renewed a Lease, promoted through conditional `UPDATE ... RETURNING`, and
+  rejected a stale token. The adapter uses `CURRENT_TIMESTAMP` because the
+  MotherDuck endpoint does not implement PostgreSQL `clock_timestamp()`, and
+  its SQLAlchemy engine must set `use_native_hstore=False` because the endpoint
+  does not implement savepoints used by hstore discovery.
+- Application/DBOS topology project hash `56f797833dee`: 100 fresh samples
+  measured p99 skew `0.297 ms`, median query quantum `0.188 ms`, and retained
+  the pinned `100 ms` bound. `DBOS_SYSTEM_DATABASE_URL` was absent, so the
+  specified application-endpoint fallback was exercised.
+- `NEON_DATABASE_URL` was absent. The same row-lock-free conditional fence was
+  exercised against local Postgres in the deterministic suite; the live Neon
+  rerun remains a credential gate and does not block unrelated implementation.

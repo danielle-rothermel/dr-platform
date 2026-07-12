@@ -115,6 +115,8 @@ class ExportResult(BaseModel):
 _IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 _STATE_TABLE = "__dr_platform_export_state"
 _MEMBER_TABLE = "__dr_platform_export_members"
+_BUNDLE_TABLE = "__dr_platform_export_bundles"
+_PIN_TABLE = "__dr_platform_export_pins"
 _SENSITIVE_KERNEL_COLUMNS = {
     "operations": frozenset({"spec", "metadata"}),
     "items": frozenset({"spec"}),
@@ -367,6 +369,18 @@ def _create_destination_tables(connection: duckdb.DuckDBPyConnection) -> None:
         "destination_id VARCHAR, bundle_key VARCHAR, member VARCHAR, table_name VARCHAR, "
         "PRIMARY KEY(destination_id, bundle_key, member))"
     )
+    connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {_BUNDLE_TABLE} ("
+        "destination_id VARCHAR, bundle_key VARCHAR, bundle_id VARCHAR, "
+        "snapshot_seq BIGINT, manifest_json VARCHAR, created_at BIGINT, "
+        "PRIMARY KEY(destination_id, bundle_key, bundle_id))"
+    )
+    connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {_PIN_TABLE} ("
+        "destination_id VARCHAR, bundle_key VARCHAR, pin_id VARCHAR, "
+        "bundle_id VARCHAR, expires_at BIGINT, created_at BIGINT, "
+        "PRIMARY KEY(destination_id, bundle_key, pin_id))"
+    )
 
 
 def _acquire_lease(
@@ -573,6 +587,25 @@ def _stage_and_promote(
                     candidate_tables[spec.member],
                 ],
             )
+        manifest = {
+            spec.member: {
+                "table": candidate_tables[spec.member],
+                "columns": list(spec.columns),
+                "unique_key": list(spec.unique_key),
+                "checksum": candidate_checksums[spec.member],
+            }
+            for spec, _ in members
+        }
+        connection.execute(
+            f"INSERT INTO {_BUNDLE_TABLE} VALUES (?, ?, ?, ?, ?, epoch_ms(now()))",
+            [
+                options.destination_id,
+                options.bundle_key,
+                bundle_id,
+                snapshot_seq,
+                _canonical(manifest),
+            ],
+        )
         cursors = {spec.member: snapshot_seq for spec, _ in members}
         promoted = connection.execute(
             f"UPDATE {_STATE_TABLE} SET committed_snapshot_seq = ?, cursors_json = ?, checksums_json = ?, bundle_id = ?, "
