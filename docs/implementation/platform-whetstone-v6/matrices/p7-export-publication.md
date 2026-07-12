@@ -37,8 +37,12 @@ no secret or DSN enters export models, logs, or bundle metadata.
 P7 verification on 2026-07-12:
 
 - MotherDuck project hash `493872f2ab39`: the production fence acquired and
-  renewed a Lease, promoted through conditional `UPDATE ... RETURNING`, and
-  rejected a stale token. The adapter uses `CURRENT_TIMESTAMP` because the
+  renewed a Lease, promoted a physically present row-count/checksum-validated
+  bundle with persisted source coordinates through conditional
+  `UPDATE ... RETURNING`, resolved an active pin, and rejected a stale token.
+  MotherDuck staging commits before the final short fence transaction so its
+  transaction-stable timestamp cannot authorize a writer past Lease expiry.
+  The adapter uses `CURRENT_TIMESTAMP` because the
   MotherDuck endpoint does not implement PostgreSQL `clock_timestamp()`, and
   its SQLAlchemy engine must set `use_native_hstore=False` because the endpoint
   does not implement savepoints used by hstore discovery.

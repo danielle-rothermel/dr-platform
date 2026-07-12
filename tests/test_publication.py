@@ -1,7 +1,9 @@
 """P7b remote fence, compatibility, and pin/cleanup coverage."""
+# ruff: noqa: PLR0915, S608
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 from uuid import uuid4
@@ -16,7 +18,10 @@ from dr_platform import (
     PinnedBundleGoneError,
     PlatformSchema,
     PostgresPublicationFence,
+    RemoteBundleManifest,
+    RemoteBundleMember,
     SourceCoordinate,
+    capture_source_coordinate,
     check_snapshot_compatibility,
     cleanup_local_bundles,
     export,
@@ -26,6 +31,8 @@ from dr_platform import (
     upgrade_platform_schema,
 )
 from tests.contracts.test_platform_v6_cancellation import _register_operation
+
+_EMPTY_CHECKSUM = hashlib.sha256(b"[]").hexdigest()
 
 
 def test_compatibility_uses_truthful_timestamps_not_equal_sequences() -> None:
@@ -65,6 +72,8 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
     suffix = uuid4().hex[:12]
     state_table = f"publication_state_{suffix}"
     staged_table = f"publication_stage_{suffix}"
+    expired_table = f"publication_expired_{suffix}"
+    promoted_table = f"publication_bundle_{suffix}"
     fence = PostgresPublicationFence(
         pg_engine,
         destination_id=f"{kind}-test",
@@ -93,9 +102,26 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
             lease_seconds=60,
         )
 
-        def create_stage(connection: Connection) -> None:
+        coordinate = capture_source_coordinate(
+            pg_engine, source_id="application", snapshot_seq=1
+        )
+
+        def create_stale_stage(
+            connection: Connection,
+        ) -> RemoteBundleManifest:
             connection.execute(
                 text(f'CREATE TABLE "{staged_table}" (id BIGINT)')
+            )
+            return RemoteBundleManifest(
+                members=(
+                    RemoteBundleMember(
+                        member="member",
+                        table_name=staged_table,
+                        key_columns=("id",),
+                        row_count=0,
+                        checksum=_EMPTY_CHECKSUM,
+                    ),
+                )
             )
 
         stale = fence.promote(
@@ -105,45 +131,153 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
             snapshot_seq=1,
             bundle_id="stale",
             cursors={"member": 1},
-            checksums={"member": "one"},
-            stage=create_stage,
+            source_coordinates=(coordinate,),
+            stage=create_stale_stage,
         )
         assert stale.disposition == "STALE_PROMOTION"
         with pg_engine.connect() as connection:
             exists = connection.execute(
                 text("SELECT to_regclass(:name)"), {"name": staged_table}
             ).scalar_one()
-        assert exists is None
+        assert (exists is not None) == (kind == "motherduck")
 
-        promoted = fence.promote(
+        def expire_during_stage(
+            connection: Connection,
+        ) -> RemoteBundleManifest:
+            connection.execute(
+                text(f'CREATE TABLE "{expired_table}" (id BIGINT)')
+            )
+            connection.execute(
+                text(
+                    f'UPDATE "{state_table}" SET lease_expires_at = '
+                    "CURRENT_TIMESTAMP - INTERVAL '1 second' "
+                    "WHERE destination_id = :destination "
+                    "AND bundle_key = 'analysis'"
+                ),
+                {"destination": f"{kind}-test"},
+            )
+            return RemoteBundleManifest(
+                members=(
+                    RemoteBundleMember(
+                        member="member",
+                        table_name=expired_table,
+                        key_columns=("id",),
+                        row_count=0,
+                        checksum=_EMPTY_CHECKSUM,
+                    ),
+                )
+            )
+
+        expired = fence.promote(
             bundle_key="analysis",
             run_id="owner",
             fencing_token=2,
             snapshot_seq=1,
+            bundle_id="expired-stage",
+            cursors={"member": 1},
+            source_coordinates=(coordinate,),
+            stage=expire_during_stage,
+        )
+        assert expired.disposition == "STALE_PROMOTION"
+        current = fence.acquire_lease(
+            bundle_key="analysis", run_id="owner", lease_seconds=60
+        )
+        assert current.fencing_token == 3
+
+        def create_promoted_stage(
+            connection: Connection,
+        ) -> RemoteBundleManifest:
+            connection.execute(
+                text(f'CREATE TABLE "{promoted_table}" (id BIGINT)')
+            )
+            return RemoteBundleManifest(
+                members=(
+                    RemoteBundleMember(
+                        member="member",
+                        table_name=promoted_table,
+                        key_columns=("id",),
+                        row_count=0,
+                        checksum=_EMPTY_CHECKSUM,
+                    ),
+                )
+            )
+
+        promoted = fence.promote(
+            bundle_key="analysis",
+            run_id="owner",
+            fencing_token=3,
+            snapshot_seq=1,
             bundle_id="bundle-one",
             cursors={"member": 1},
-            checksums={"member": "one"},
+            source_coordinates=(coordinate,),
+            stage=create_promoted_stage,
         )
         assert promoted.disposition == "PROMOTED"
 
         replay = fence.acquire_lease(
             bundle_key="analysis", run_id="replay", lease_seconds=60
         )
-        assert replay.fencing_token == 3
+        assert replay.fencing_token == 4
         idempotent = fence.promote(
             bundle_key="analysis",
             run_id="replay",
-            fencing_token=3,
+            fencing_token=4,
             snapshot_seq=1,
             bundle_id="ignored-replay-stage",
             cursors={"member": 1},
-            checksums={"member": "one"},
+            source_coordinates=(coordinate,),
+            stage=lambda _connection: RemoteBundleManifest(
+                members=(
+                    RemoteBundleMember(
+                        member="member",
+                        table_name=promoted_table,
+                        key_columns=("id",),
+                        row_count=0,
+                        checksum=_EMPTY_CHECKSUM,
+                    ),
+                )
+            ),
         )
         assert idempotent.disposition == "IDEMPOTENT"
         assert idempotent.bundle_id == "bundle-one"
+
+        pin = fence.pin_bundle(bundle_key="analysis", ttl_seconds=60)
+        resolved = fence.resolve_pin(pin)
+        assert resolved.bundle_id == "bundle-one"
+        assert resolved.members == {"member": f"public.{promoted_table}"}
+        with pg_engine.begin() as connection:
+            connection.execute(
+                text(f'INSERT INTO "{promoted_table}" VALUES (1)')
+            )
+        with pytest.raises(PinnedBundleGoneError):
+            fence.resolve_pin(pin)
+        with pg_engine.begin() as connection:
+            connection.execute(text(f'DELETE FROM "{promoted_table}"'))
+
+        cleaner = fence.acquire_lease(
+            bundle_key="analysis", run_id="cleaner", lease_seconds=60
+        )
+        assert cleaner.fencing_token == 5
+        deleted = fence.cleanup_bundles(
+            bundle_key="analysis",
+            run_id="cleaner",
+            fencing_token=5,
+        )
+        assert "bundle-one" not in deleted
+        assert fence.resolve_pin(pin).bundle_id == "bundle-one"
     finally:
         with pg_engine.begin() as connection:
             connection.execute(text(f'DROP TABLE IF EXISTS "{staged_table}"'))
+            connection.execute(text(f'DROP TABLE IF EXISTS "{expired_table}"'))
+            connection.execute(
+                text(f'DROP TABLE IF EXISTS "{promoted_table}"')
+            )
+            connection.execute(
+                text(f'DROP TABLE IF EXISTS "{state_table}_pins"')
+            )
+            connection.execute(
+                text(f'DROP TABLE IF EXISTS "{state_table}_bundles"')
+            )
             connection.execute(text(f'DROP TABLE IF EXISTS "{state_table}"'))
 
 
