@@ -1,8 +1,4 @@
-"""Platform baseline: batch operations/items + throttle backoff.
-
-Matches the table/column shapes that stamped-baseline adopters
-(whetstone) already have from their own frozen migration history —
-those adopters STAMP this revision instead of running it.
+"""Fresh final platform kernel baseline.
 
 Revision ID: 0001_platform_baseline
 Revises:
@@ -12,13 +8,9 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import context, op
-from sqlalchemy.dialects.postgresql import JSONB
 
-from dr_platform.db.schema import (
-    BATCH_OPS_COMPLETED_CHECK,
-    BATCH_OPS_COUNT_BOUNDS_CHECK,
-)
-from dr_platform.naming import PlatformNaming
+from dr_platform.db.schema import DEFAULT_PREFIX, PlatformSchema
+from dr_platform.status import TERMINAL_EXECUTION_STATES
 
 revision = "0001_platform_baseline"
 down_revision = None
@@ -26,152 +18,342 @@ branch_labels = None
 depends_on = None
 
 
-def _naming() -> PlatformNaming:
-    naming = context.config.attributes.get("naming")
-    if isinstance(naming, PlatformNaming):
-        return naming
-    return PlatformNaming()
+def _prefix() -> str:
+    prefix = context.config.attributes.get("prefix", DEFAULT_PREFIX)
+    if not isinstance(prefix, str):
+        raise TypeError("migration prefix must be a string")
+    return prefix
+
+
+def _execute(sql: str) -> None:
+    op.execute(sa.text(sql))
+
+
+def _install_change_tracking(schema: PlatformSchema) -> None:
+    prefix = schema.prefix
+    sequence = f"{prefix}_change_seq"
+    function = f"{prefix}_assign_change_seq"
+    trigger = f"{prefix}_assign_change_seq"
+    _execute(f"CREATE SEQUENCE {sequence}")
+    _execute(
+        f"""
+        CREATE FUNCTION {function}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          NEW.change_seq := nextval(
+            format('%I.%I', TG_TABLE_SCHEMA, '{sequence}')::regclass
+          );
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    for table in schema.metadata.sorted_tables:
+        _execute(
+            f"""
+            CREATE TRIGGER {trigger}
+            BEFORE INSERT OR UPDATE ON {table.name}
+            FOR EACH ROW EXECUTE FUNCTION {function}()
+            """
+        )
+
+
+def _install_lifecycle_guards(schema: PlatformSchema) -> None:
+    prefix = schema.prefix
+    delete_function = f"{prefix}_reject_kernel_delete"
+    delete_trigger = f"{prefix}_reject_kernel_delete"
+    _execute(
+        f"""
+        CREATE FUNCTION {delete_function}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'kernel lifecycle rows cannot be deleted';
+        END;
+        $$
+        """
+    )
+    for table in schema.metadata.sorted_tables:
+        _execute(
+            f"""
+            CREATE TRIGGER {delete_trigger}
+            BEFORE DELETE ON {table.name}
+            FOR EACH ROW EXECUTE FUNCTION {delete_function}()
+            """
+        )
+
+    terminal_function = f"{prefix}_reject_terminal_attempt_mutation"
+    terminal_trigger = f"{prefix}_00_reject_terminal_attempt_mutation"
+    terminal_states = ", ".join(
+        f"'{state.value}'" for state in sorted(TERMINAL_EXECUTION_STATES)
+    )
+    _execute(
+        f"""
+        CREATE FUNCTION {terminal_function}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF OLD.execution_state IN ({terminal_states}) THEN
+            IF NEW IS DISTINCT FROM OLD THEN
+              RAISE EXCEPTION 'terminal item attempts are immutable';
+            END IF;
+            RETURN NULL;
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    _execute(
+        f"""
+        CREATE TRIGGER {terminal_trigger}
+        BEFORE UPDATE ON {schema.item_attempts.name}
+        FOR EACH ROW EXECUTE FUNCTION {terminal_function}()
+        """
+    )
+
+    operation_function = f"{prefix}_guard_operation_update"
+    operation_trigger = f"{prefix}_00_guard_operation_update"
+    _execute(
+        f"""
+        CREATE FUNCTION {operation_function}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW IS NOT DISTINCT FROM OLD THEN
+            RETURN NULL;
+          END IF;
+          IF ROW(
+            NEW.operation_key,
+            NEW.group_key,
+            NEW.workflow_role,
+            NEW.requested_count,
+            NEW.manifest_version,
+            NEW.manifest_digest,
+            NEW.manifest_page_size,
+            NEW.manifest_page_count,
+            NEW.operation_execution_recipe_digest,
+            NEW.target_key,
+            NEW.target_version,
+            NEW.target_contract_digest,
+            NEW.retry_policy,
+            NEW.spec,
+            NEW.metadata,
+            NEW.created_at
+          ) IS DISTINCT FROM ROW(
+            OLD.operation_key,
+            OLD.group_key,
+            OLD.workflow_role,
+            OLD.requested_count,
+            OLD.manifest_version,
+            OLD.manifest_digest,
+            OLD.manifest_page_size,
+            OLD.manifest_page_count,
+            OLD.operation_execution_recipe_digest,
+            OLD.target_key,
+            OLD.target_version,
+            OLD.target_contract_digest,
+            OLD.retry_policy,
+            OLD.spec,
+            OLD.metadata,
+            OLD.created_at
+          ) THEN
+            RAISE EXCEPTION 'Operation identity fields are immutable';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    _execute(
+        f"""
+        CREATE TRIGGER {operation_trigger}
+        BEFORE UPDATE ON {schema.operations.name}
+        FOR EACH ROW EXECUTE FUNCTION {operation_function}()
+        """
+    )
+
+    item_function = f"{prefix}_guard_item_update"
+    item_trigger = f"{prefix}_00_guard_item_update"
+    _execute(
+        f"""
+        CREATE FUNCTION {item_function}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW IS NOT DISTINCT FROM OLD THEN
+            RETURN NULL;
+          END IF;
+          IF ROW(
+            NEW.item_id,
+            NEW.operation_key,
+            NEW.item_index,
+            NEW.item_key,
+            NEW.shuffle_rank,
+            NEW.service_class,
+            NEW.service_priority,
+            NEW.spec,
+            NEW.insert_status,
+            NEW.created_at
+          ) IS DISTINCT FROM ROW(
+            OLD.item_id,
+            OLD.operation_key,
+            OLD.item_index,
+            OLD.item_key,
+            OLD.shuffle_rank,
+            OLD.service_class,
+            OLD.service_priority,
+            OLD.spec,
+            OLD.insert_status,
+            OLD.created_at
+          ) THEN
+            RAISE EXCEPTION 'Item identity fields are immutable';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    _execute(
+        f"""
+        CREATE TRIGGER {item_trigger}
+        BEFORE UPDATE ON {schema.items.name}
+        FOR EACH ROW EXECUTE FUNCTION {item_function}()
+        """
+    )
+
+    claim_function = f"{prefix}_guard_enqueue_claim_update"
+    claim_trigger = f"{prefix}_00_guard_enqueue_claim_update"
+    _execute(
+        f"""
+        CREATE FUNCTION {claim_function}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW IS NOT DISTINCT FROM OLD THEN
+            RETURN NULL;
+          END IF;
+          IF OLD.resolved_at IS NOT NULL THEN
+            RAISE EXCEPTION 'resolved enqueue Claims are immutable';
+          END IF;
+          IF ROW(
+            NEW.item_id,
+            NEW.attempt,
+            NEW.claim_id,
+            NEW.workflow_id,
+            NEW.enqueue_try,
+            NEW.claimed_at,
+            NEW.lease_expires_at,
+            NEW.created_at
+          ) IS DISTINCT FROM ROW(
+            OLD.item_id,
+            OLD.attempt,
+            OLD.claim_id,
+            OLD.workflow_id,
+            OLD.enqueue_try,
+            OLD.claimed_at,
+            OLD.lease_expires_at,
+            OLD.created_at
+          ) THEN
+            RAISE EXCEPTION 'enqueue Claim identity is immutable';
+          END IF;
+          IF OLD.enqueue_call_started_at IS NOT NULL
+             AND NEW.enqueue_call_started_at IS DISTINCT FROM
+                 OLD.enqueue_call_started_at THEN
+            RAISE EXCEPTION 'enqueue Claim call-start fact is immutable';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    _execute(
+        f"""
+        CREATE TRIGGER {claim_trigger}
+        BEFORE UPDATE ON {schema.enqueue_claims.name}
+        FOR EACH ROW EXECUTE FUNCTION {claim_function}()
+        """
+    )
+
+    compensation_function = f"{prefix}_guard_compensation_update"
+    compensation_trigger = f"{prefix}_00_guard_compensation_update"
+    _execute(
+        f"""
+        CREATE FUNCTION {compensation_function}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW IS NOT DISTINCT FROM OLD THEN
+            RETURN NULL;
+          END IF;
+          IF OLD.resolved_at IS NOT NULL THEN
+            RAISE EXCEPTION 'resolved enqueue compensations are immutable';
+          END IF;
+          IF ROW(
+            NEW.item_id,
+            NEW.attempt,
+            NEW.claim_id,
+            NEW.workflow_id,
+            NEW.reason,
+            NEW.created_at
+          ) IS DISTINCT FROM ROW(
+            OLD.item_id,
+            OLD.attempt,
+            OLD.claim_id,
+            OLD.workflow_id,
+            OLD.reason,
+            OLD.created_at
+          ) THEN
+            RAISE EXCEPTION 'enqueue compensation identity is immutable';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    _execute(
+        f"""
+        CREATE TRIGGER {compensation_trigger}
+        BEFORE UPDATE ON {schema.enqueue_compensations.name}
+        FOR EACH ROW EXECUTE FUNCTION {compensation_function}()
+        """
+    )
+
+    request_function = f"{prefix}_guard_next_attempt_request_update"
+    request_trigger = f"{prefix}_00_guard_next_attempt_request_update"
+    _execute(
+        f"""
+        CREATE FUNCTION {request_function}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW IS NOT DISTINCT FROM OLD THEN
+            RETURN NULL;
+          END IF;
+          RAISE EXCEPTION 'next-Attempt request ledger is immutable';
+        END;
+        $$
+        """
+    )
+    _execute(
+        f"""
+        CREATE TRIGGER {request_trigger}
+        BEFORE UPDATE ON {schema.next_attempt_requests.name}
+        FOR EACH ROW EXECUTE FUNCTION {request_function}()
+        """
+    )
 
 
 def upgrade() -> None:
-    naming = _naming()
-    prefix = naming.prefix
-
-    op.create_table(
-        naming.batch_operations_table,
-        sa.Column("operation_key", sa.Text, primary_key=True),
-        sa.Column(naming.group_key_label, sa.Text, nullable=False),
-        sa.Column("status", sa.Text, nullable=False),
-        sa.Column("requested_count", sa.Integer, nullable=False),
-        sa.Column("inserted_count", sa.Integer, nullable=False),
-        sa.Column("already_present_count", sa.Integer, nullable=False),
-        sa.Column("enqueued_count", sa.Integer, nullable=False),
-        sa.Column("already_scheduled_count", sa.Integer, nullable=False),
-        sa.Column("failed_count", sa.Integer, nullable=False),
-        sa.Column("spec", JSONB, nullable=False),
-        sa.Column("metadata", JSONB, nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("completed_at", sa.DateTime(timezone=True)),
-        sa.CheckConstraint(
-            "status IN ('enqueuing', 'completed', 'partial', 'error')",
-            name=f"ck_{prefix}_batch_ops_status",
-        ),
-        sa.CheckConstraint(
-            "requested_count >= 0 AND inserted_count >= 0 "
-            "AND already_present_count >= 0 AND enqueued_count >= 0 "
-            "AND already_scheduled_count >= 0 AND failed_count >= 0",
-            name=f"ck_{prefix}_batch_ops_counts",
-        ),
-        sa.CheckConstraint(
-            BATCH_OPS_COUNT_BOUNDS_CHECK,
-            name=f"ck_{prefix}_batch_ops_count_bounds",
-        ),
-        sa.CheckConstraint(
-            BATCH_OPS_COMPLETED_CHECK,
-            name=f"ck_{prefix}_batch_ops_completed",
-        ),
-        sa.CheckConstraint(
-            "completed_at IS NULL OR completed_at >= created_at",
-            name=f"ck_{prefix}_batch_ops_time_order",
-        ),
-    )
-    op.create_index(
-        f"ix_{prefix}_batch_ops_group",
-        naming.batch_operations_table,
-        [naming.group_key_label],
-    )
-    op.create_index(
-        f"ix_{prefix}_batch_ops_status_lib",
-        naming.batch_operations_table,
-        ["status"],
-    )
-
-    op.create_table(
-        naming.batch_items_table,
-        sa.Column("batch_submit_item_id", sa.Text, primary_key=True),
-        sa.Column(
-            "operation_key",
-            sa.Text,
-            sa.ForeignKey(f"{naming.batch_operations_table}.operation_key"),
-            nullable=False,
-        ),
-        sa.Column("item_index", sa.Integer, nullable=False),
-        sa.Column(naming.item_key_label, sa.Text, nullable=False),
-        sa.Column(naming.order_key_label, sa.Text, nullable=False),
-        sa.Column("insert_status", sa.Text, nullable=False),
-        sa.Column("enqueue_status", sa.Text, nullable=False),
-        sa.Column("enqueue_metadata", JSONB, nullable=False),
-        sa.Column("failure", JSONB),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint(
-            "item_index >= 0",
-            name=f"ck_{prefix}_batch_items_item_index",
-        ),
-        sa.CheckConstraint(
-            "insert_status IN ('inserted', 'already_present')",
-            name=f"ck_{prefix}_batch_items_insert_status",
-        ),
-        sa.CheckConstraint(
-            "enqueue_status IN ('pending', 'claiming', 'enqueued', "
-            "'workflow_already_present', 'failed')",
-            name=f"ck_{prefix}_batch_items_enqueue_status",
-        ),
-        sa.CheckConstraint(
-            "(enqueue_status = 'failed' OR failure IS NULL) "
-            "AND (enqueue_status != 'failed' OR failure IS NOT NULL)",
-            name=f"ck_{prefix}_batch_items_enqueue_status_payload",
-        ),
-        sa.UniqueConstraint(
-            "operation_key",
-            "item_index",
-            name=f"uq_{prefix}_batch_items_operation_index",
-        ),
-        sa.UniqueConstraint(
-            "operation_key",
-            naming.item_key_label,
-            name=f"uq_{prefix}_batch_items_operation_item",
-        ),
-    )
-    op.create_index(
-        f"ix_{prefix}_batch_items_operation_lib",
-        naming.batch_items_table,
-        ["operation_key"],
-    )
-    op.create_index(
-        f"ix_{prefix}_batch_items_item",
-        naming.batch_items_table,
-        [naming.item_key_label],
-    )
-    op.create_index(
-        f"ix_{prefix}_batch_items_order",
-        naming.batch_items_table,
-        [naming.order_key_label],
-    )
-
-    op.create_table(
-        naming.throttle_backoff_table,
-        sa.Column("throttle_key", sa.Text, primary_key=True),
-        sa.Column("blocked_until", sa.DateTime(timezone=True)),
-        sa.Column("consecutive_failures", sa.Integer, nullable=False),
-        sa.Column("failure_class", sa.Text),
-        sa.Column("last_error_type", sa.Text),
-        sa.Column("last_message", sa.Text),
-        sa.Column("metadata", JSONB, nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint(
-            "consecutive_failures >= 0",
-            name=f"ck_{prefix}_throttle_backoff_failures",
-        ),
-    )
-    op.create_index(
-        f"ix_{prefix}_throttle_blocked_until",
-        naming.throttle_backoff_table,
-        ["blocked_until"],
-    )
+    schema = PlatformSchema(prefix=_prefix())
+    schema.metadata.create_all(bind=op.get_bind(), checkfirst=False)
+    _install_change_tracking(schema)
+    _install_lifecycle_guards(schema)
 
 
 def downgrade() -> None:
-    naming = _naming()
-    op.drop_table(naming.throttle_backoff_table)
-    op.drop_table(naming.batch_items_table)
-    op.drop_table(naming.batch_operations_table)
+    schema = PlatformSchema(prefix=_prefix())
+    prefix = schema.prefix
+    schema.metadata.drop_all(bind=op.get_bind(), checkfirst=False)
+    _execute(f"DROP FUNCTION {prefix}_guard_next_attempt_request_update()")
+    _execute(f"DROP FUNCTION {prefix}_guard_compensation_update()")
+    _execute(f"DROP FUNCTION {prefix}_guard_enqueue_claim_update()")
+    _execute(f"DROP FUNCTION {prefix}_guard_item_update()")
+    _execute(f"DROP FUNCTION {prefix}_guard_operation_update()")
+    _execute(f"DROP FUNCTION {prefix}_reject_terminal_attempt_mutation()")
+    _execute(f"DROP FUNCTION {prefix}_reject_kernel_delete()")
+    _execute(f"DROP FUNCTION {prefix}_assign_change_seq()")
+    _execute(f"DROP SEQUENCE {prefix}_change_seq")

@@ -20,15 +20,10 @@ classifiers = [
 dependencies = [
     "alembic>=1.16.2",
     "dbos[otel]==2.26.0",
-    "dr-providers>=0.2.0",
     "dr-serialize>=0.1.0",
     "pydantic>=2.13.4",
-    "rich>=13.0.0",
     "sqlalchemy>=2.0.0",
 ]
-
-[project.optional-dependencies]
-frames = ["pandas>=2.2.0"]
 
 [project.urls]
 Repository = "https://github.com/danielle-rothermel/dr-platform"
@@ -41,7 +36,6 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "duckdb>=1.4,<1.5",
-    "pandas>=2.2.0",
     "pre-commit>=4.6.0",
     "psycopg[binary]>=3.3.4",
     "pytest>=9.1.1",
@@ -52,7 +46,6 @@ dev = [
 # dr-* libs are not on PyPI; sources track main and uv.lock pins the exact
 # commit. Refresh with `uv lock --upgrade-package <name>`.
 [tool.uv.sources]
-dr-providers = { git = "https://github.com/danielle-rothermel/dr-providers", branch = "main" }
 dr-serialize = { git = "https://github.com/danielle-rothermel/dr-serialize", branch = "main" }
 
 [tool.hatch.build.targets.sdist]

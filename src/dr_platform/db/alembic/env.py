@@ -3,27 +3,22 @@ from __future__ import annotations
 from alembic import context
 from sqlalchemy import create_engine
 
-from dr_platform.naming import PlatformNaming
+from dr_platform.db.schema import DEFAULT_PREFIX
 
 
-def _naming() -> PlatformNaming:
-    naming = context.config.attributes.get("naming")
-    if isinstance(naming, PlatformNaming):
-        return naming
-    return PlatformNaming()
+def _prefix() -> str:
+    prefix = context.config.attributes.get("prefix", DEFAULT_PREFIX)
+    if not isinstance(prefix, str):
+        raise TypeError("migration prefix must be a string")
+    return prefix
 
 
 def run_migrations_online() -> None:
-    naming = _naming()
+    prefix = _prefix()
     url = context.config.get_main_option("sqlalchemy.url")
     if not url:
         raise ValueError("sqlalchemy.url is required")
     engine = create_engine(url)
-    # Pin the version table to the connection's first search_path schema:
-    # adopters that isolate work in scratch schemas must not see (or
-    # write) a lineage that lives in a fallback schema. Probed on its own
-    # connection so the migration connection's transaction stays
-    # alembic-owned.
     with engine.connect() as probe:
         current_schema = probe.exec_driver_sql(
             "SELECT current_schema()"
@@ -32,7 +27,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=None,
-            version_table=naming.alembic_version_table,
+            version_table=f"{prefix}_platform_alembic_version",
             version_table_schema=current_schema,
         )
         with context.begin_transaction():
