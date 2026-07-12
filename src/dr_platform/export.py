@@ -81,6 +81,7 @@ class ExportOptions(BaseModel):
     lease_seconds: PositiveInt = 60
     full_rebuild: StrictBool = False
     projections: tuple[ProjectionSpec, ...] = ()
+    source_change_sequence: NonEmptyStr = "platform_change_seq"
 
 
 class DestinationResult(BaseModel):
@@ -984,7 +985,7 @@ def _export_application(
             checksums: dict[str, str] = {}
             try:
                 source_name, captured_at, snapshot_seq, rows = (
-                    _capture_application_source(source, specs)
+                    _capture_application_source(source, specs, options)
                 )
                 counts, checksums = _validate_application_rows(specs, rows)
                 status, bundle_id, counts, checksums = (
@@ -1215,8 +1216,9 @@ def _application_specs(
 
 
 def _capture_application_source(
-    source: Engine, specs: tuple[ProjectionSpec, ...]
+    source: Engine, specs: tuple[ProjectionSpec, ...], options: ExportOptions
 ) -> tuple[str, datetime, int, dict[str, list[dict[str, Any]]]]:
+    sequence = _pg_identifier(options.source_change_sequence)
     with source.connect() as connection:
         connection.execute(
             text("SELECT pg_advisory_lock(:lock_key)"),
@@ -1236,7 +1238,7 @@ def _capture_application_source(
                 ).scalar_one()
                 snapshot_seq = int(
                     connection.execute(
-                        text("SELECT nextval('platform_change_seq'::regclass)")
+                        text(f"SELECT nextval('{sequence}'::regclass)")
                     ).scalar_one()
                 )
                 snapshot = ApplicationSnapshot(
