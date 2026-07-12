@@ -566,6 +566,9 @@ class PostgresPublicationFence:
                     manifest=signed_manifest,
                     source_coordinates=coordinates,
                 )
+                self._require_current_lease(
+                    connection, bundle_key, run_id, fencing_token
+                )
                 updated = connection.execute(
                     text(
                         f"UPDATE {self._bundles_table} SET manifest_json = CAST(:manifest AS TEXT), "
