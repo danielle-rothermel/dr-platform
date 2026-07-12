@@ -15,8 +15,10 @@ import re
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import date, datetime
-from enum import Enum
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from enum import Enum, StrEnum
+from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Any, Literal
@@ -54,9 +56,36 @@ class ProjectionSpec(BaseModel):
 
     member: NonEmptyStr
     columns: tuple[NonEmptyStr, ...]
+    column_schema: tuple[ProjectionColumn, ...] = ()
     unique_key: tuple[NonEmptyStr, ...]
     references: tuple[tuple[NonEmptyStr, NonEmptyStr, NonEmptyStr], ...] = ()
     full_rebuild_builder: FullRebuildBuilder | None = None
+
+    @property
+    def column_names(self) -> tuple[str, ...]:
+        """Return the ordered names used by builders and destination DDL."""
+
+        return self.columns
+
+
+class ProjectionColumnType(StrEnum):
+    """Closed destination types supported by application publication."""
+
+    TEXT = "text"
+    INTEGER = "integer"
+    NUMERIC = "numeric"
+    BOOLEAN = "boolean"
+    TIMESTAMP = "timestamp"
+    JSON = "json"
+
+
+class ProjectionColumn(BaseModel):
+    """One ordered, typed application projection column."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: NonEmptyStr
+    type: ProjectionColumnType
 
 
 class ApplicationSnapshot(BaseModel):
@@ -295,7 +324,7 @@ def _kernel_specs(
             member=table.name, columns=columns, unique_key=key
         )
         spec = supplied.get(table.name, default)
-        if spec.columns != columns or spec.unique_key != key:
+        if spec.column_names != columns or spec.unique_key != key:
             raise ValueError(
                 f"{table.name} must declare its canonical schema and key"
             )
@@ -357,7 +386,7 @@ def _capture_source(
                     statement = (
                         table.select()
                         .with_only_columns(
-                            *(table.c[column] for column in spec.columns)
+                            *(table.c[column] for column in spec.column_names)
                         )
                         .where(table.c.change_seq <= high_water)
                     )
@@ -741,20 +770,21 @@ def _stage_and_promote_application(
             connection.execute(
                 f"CREATE TABLE {stage} ("
                 + ", ".join(
-                    f"{_quoted(column)} VARCHAR" for column in spec.columns
+                    f"{_quoted(column.name)} {_application_sql_type(column.type, remote=False)}"
+                    for column in spec.column_schema
                 )
                 + ")"
             )
             values = [
                 tuple(
-                    _application_storage_value(row[column])
-                    for column in spec.columns
+                    _application_storage_value(row[column.name], column.type)
+                    for column in spec.column_schema
                 )
                 for row in rows[spec.member]
             ]
             if values:
                 connection.executemany(
-                    f"INSERT INTO {stage} VALUES ({', '.join('?' for _ in spec.columns)})",
+                    f"INSERT INTO {stage} VALUES ({', '.join('?' for _ in spec.column_schema)})",
                     values,
                 )
             connection.execute(
@@ -795,7 +825,10 @@ def _stage_and_promote_application(
         manifest = {
             spec.member: {
                 "table": candidate_tables[spec.member],
-                "columns": list(spec.columns),
+                "columns": list(spec.column_names),
+                "column_types": [
+                    column.type.value for column in spec.column_schema
+                ],
                 "unique_key": list(spec.unique_key),
                 "checksum": candidate_checksums[spec.member],
             }
@@ -849,21 +882,42 @@ def _application_destination_facts(
     rows: dict[str, list[dict[str, Any]]] = {}
     for spec in specs:
         table = _quoted(candidate_tables[spec.member])
-        actual_columns = tuple(
-            item[0]
+        actual_schema = tuple(
+            (item[0], item[1])
             for item in connection.execute(f"DESCRIBE {table}").fetchall()
         )
-        if actual_columns != spec.columns:
+        expected_schema = tuple(
+            (
+                column.name,
+                _duckdb_application_describe_type(column.type),
+            )
+            for column in spec.column_schema
+        )
+        if actual_schema != expected_schema:
             raise ValueError(
                 f"{spec.member} failed destination schema validation"
             )
         rows[spec.member] = [
-            dict(zip(spec.columns, row, strict=True))
+            dict(zip(spec.column_names, row, strict=True))
             for row in connection.execute(
-                f"SELECT {', '.join(_quoted(column) for column in spec.columns)} FROM {table}"
+                "SELECT "
+                + ", ".join(
+                    (
+                        f"CAST({_quoted(column.name)} AS VARCHAR)"
+                        if column.type
+                        in {
+                            ProjectionColumnType.TIMESTAMP,
+                            ProjectionColumnType.JSON,
+                        }
+                        else _quoted(column.name)
+                    )
+                    for column in spec.column_schema
+                )
+                + f" FROM {table}"
             ).fetchall()
         ]
-    return _validate_application_rows(specs, rows)
+    normalized = _normalize_application_rows(specs, rows, destination=True)
+    return _validate_application_rows(specs, normalized)
 
 
 def _validate_destination_member(
@@ -988,6 +1042,7 @@ def _export_application(
                 source_name, captured_at, snapshot_seq, rows = (
                     _capture_application_source(source, specs, options)
                 )
+                rows = _normalize_application_rows(specs, rows)
                 counts, checksums = _validate_application_rows(specs, rows)
                 status, bundle_id, counts, checksums = (
                     _stage_and_promote_application(
@@ -1115,28 +1170,29 @@ def _publish_application_remotes(
                         text(
                             f"CREATE TABLE {_pg_identifier(table_name)} ("
                             + ", ".join(
-                                f"{_pg_identifier(column)} TEXT"
-                                for column in spec.columns
+                                f"{_pg_identifier(column.name)} "
+                                f"{_application_sql_type(column.type, remote=True, motherduck=destination.kind == 'motherduck')}"
+                                for column in spec.column_schema
                             )
                             + ")"
                         )
                     )
                     if rows[spec.member]:
                         placeholders = ", ".join(
-                            f":{column}" for column in spec.columns
+                            f":{column}" for column in spec.column_names
                         )
                         connection.execute(
                             text(
                                 f"INSERT INTO {_pg_identifier(table_name)} "
-                                f"({', '.join(_pg_identifier(column) for column in spec.columns)}) "
+                                f"({', '.join(_pg_identifier(column) for column in spec.column_names)}) "
                                 f"VALUES ({placeholders})"
                             ),
                             [
                                 {
-                                    column: _application_storage_value(
-                                        row[column]
+                                    column.name: _application_storage_value(
+                                        row[column.name], column.type
                                     )
-                                    for column in spec.columns
+                                    for column in spec.column_schema
                                 }
                                 for row in rows[spec.member]
                             ],
@@ -1153,6 +1209,7 @@ def _publish_application_remotes(
                             key_columns=spec.unique_key,
                             row_count=counts[spec.member],
                             checksum=checksums[spec.member],
+                            column_schema=spec.column_schema,
                         )
                     )
                 return RemoteBundleManifest(
@@ -1204,9 +1261,14 @@ def _application_specs(
     for spec in options.projections:
         if spec.full_rebuild_builder is None:
             raise ValueError("every application member requires a builder")
-        if not spec.unique_key or not set(spec.unique_key).issubset(
-            spec.columns
-        ):
+        names = spec.column_names
+        if len(names) != len(set(names)):
+            raise ValueError(f"{spec.member} column names must be unique")
+        if tuple(column.name for column in spec.column_schema) != names:
+            raise ValueError(
+                f"{spec.member} schema must type every column in order"
+            )
+        if not spec.unique_key or not set(spec.unique_key).issubset(names):
             raise ValueError(f"{spec.member} has an invalid unique key")
         for local, target, target_column in spec.references:
             target_spec = next(
@@ -1218,9 +1280,9 @@ def _application_specs(
                 None,
             )
             if (
-                local not in spec.columns
+                local not in names
                 or target_spec is None
-                or target_column not in target_spec.columns
+                or target_column not in target_spec.column_names
             ):
                 raise ValueError(
                     f"{spec.member} has an invalid member reference"
@@ -1289,7 +1351,7 @@ def _validate_application_rows(
     checksums: dict[str, str] = {}
     for spec in specs:
         member_rows = rows[spec.member]
-        if any(set(row) != set(spec.columns) for row in member_rows):
+        if any(set(row) != set(spec.column_names) for row in member_rows):
             raise ValueError(
                 f"{spec.member} does not match its declared schema"
             )
@@ -1364,16 +1426,135 @@ def _storage_value(value: Any, source_type: sqltypes.TypeEngine[Any]) -> Any:
     return value
 
 
-def _application_storage_value(value: Any) -> str | None:
+def _application_sql_type(
+    column_type: ProjectionColumnType,
+    *,
+    remote: bool,
+    motherduck: bool = False,
+) -> str:
+    if column_type is ProjectionColumnType.TEXT:
+        return "TEXT" if remote else "VARCHAR"
+    if column_type is ProjectionColumnType.INTEGER:
+        return "BIGINT"
+    if column_type is ProjectionColumnType.NUMERIC:
+        return "DOUBLE PRECISION" if remote else "DOUBLE"
+    if column_type is ProjectionColumnType.BOOLEAN:
+        return "BOOLEAN"
+    if column_type is ProjectionColumnType.TIMESTAMP:
+        return "TIMESTAMPTZ"
+    if column_type is ProjectionColumnType.JSON:
+        return "JSON" if motherduck or not remote else "JSONB"
+    raise ValueError(f"unsupported projection column type: {column_type}")
+
+
+def _duckdb_application_describe_type(
+    column_type: ProjectionColumnType,
+) -> str:
+    if column_type is ProjectionColumnType.TIMESTAMP:
+        return "TIMESTAMP WITH TIME ZONE"
+    return _application_sql_type(column_type, remote=False)
+
+
+def _application_storage_value(
+    value: Any, column_type: ProjectionColumnType
+) -> Any:
     if value is None:
         return None
-    if isinstance(value, (dict, list, tuple)):
+    if column_type is ProjectionColumnType.JSON:
         return _canonical(value)
-    if isinstance(value, (datetime, date)):
+    if column_type is ProjectionColumnType.TIMESTAMP:
         return value.isoformat()
-    if isinstance(value, Enum):
-        return str(value.value)
-    return str(value)
+    return value
+
+
+def _normalize_application_rows(
+    specs: tuple[ProjectionSpec, ...],
+    rows: Mapping[str, list[dict[str, Any]]],
+    *,
+    destination: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
+    if set(rows) != {spec.member for spec in specs}:
+        return {
+            member: list(member_rows) for member, member_rows in rows.items()
+        }
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for spec in specs:
+        normalized[spec.member] = [
+            {
+                column.name: _normalize_application_value(
+                    row.get(column.name), column.type, destination=destination
+                )
+                for column in spec.column_schema
+            }
+            if set(row) == set(spec.column_names)
+            else dict(row)
+            for row in rows.get(spec.member, [])
+        ]
+    return normalized
+
+
+def _normalize_application_value(
+    value: Any,
+    column_type: ProjectionColumnType,
+    *,
+    destination: bool,
+) -> Any:
+    if value is None:
+        return None
+    if column_type is ProjectionColumnType.TEXT:
+        if not isinstance(value, str):
+            raise ValueError("text projection values must be strings")
+        return value
+    if column_type is ProjectionColumnType.INTEGER:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("integer projection values must be integers")
+        return value
+    if column_type is ProjectionColumnType.NUMERIC:
+        if isinstance(value, bool) or not isinstance(
+            value, (int, float, Decimal)
+        ):
+            raise ValueError("numeric projection values must be numbers")
+        numeric = float(value)
+        if not isfinite(numeric):
+            raise ValueError("numeric projection values must be finite")
+        return numeric
+    if column_type is ProjectionColumnType.BOOLEAN:
+        if not isinstance(value, bool):
+            raise ValueError("boolean projection values must be booleans")
+        return value
+    if column_type is ProjectionColumnType.TIMESTAMP:
+        if destination and isinstance(value, str):
+            value = datetime.fromisoformat(value)
+        if (
+            not isinstance(value, datetime)
+            or value.tzinfo is None
+            or value.utcoffset() is None
+        ):
+            raise ValueError(
+                "timestamp projection values must be timezone-aware datetimes"
+            )
+        return value.astimezone(UTC)
+    if column_type is ProjectionColumnType.JSON:
+        if destination and isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, (dict, list)):
+            raise ValueError(
+                "json projection values must be objects or arrays"
+            )
+        try:
+            return json.loads(
+                json.dumps(
+                    value,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "json projection values must be structured JSON"
+            ) from exc
+    raise ValueError(f"unsupported projection column type: {column_type}")
 
 
 def _duckdb_scalar(connection: duckdb.DuckDBPyConnection, query: str) -> Any:

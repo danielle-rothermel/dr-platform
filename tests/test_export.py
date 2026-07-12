@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import cast
 from unittest.mock import patch
 
@@ -24,6 +25,8 @@ from sqlalchemy import (
 from dr_platform import (
     ExportOptions,
     PlatformSchema,
+    ProjectionColumn,
+    ProjectionColumnType,
     export,
     upgrade_platform_schema,
 )
@@ -42,6 +45,13 @@ from dr_platform.publication import (
 )
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
 from tests.contracts.test_platform_v6_cancellation import _register_operation
+
+
+def _text_schema(*names: str) -> tuple[ProjectionColumn, ...]:
+    return tuple(
+        ProjectionColumn(name=name, type=ProjectionColumnType.TEXT)
+        for name in names
+    )
 
 
 def test_empty_kernel_export_promotes_and_replays(
@@ -93,6 +103,7 @@ def test_projection_full_rebuild_contract_and_dbos_telemetry_are_frozen() -> (
     spec = ProjectionSpec(
         member="projection",
         columns=("id",),
+        column_schema=_text_schema("id"),
         unique_key=("id",),
         full_rebuild_builder=rebuild,
     )
@@ -169,12 +180,14 @@ def test_application_projection_bundle_builds_one_snapshot(
                 ProjectionSpec(
                     member="roots",
                     columns=("id",),
+                    column_schema=_text_schema("id"),
                     unique_key=("id",),
                     full_rebuild_builder=roots,
                 ),
                 ProjectionSpec(
                     member="children",
                     columns=("id", "root_id"),
+                    column_schema=_text_schema("id", "root_id"),
                     unique_key=("id",),
                     references=(("root_id", "roots", "id"),),
                     full_rebuild_builder=children,
@@ -234,6 +247,7 @@ def test_application_bundle_promotes_and_resolves_remote_fence(
                 ProjectionSpec(
                     member="roots",
                     columns=("id",),
+                    column_schema=_text_schema("id"),
                     unique_key=("id",),
                     full_rebuild_builder=roots,
                 ),
@@ -299,6 +313,7 @@ def test_application_bundle_records_motherduck_main_schema(
                 ProjectionSpec(
                     member="roots",
                     columns=("id",),
+                    column_schema=_text_schema("id"),
                     unique_key=("id",),
                     full_rebuild_builder=roots,
                 ),
@@ -311,6 +326,171 @@ def test_application_bundle_records_motherduck_main_schema(
         "PROMOTED",
         "PROMOTED",
     ]
+
+
+def test_application_projection_types_round_trip_and_aggregate(
+    pg_engine: Engine, tmp_path
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    captured = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
+
+    def typed_rows(
+        _connection: Connection, _snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, object], ...]:
+        return (
+            {
+                "id": "one",
+                "count": 2,
+                "score": 1.5,
+                "enabled": True,
+                "captured_at": captured,
+                "payload": {"labels": ["a", "b"]},
+            },
+            {
+                "id": "two",
+                "count": 4,
+                "score": 2.5,
+                "enabled": False,
+                "captured_at": captured,
+                "payload": {"labels": []},
+            },
+        )
+
+    spec = ProjectionSpec(
+        member="typed_rows",
+        columns=(
+            "id",
+            "count",
+            "score",
+            "enabled",
+            "captured_at",
+            "payload",
+        ),
+        column_schema=(
+            ProjectionColumn(name="id", type=ProjectionColumnType.TEXT),
+            ProjectionColumn(name="count", type=ProjectionColumnType.INTEGER),
+            ProjectionColumn(name="score", type=ProjectionColumnType.NUMERIC),
+            ProjectionColumn(
+                name="enabled", type=ProjectionColumnType.BOOLEAN
+            ),
+            ProjectionColumn(
+                name="captured_at", type=ProjectionColumnType.TIMESTAMP
+            ),
+            ProjectionColumn(name="payload", type=ProjectionColumnType.JSON),
+        ),
+        unique_key=("id",),
+        full_rebuild_builder=typed_rows,
+    )
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id="typed-remote",
+        table_name="typed_remote_state",
+    )
+    database = tmp_path / "typed.duckdb"
+    result = export(
+        pg_engine,
+        ExportOptions(
+            destination_path=str(database),
+            bundle_key="typed",
+            full_rebuild=True,
+            projections=(spec,),
+        ),
+        remote_destinations=(fence,),
+    )
+    assert [item.status for item in result.destinations] == [
+        "PROMOTED",
+        "PROMOTED",
+    ]
+
+    with duckdb.connect(str(database), read_only=True) as connection:
+        pointer = connection.execute(
+            "SELECT table_name FROM __dr_platform_export_members "
+            "WHERE bundle_key = 'typed' AND member = 'typed_rows'"
+        ).fetchone()
+        assert pointer is not None
+        table_name = pointer[0]
+        aggregate = connection.execute(
+            f'SELECT sum("count"), avg(score) FROM "{table_name}"'  # noqa: S608
+        ).fetchone()
+        local_row = connection.execute(
+            f"SELECT enabled, epoch(captured_at), payload "  # noqa: S608
+            f'FROM "{table_name}" '
+            "WHERE id = 'one'"
+        ).fetchone()
+    assert aggregate == (6, 2.0)
+    assert local_row == (
+        True,
+        captured.timestamp(),
+        '{"labels":["a","b"]}',
+    )
+
+    pin = fence.pin_bundle(bundle_key="typed", pin_id="typed-fixture")
+    remote_table = fence.resolve_pin(pin).members["typed_rows"]
+    with pg_engine.connect() as connection:
+        aggregate = connection.execute(
+            text(f"SELECT sum(count), avg(score) FROM {remote_table}")  # noqa: S608
+        ).one()
+        remote_row = connection.execute(
+            text(
+                f"SELECT enabled, captured_at, payload FROM {remote_table} "  # noqa: S608
+                "WHERE id = 'one'"
+            )
+        ).one()
+    assert tuple(aggregate) == (6, 2.0)
+    assert remote_row[0] is True
+    assert remote_row[1] == captured
+    assert remote_row[2] == {"labels": ["a", "b"]}
+
+
+def test_application_projection_schema_and_values_fail_closed(
+    pg_engine: Engine, tmp_path
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+
+    def invalid_value(
+        _connection: Connection, _snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, float], ...]:
+        return ({"score": float("nan")},)
+
+    with pytest.raises(ValueError, match="schema must type every column"):
+        export(
+            pg_engine,
+            ExportOptions(
+                destination_path=str(tmp_path / "missing-schema.duckdb"),
+                full_rebuild=True,
+                projections=(
+                    ProjectionSpec(
+                        member="rows",
+                        columns=("id",),
+                        unique_key=("id",),
+                        full_rebuild_builder=invalid_value,
+                    ),
+                ),
+            ),
+        )
+
+    result = export(
+        pg_engine,
+        ExportOptions(
+            destination_path=str(tmp_path / "invalid-value.duckdb"),
+            full_rebuild=True,
+            projections=(
+                ProjectionSpec(
+                    member="rows",
+                    columns=("score",),
+                    column_schema=(
+                        ProjectionColumn(
+                            name="score", type=ProjectionColumnType.NUMERIC
+                        ),
+                    ),
+                    unique_key=("score",),
+                    full_rebuild_builder=invalid_value,
+                ),
+            ),
+        ),
+    )
+    assert result.destinations[0].status == "FAILED"
+    assert result.destinations[0].error == "ValueError"
 
 
 def test_application_projection_rejects_missing_builder_and_invalid_closure(

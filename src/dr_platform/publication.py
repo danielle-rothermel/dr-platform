@@ -9,7 +9,7 @@ import re
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -28,9 +28,11 @@ from dr_platform.export import (
     _BUNDLE_TABLE,
     _PIN_TABLE,
     _STATE_TABLE,
+    ProjectionColumn,
     _canonical,
     _create_destination_tables,
     _duckdb_lock,
+    _normalize_application_value,
     _quoted,
 )
 
@@ -121,9 +123,15 @@ def check_snapshot_compatibility(
         coordinate.captured_at.timestamp() for coordinate in coordinates
     ]
     skew_ms = (max(moments) - min(moments)) * 1000
+    captured_in_future = any(
+        coordinate.captured_at > datetime.now(UTC)
+        for coordinate in coordinates
+    )
     return SnapshotCompatibility(
         disposition=(
-            "COMPATIBLE" if skew_ms <= max_capture_skew_ms else "INCOMPATIBLE"
+            "COMPATIBLE"
+            if skew_ms <= max_capture_skew_ms and not captured_in_future
+            else "INCOMPATIBLE"
         ),
         observed_skew_ms=skew_ms,
         max_capture_skew_ms=max_capture_skew_ms,
@@ -169,6 +177,7 @@ class RemoteBundleMember(BaseModel):
     key_columns: tuple[NonEmptyStr, ...]
     row_count: NonNegativeInt
     checksum: NonEmptyStr
+    column_schema: tuple[ProjectionColumn, ...] = ()
 
     @model_validator(mode="after")
     def validate_identifiers(self) -> RemoteBundleMember:
@@ -593,8 +602,17 @@ class PostgresPublicationFence:
             coordinate.source_id.partition(":")[0]
             for coordinate in coordinates
         )
-        if tuple(sorted(coordinate_families)) != tuple(
-            sorted(source_families)
+        valid_identities = all(
+            separator == ":" and identity
+            for coordinate in coordinates
+            for _, separator, identity in (
+                coordinate.source_id.partition(":"),
+            )
+        )
+        if (
+            tuple(sorted(coordinate_families))
+            != tuple(sorted(source_families))
+            or not valid_identities
         ):
             raise IncompatibleSnapshotError(
                 SnapshotCompatibility(
@@ -607,20 +625,6 @@ class PostgresPublicationFence:
                 )
             )
         if frozenset(source_families) == _COMBINED_SOURCE_FAMILIES:
-            if (
-                len({coordinate.database_server for coordinate in coordinates})
-                < _MINIMUM_COMPATIBLE_SOURCES
-            ):
-                raise IncompatibleSnapshotError(
-                    SnapshotCompatibility(
-                        disposition="MISSING_COORDINATE",
-                        observed_skew_ms=None,
-                        max_capture_skew_ms=100,
-                        source_ids=tuple(
-                            coordinate.source_id for coordinate in coordinates
-                        ),
-                    )
-                )
             require_compatible_snapshot(coordinates)
 
     def _reader_table_names(
@@ -707,6 +711,26 @@ class PostgresPublicationFence:
                     )
                 ).mappings()
             ]
+            if member.column_schema:
+                expected_columns = tuple(
+                    column.name for column in member.column_schema
+                )
+                if not rows or tuple(rows[0]) == expected_columns:
+                    rows = [
+                        {
+                            column.name: _normalize_application_value(
+                                row[column.name],
+                                column.type,
+                                destination=True,
+                            )
+                            for column in member.column_schema
+                        }
+                        for row in rows
+                    ]
+                else:
+                    raise ValueError(
+                        f"remote member {member.member} schema mismatch"
+                    )
             if len(rows) != member.row_count:
                 raise ValueError(
                     f"remote member {member.member} row count mismatch"
