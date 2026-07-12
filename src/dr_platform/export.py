@@ -15,13 +15,14 @@ import re
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum, StrEnum
 from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import duckdb
 from pydantic import (
@@ -37,8 +38,22 @@ from sqlalchemy import Connection, Engine, Table, text
 from sqlalchemy.sql import sqltypes
 
 from dr_platform.db import PlatformSchema
+from dr_platform.reconciliation_runtime import (
+    LifecycleObservationReader,
+    ReconcileOptions,
+    ReconcileResult,
+)
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
 from dr_platform.telemetry import validated_telemetry_attributes
+
+if TYPE_CHECKING:
+    from dr_platform.cancellation import WorkflowCanceller
+    from dr_platform.enqueue_runtime import (
+        PhysicalEnqueueAdapter,
+        QueueLookup,
+        WorkflowObserver,
+    )
+    from dr_platform.targets import TargetResolver
 
 NonEmptyStr = Annotated[StrictStr, Field(min_length=1)]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
@@ -47,9 +62,6 @@ FullRebuildBuilder = Callable[
     [Connection, "ApplicationSnapshot"], Sequence[Mapping[str, Any]]
 ]
 DbosTelemetryHook = Callable[[Mapping[str, str | int | float | bool]], None]
-ReconcileBeforeCapture = Callable[
-    [Engine, PlatformSchema], "ReconciledCutProof"
-]
 
 
 class ProjectionSpec(BaseModel):
@@ -101,21 +113,43 @@ class ApplicationSnapshot(BaseModel):
     snapshot_seq: NonNegativeInt
 
 
-class ReconciledCutProof(BaseModel):
-    """Immutable evidence that DBOS lifecycle truth was refreshed for export."""
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ExportReconciliationDependencies:
+    """Explicit collaborators for export-owned all-platform reconciliation."""
+
+    resolver: TargetResolver
+    queue_lookup: QueueLookup
+    reader: LifecycleObservationReader
+    dbos_engine: Engine
+    options: ReconcileOptions = field(default_factory=ReconcileOptions)
+    max_cycles: int = 10
+    recovery_observer: WorkflowObserver | None = None
+    enqueue_adapter: PhysicalEnqueueAdapter | None = None
+    compensation_canceller: WorkflowCanceller | None = None
+
+    def __post_init__(self) -> None:
+        if self.options.operation_key is not None:
+            raise ValueError(
+                "export reconciliation must cover all platform operations"
+            )
+        if self.max_cycles <= 0:
+            raise ValueError(
+                "export reconciliation max_cycles must be positive"
+            )
+
+
+class IncompleteExportReconciliationError(RuntimeError):
+    """The bounded driver could not establish a complete lifecycle pass."""
+
+
+class _ReconciledSourceCut(BaseModel):
+    """Library-owned source coordinate produced only after reconciliation."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     source_id: NonEmptyStr
     database_server: NonEmptyStr
     reconciled_at: datetime
-    scope: Literal["all-platform-lifecycle"]
-
-    def model_post_init(self, __context: Any) -> None:
-        if not self.source_id.startswith("dbos:"):
-            raise ValueError("reconciled source identity must be DBOS")
-        if self.reconciled_at.tzinfo is None:
-            raise ValueError("reconciled_at must be timezone-aware")
 
 
 class ExportOptions(BaseModel):
@@ -230,7 +264,7 @@ def export(
     source: Engine,
     options: ExportOptions,
     *,
-    reconcile_before_capture: ReconcileBeforeCapture,
+    reconciliation: ExportReconciliationDependencies,
     schema: PlatformSchema | None = None,
     remote_destinations: Sequence[Any] = (),
 ) -> ExportResult:
@@ -251,7 +285,7 @@ def export(
             options,
             remote_destinations,
             reconciliation_schema=selected,
-            reconcile_before_capture=reconcile_before_capture,
+            reconciliation=reconciliation,
         )
     members = _kernel_specs(selected, options.projections)
     database_path = Path(options.destination_path)
@@ -272,8 +306,9 @@ def export(
             counts: dict[str, int] = {}
             checksums: dict[str, str] = {}
             try:
-                proof = reconcile_before_capture(source, selected)
-                _validate_reconciled_cut_proof(proof)
+                reconciled_cut = _reconcile_for_export(
+                    source, selected, reconciliation
+                )
                 source_name, captured_at, high_water, rows, remote_rows = (
                     _capture_source(
                         source,
@@ -281,7 +316,7 @@ def export(
                         members,
                         cursors,
                         options.full_rebuild if lease is not None else True,
-                        proof=proof,
+                        reconciled_cut=reconciled_cut,
                         capture_complete_bundle=bool(remote_destinations),
                     )
                 )
@@ -351,7 +386,7 @@ def export(
                     source_name,
                     captured_at,
                     high_water,
-                    proof,
+                    reconciled_cut,
                 )
             )
             return ExportResult(
@@ -366,15 +401,61 @@ def export(
             connection.close()
 
 
-def _validate_reconciled_cut_proof(proof: ReconciledCutProof) -> None:
-    if not isinstance(proof, ReconciledCutProof):
-        raise TypeError(
-            "reconcile_before_capture must return ReconciledCutProof"
+def _reconcile_for_export(
+    source: Engine,
+    schema: PlatformSchema,
+    dependencies: ExportReconciliationDependencies,
+) -> _ReconciledSourceCut:
+    """Drive bounded lifecycle work and return a library-owned source cut."""
+
+    from dr_platform.reconciliation_runtime import reconcile  # noqa: PLC0415
+
+    for _cycle in range(dependencies.max_cycles):
+        result = reconcile(
+            source,
+            resolver=dependencies.resolver,
+            queue_lookup=dependencies.queue_lookup,
+            options=dependencies.options,
+            schema=schema,
+            reader=dependencies.reader,
+            recovery_observer=dependencies.recovery_observer,
+            enqueue_adapter=dependencies.enqueue_adapter,
+            compensation_canceller=dependencies.compensation_canceller,
         )
+        if (
+            _reconciliation_work_count(result) < dependencies.options.page_size
+            and result.recovered_call_started_count == 0
+            and result.replacement_enqueue_count == 0
+            and result.pending_enqueue_count == 0
+        ):
+            break
+    else:
+        raise IncompleteExportReconciliationError(
+            "bounded all-platform reconciliation did not complete"
+        )
+
+    with dependencies.dbos_engine.connect() as connection:
+        database_server, reconciled_at = connection.execute(
+            text("SELECT current_database(), clock_timestamp()")
+        ).one()
+    return _ReconciledSourceCut(
+        source_id=f"dbos:{database_server}",
+        database_server=database_server,
+        reconciled_at=reconciled_at,
+    )
+
+
+def _reconciliation_work_count(result: ReconcileResult) -> int:
+    return (
+        result.recovered_call_started_count
+        + result.observed_count
+        + result.replacement_enqueue_count
+        + result.pending_enqueue_count
+    )
 
 
 def _validate_reconciled_capture(
-    proof: ReconciledCutProof,
+    reconciled_cut: _ReconciledSourceCut,
     source_database: str,
     captured_at: datetime,
 ) -> None:
@@ -393,9 +474,9 @@ def _validate_reconciled_capture(
                 captured_at=captured_at,
             ),
             SourceCoordinate(
-                source_id=proof.source_id,
-                database_server=proof.database_server,
-                captured_at=proof.reconciled_at,
+                source_id=reconciled_cut.source_id,
+                database_server=reconciled_cut.database_server,
+                captured_at=reconciled_cut.reconciled_at,
             ),
         )
     )
@@ -421,7 +502,7 @@ def _publish_kernel_remotes(
     source_name: str,
     captured_at: datetime,
     snapshot_seq: int,
-    proof: ReconciledCutProof,
+    reconciled_cut: _ReconciledSourceCut,
 ) -> tuple[PostgresDestinationResult, ...]:
     """Physically stage and fenced-promote the complete canonical kernel."""
 
@@ -439,9 +520,9 @@ def _publish_kernel_remotes(
             snapshot_seq=snapshot_seq,
         ),
         SourceCoordinate(
-            source_id=proof.source_id,
-            database_server=proof.database_server,
-            captured_at=proof.reconciled_at,
+            source_id=reconciled_cut.source_id,
+            database_server=reconciled_cut.database_server,
+            captured_at=reconciled_cut.reconciled_at,
         ),
     )
     results: list[PostgresDestinationResult] = []
@@ -633,7 +714,7 @@ def _capture_source(
     cursors: Mapping[str, int],
     full_rebuild: bool,
     *,
-    proof: ReconciledCutProof,
+    reconciled_cut: _ReconciledSourceCut,
     capture_complete_bundle: bool,
 ) -> tuple[
     str,
@@ -661,7 +742,9 @@ def _capture_source(
                 captured_at = connection.execute(
                     text("SELECT clock_timestamp()")
                 ).scalar_one()
-                _validate_reconciled_capture(proof, source_name, captured_at)
+                _validate_reconciled_capture(
+                    reconciled_cut, source_name, captured_at
+                )
                 sequence_name = f"{schema.prefix}_change_seq"
                 # Allocate the cut while writers are excluded.  All preceding
                 # committed mutations are below H and every later mutation is
@@ -1327,7 +1410,7 @@ def _export_application(
     remote_destinations: Sequence[Any],
     *,
     reconciliation_schema: PlatformSchema,
-    reconcile_before_capture: ReconcileBeforeCapture,
+    reconciliation: ExportReconciliationDependencies,
 ) -> ExportResult:
     """Publish one application-owned full-rebuild bundle to local DuckDB.
 
@@ -1355,11 +1438,15 @@ def _export_application(
             counts: dict[str, int] = {}
             checksums: dict[str, str] = {}
             try:
-                proof = reconcile_before_capture(source, reconciliation_schema)
-                _validate_reconciled_cut_proof(proof)
+                reconciled_cut = _reconcile_for_export(
+                    source, reconciliation_schema, reconciliation
+                )
                 source_name, captured_at, snapshot_seq, rows = (
                     _capture_application_source(
-                        source, specs, options, proof=proof
+                        source,
+                        specs,
+                        options,
+                        reconciled_cut=reconciled_cut,
                     )
                 )
                 rows = _normalize_application_rows(specs, rows)
@@ -1616,7 +1703,7 @@ def _capture_application_source(
     specs: tuple[ProjectionSpec, ...],
     options: ExportOptions,
     *,
-    proof: ReconciledCutProof,
+    reconciled_cut: _ReconciledSourceCut,
 ) -> tuple[str, datetime, int, dict[str, list[dict[str, Any]]]]:
     sequence = _pg_identifier(options.source_change_sequence)
     with source.connect() as connection:
@@ -1636,7 +1723,9 @@ def _capture_application_source(
                 captured_at = connection.execute(
                     text("SELECT clock_timestamp()")
                 ).scalar_one()
-                _validate_reconciled_capture(proof, source_name, captured_at)
+                _validate_reconciled_capture(
+                    reconciled_cut, source_name, captured_at
+                )
                 snapshot_seq = int(
                     connection.execute(
                         text(f"SELECT nextval('{sequence}'::regclass)")

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -24,14 +25,20 @@ from sqlalchemy import (
 
 from dr_platform import (
     ExportOptions,
+    ExportReconciliationDependencies,
     PlatformSchema,
     ProjectionColumn,
     ProjectionColumnType,
-    ReconciledCutProof,
+    TargetRegistry,
     upgrade_platform_schema,
 )
 from dr_platform import (
     export as _export,
+)
+from dr_platform.dbos_config import DbosWorkflowStatus
+from dr_platform.enqueue_runtime import (
+    PhysicalEnqueueDisposition,
+    PhysicalEnqueueOutcome,
 )
 from dr_platform.export import (
     ApplicationSnapshot,
@@ -46,22 +53,67 @@ from dr_platform.publication import (
     PostgresPublicationFence,
     RemotePromotionResult,
 )
+from dr_platform.reconciliation_runtime import (
+    ReconcileOptions,
+    ReconciliationObservation,
+    ReconciliationObservationDisposition,
+)
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
 from tests.contracts.test_platform_v6_cancellation import _register_operation
+from tests.contracts.test_platform_v6_enqueue_claims import _target
 
 
-def _reconcile_before_capture(
-    engine: Engine, _schema: PlatformSchema
-) -> ReconciledCutProof:
-    with engine.connect() as connection:
-        source_database, reconciled_at = connection.execute(
-            text("SELECT current_database(), clock_timestamp()")
-        ).one()
-    return ReconciledCutProof(
-        source_id=f"dbos:{source_database}",
-        database_server=source_database,
-        reconciled_at=reconciled_at,
-        scope="all-platform-lifecycle",
+class _QueueLookup:
+    def retrieve_queue(self, name: str) -> object:
+        del name
+        return type(
+            "QueueConfiguration",
+            (),
+            {"database_backed_queue": True, "priority_enabled": True},
+        )()
+
+
+class _LifecycleReader:
+    def observe(self, *, workflow_id: str) -> ReconciliationObservation:
+        return ReconciliationObservation(
+            workflow_id=workflow_id,
+            disposition=ReconciliationObservationDisposition.ACTIVE,
+            dbos_status=DbosWorkflowStatus.PENDING,
+        )
+
+    def read_step_history(
+        self, *, workflow_id: str, limit: int = 100
+    ) -> tuple[Any, ...]:
+        del workflow_id, limit
+        return ()
+
+
+class _EnqueueAdapter:
+    def enqueue(self, call):  # type: ignore[no-untyped-def]
+        return PhysicalEnqueueOutcome(
+            workflow_id=call.workflow_id,
+            disposition=PhysicalEnqueueDisposition.ENQUEUED,
+            effective_service_priority=call.service_priority,
+        )
+
+
+def _reconciliation(
+    engine: Engine,
+    *,
+    reader: object | None = None,
+    page_size: int = 100,
+    max_cycles: int = 10,
+) -> ExportReconciliationDependencies:
+    registry = TargetRegistry()
+    registry.register(_target())
+    return ExportReconciliationDependencies(
+        resolver=registry,
+        queue_lookup=_QueueLookup(),
+        reader=cast("Any", reader or _LifecycleReader()),
+        dbos_engine=engine,
+        options=ReconcileOptions(page_size=page_size),
+        max_cycles=max_cycles,
+        enqueue_adapter=_EnqueueAdapter(),
     )
 
 
@@ -69,7 +121,7 @@ def export(source: Engine, options: ExportOptions, **kwargs):  # type: ignore[no
     return _export(
         source,
         options,
-        reconcile_before_capture=_reconcile_before_capture,
+        reconciliation=_reconciliation(source),
         **kwargs,
     )
 
@@ -636,7 +688,7 @@ def test_nonempty_export_preserves_types_and_excludes_opaque_payloads(
         row = destination.execute(
             f'SELECT status, requested_count FROM "{operations_table[0]}"'  # noqa: S608 -- destination-owned identifier
         ).fetchone()
-    assert row == ("enqueuing", 1)
+    assert row == ("running", 1)
     assert columns["requested_count"] == "BIGINT"
     assert "spec" not in columns
     assert "metadata" not in columns
@@ -740,6 +792,18 @@ def test_source_barrier_waits_for_committed_writer(
         operation_key="barrier-operation",
         item_keys=("barrier-item",),
     )
+    with pg_engine.begin() as connection:
+        connection.execute(
+            update(schema.item_attempts).values(
+                enqueue_state="enqueued",
+                execution_state="succeeded",
+                enqueued_at=text("clock_timestamp()"),
+                terminal_at=text("clock_timestamp()"),
+                effective_service_priority=1000,
+                priority_source="enqueued_here",
+                updated_at=text("clock_timestamp()"),
+            )
+        )
     database = tmp_path / "barrier.duckdb"
 
     with pg_engine.connect() as writer:
@@ -821,39 +885,6 @@ def test_structured_failure_preserves_populated_pointer(
     assert failed.destinations[0].status == "FAILED"
     assert failed.destinations[0].error == "RuntimeError"
 
-    incompatible_fence = PostgresPublicationFence(
-        pg_engine,
-        destination_id="incompatible-cut",
-        table_name="incompatible_cut_state",
-    )
-
-    def stale_proof(
-        engine: Engine, _schema: PlatformSchema
-    ) -> ReconciledCutProof:
-        with engine.connect() as connection:
-            source_database, observed_at = connection.execute(
-                text("SELECT current_database(), clock_timestamp()")
-            ).one()
-        return ReconciledCutProof(
-            source_id=f"dbos:{source_database}",
-            database_server=source_database,
-            reconciled_at=observed_at - timedelta(seconds=1),
-            scope="all-platform-lifecycle",
-        )
-
-    incompatible = _export(
-        pg_engine,
-        ExportOptions(destination_path=str(tmp_path / "incompatible.duckdb")),
-        reconcile_before_capture=stale_proof,
-        remote_destinations=(incompatible_fence,),
-    )
-    assert [item.status for item in incompatible.destinations] == [
-        "FAILED",
-        "FAILED",
-    ]
-    assert {item.error for item in incompatible.destinations} == {
-        "IncompatibleSnapshotError"
-    }
     with duckdb.connect(str(database), read_only=True) as destination:
         pointer = destination.execute(
             "SELECT committed_snapshot_seq, bundle_id "
@@ -865,7 +896,7 @@ def test_structured_failure_preserves_populated_pointer(
     )
 
 
-def test_reconciliation_transition_is_captured_and_proof_fails_closed(
+def test_export_drives_terminal_reconciliation_before_capture(
     pg_engine: Engine, tmp_path
 ) -> None:
     schema = PlatformSchema()
@@ -876,34 +907,34 @@ def test_reconciliation_transition_is_captured_and_proof_fails_closed(
         operation_key="reconciled-export",
         item_keys=("item",),
     )
-
-    def reconcile_transition(
-        engine: Engine, _schema: PlatformSchema
-    ) -> ReconciledCutProof:
-        with engine.begin() as connection:
-            connection.execute(
-                update(schema.item_attempts).values(
-                    execution_state="succeeded",
-                    terminal_at=text("clock_timestamp()"),
-                    updated_at=text("clock_timestamp()"),
-                )
+    with pg_engine.begin() as connection:
+        connection.execute(
+            update(schema.item_attempts).values(
+                enqueue_state="enqueued",
+                execution_state="active",
+                enqueued_at=text("clock_timestamp()"),
+                effective_service_priority=1000,
+                priority_source="enqueued_here",
+                updated_at=text("clock_timestamp()"),
             )
-            source_database, reconciled_at = connection.execute(
-                text("SELECT current_database(), clock_timestamp()")
-            ).one()
-        return ReconciledCutProof(
-            source_id=f"dbos:{source_database}",
-            database_server=source_database,
-            reconciled_at=reconciled_at,
-            scope="all-platform-lifecycle",
         )
+
+    class TerminalReader(_LifecycleReader):
+        def observe(self, *, workflow_id: str) -> ReconciliationObservation:
+            return ReconciliationObservation(
+                workflow_id=workflow_id,
+                disposition=ReconciliationObservationDisposition.SUCCEEDED,
+                dbos_status=DbosWorkflowStatus.SUCCESS,
+            )
 
     database = tmp_path / "reconciled.duckdb"
     result = _export(
         pg_engine,
         ExportOptions(destination_path=str(database)),
         schema=schema,
-        reconcile_before_capture=reconcile_transition,
+        reconciliation=_reconciliation(
+            pg_engine, reader=TerminalReader(), page_size=1
+        ),
     )
     assert result.destinations[0].status == "PROMOTED"
     with duckdb.connect(str(database), read_only=True) as destination:
@@ -917,28 +948,98 @@ def test_reconciliation_transition_is_captured_and_proof_fails_closed(
             f'SELECT execution_state FROM "{table_name[0]}"'  # noqa: S608
         ).fetchone() == ("succeeded",)
 
-    missing = _export(
-        pg_engine,
-        ExportOptions(destination_path=str(tmp_path / "missing-proof.duckdb")),
-        reconcile_before_capture=cast("Any", lambda _engine, _schema: None),
-    )
-    assert missing.destinations[0].status == "FAILED"
-    assert missing.destinations[0].error == "TypeError"
+    with pytest.raises(TypeError):
+        _export(  # type: ignore[call-arg]
+            pg_engine,
+            ExportOptions(
+                destination_path=str(tmp_path / "missing-dependencies.duckdb")
+            ),
+        )
+    with pytest.raises(ValueError, match="all platform operations"):
+        replace(
+            _reconciliation(pg_engine),
+            options=ReconcileOptions(operation_key="one-operation"),
+        )
 
-    def unavailable(
-        _engine: Engine, _schema: PlatformSchema
-    ) -> ReconciledCutProof:
-        raise RuntimeError("DBOS lifecycle unavailable")
+
+def test_reconciliation_failure_and_bound_exhaustion_are_destination_outcomes(
+    pg_engine: Engine, tmp_path
+) -> None:
+    schema = PlatformSchema()
+    upgrade_platform_schema(str(pg_engine.url))
+    _register_operation(
+        pg_engine,
+        schema,
+        operation_key="failed-export-reconciliation",
+        item_keys=("item",),
+    )
+    with pg_engine.begin() as connection:
+        connection.execute(
+            update(schema.item_attempts).values(
+                enqueue_state="enqueued",
+                execution_state="active",
+                enqueued_at=text("clock_timestamp()"),
+                effective_service_priority=1000,
+                priority_source="enqueued_here",
+                updated_at=text("clock_timestamp()"),
+            )
+        )
+
+    remote = PostgresPublicationFence(
+        pg_engine,
+        destination_id="remote-reconciliation-failure",
+        table_name="remote_reconciliation_failure_state",
+    )
+
+    class UnavailableReader(_LifecycleReader):
+        def observe(self, *, workflow_id: str) -> ReconciliationObservation:
+            del workflow_id
+            raise RuntimeError("DBOS lifecycle unavailable")
 
     failed = _export(
         pg_engine,
         ExportOptions(
             destination_path=str(tmp_path / "failed-reconciliation.duckdb")
         ),
-        reconcile_before_capture=unavailable,
+        schema=schema,
+        reconciliation=_reconciliation(pg_engine, reader=UnavailableReader()),
+        remote_destinations=(remote,),
     )
-    assert failed.destinations[0].status == "FAILED"
-    assert failed.destinations[0].error == "RuntimeError"
+    assert [outcome.status for outcome in failed.destinations] == [
+        "FAILED",
+        "FAILED",
+    ]
+    assert {outcome.error for outcome in failed.destinations} == {
+        "RuntimeError"
+    }
+
+    class ActiveReader(_LifecycleReader):
+        def observe(self, *, workflow_id: str) -> ReconciliationObservation:
+            return ReconciliationObservation(
+                workflow_id=workflow_id,
+                disposition=ReconciliationObservationDisposition.ACTIVE,
+                dbos_status=DbosWorkflowStatus.PENDING,
+            )
+
+    exhausted = _export(
+        pg_engine,
+        ExportOptions(destination_path=str(tmp_path / "bounded.duckdb")),
+        schema=schema,
+        reconciliation=_reconciliation(
+            pg_engine,
+            reader=ActiveReader(),
+            page_size=1,
+            max_cycles=2,
+        ),
+        remote_destinations=(remote,),
+    )
+    assert [outcome.status for outcome in exhausted.destinations] == [
+        "FAILED",
+        "FAILED",
+    ]
+    assert {outcome.error for outcome in exhausted.destinations} == {
+        "IncompleteExportReconciliationError"
+    }
 
 
 def test_kernel_remote_stages_every_member_and_retries_independently(

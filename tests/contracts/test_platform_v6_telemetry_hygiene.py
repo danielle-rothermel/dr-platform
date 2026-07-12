@@ -142,6 +142,36 @@ def test_dbos_bootstrap_falls_back_after_otlp_failure() -> None:
     )
 
 
+def test_dbos_bootstrap_stays_fail_open_when_disabled_reset_fails() -> None:
+    telemetry_configs: list[DBOSConfig] = []
+
+    def initialize_telemetry(config: DBOSConfig) -> None:
+        telemetry_configs.append(config)
+        raise RuntimeError("sensitive tracer implementation failure")
+
+    result = initialize_dbos_runtime(
+        PlatformDbosConfig(
+            database_url="postgresql+psycopg://app",
+            system_database_url="postgresql+psycopg://system",
+            enable_otlp=True,
+        ),
+        app_name="app",
+        runtime_initializer=lambda _config: None,
+        telemetry_initializer=initialize_telemetry,
+    )
+
+    assert [config.get("enable_otlp") for config in telemetry_configs] == [
+        True,
+        False,
+    ]
+    assert result == TelemetryInitializationResult(
+        enabled=True,
+        healthy=False,
+        error_type="RuntimeError",
+        message="OTLP initialization failed",
+    )
+
+
 def test_dbos_bootstrap_propagates_nontelemetry_initialization_failure() -> (
     None
 ):

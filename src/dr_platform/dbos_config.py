@@ -194,7 +194,13 @@ def initialize_dbos_runtime(
         initializer=lambda: initialize_telemetry(enabled_dbos_config),
     )
     if not result.healthy:
-        initialize_telemetry(disabled_dbos_config)
+        # Resetting the optional tracer is best-effort too.  Preserve the
+        # original stable degraded status even when the tracer implementation
+        # is unavailable for both enabled and disabled configurations.
+        initialize_telemetry_safely(
+            enabled=True,
+            initializer=lambda: initialize_telemetry(disabled_dbos_config),
+        )
     return result
 
 
