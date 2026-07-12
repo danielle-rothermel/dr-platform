@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import re
 import subprocess
+import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -284,7 +286,7 @@ class OpenSslEd25519Signer(BundleIntegritySigner):
         return completed.stdout
 
 
-def canonical_integrity_payload(payload: SignedBundleIntegrityPayload) -> bytes:
+def canonical_integrity_json(value: object) -> str:
     """Constrained JCS contract shared with Unitbench.
 
     Integrity facts deliberately contain no floating-point values.  This keeps
@@ -313,15 +315,62 @@ def canonical_integrity_payload(payload: SignedBundleIntegrityPayload) -> bytes:
             if not all(isinstance(key, str) for key in value):
                 raise ValueError("signed integrity object keys must be strings")
             return "{" + ",".join(
-                f"{encode(key)}:{encode(value[key])}" for key in sorted(value)
+                # RFC 8785 orders property names by UTF-16 code units, not
+                # Python Unicode code points.  This also matches ECMAScript's
+                # Array#sort used by Unitbench.
+                f"{encode(key)}:{encode(value[key])}"
+                for key in sorted(
+                    value,
+                    key=lambda item: item.encode(
+                        "utf-16-be", "surrogatepass"
+                    ),
+                )
             ) + "}"
         raise ValueError(f"unsupported signed integrity value: {type(value).__name__}")
 
-    return encode(payload.model_dump(mode="json")).encode("utf-8")
+    return encode(value)
+
+
+def canonical_integrity_payload(payload: SignedBundleIntegrityPayload) -> bytes:
+    return canonical_integrity_json(payload.model_dump(mode="json")).encode("utf-8")
 
 
 def integrity_message(payload: SignedBundleIntegrityPayload) -> bytes:
     return b"dr-platform.bundle-integrity.v1\0" + canonical_integrity_payload(payload)
+
+
+def _verify_spki_ed25519(
+    key_der: bytes, message: bytes, signature: bytes
+) -> bool:
+    """Use OpenSSL for the same DER/SPKI wire form consumed by Unitbench."""
+
+    with (
+        tempfile.NamedTemporaryFile() as key_file,
+        tempfile.NamedTemporaryFile() as signature_file,
+    ):
+        key_file.write(key_der)
+        key_file.flush()
+        signature_file.write(signature)
+        signature_file.flush()
+        completed = subprocess.run(  # noqa: S603
+            [
+                "/usr/bin/openssl",
+                "pkeyutl",
+                "-verify",
+                "-rawin",
+                "-pubin",
+                "-inkey",
+                key_file.name,
+                "-keyform",
+                "DER",
+                "-sigfile",
+                signature_file.name,
+            ],
+            input=message,
+            capture_output=True,
+            check=False,
+        )
+    return completed.returncode == 0
 
 
 class _StalePromotionError(RuntimeError):
@@ -399,7 +448,9 @@ class PostgresPublicationFence:
                 f"created_at TIMESTAMPTZ NOT NULL DEFAULT {self._now}, PRIMARY KEY(destination_id, bundle_key, pin_id))"
             ))
 
-    def backfill_protected_integrity(self) -> tuple[str, ...]:
+    def backfill_protected_integrity(
+        self, *, bundle_key: str, run_id: str, fencing_token: int
+    ) -> tuple[str, ...]:
         """Fence and sign every currently readable legacy bundle.
 
         This intentionally includes all promoted rows (a safe superset of the
@@ -411,13 +462,27 @@ class PostgresPublicationFence:
         if self.signer is None:
             raise ValueError("backfill requires an injected BundleIntegritySigner")
         with self.engine.begin() as connection:
+            # Lock the owner state row first.  Every subsequent mutation
+            # re-checks this exact fence so an expired/replaced lease cannot
+            # backfill a bundle while a successor promotes or cleans up.
+            connection.execute(text(
+                f"SELECT 1 FROM {self._table} WHERE destination_id = "
+                "CAST(:destination AS TEXT) AND bundle_key = "
+                "CAST(:bundle AS TEXT) FOR UPDATE"
+            ), {"destination": self.destination_id, "bundle": bundle_key}).one()
+            self._require_current_lease(
+                connection, bundle_key, run_id, fencing_token
+            )
             rows = connection.execute(text(
                 f"SELECT bundle_key, bundle_id, snapshot_seq, source_coordinates_json, manifest_json "
                 f"FROM {self._bundles_table} WHERE destination_id = CAST(:destination AS TEXT) "
-                "AND status = 'PROMOTED' FOR UPDATE"
-            ), {"destination": self.destination_id}).mappings().all()
+                "AND bundle_key = CAST(:bundle AS TEXT) AND status = 'PROMOTED' FOR UPDATE"
+            ), {"destination": self.destination_id, "bundle": bundle_key}).mappings().all()
             completed: list[str] = []
             for row in rows:
+                self._require_current_lease(
+                    connection, bundle_key, run_id, fencing_token
+                )
                 manifest = RemoteBundleManifest.model_validate_json(row["manifest_json"])
                 coordinates = tuple(SourceCoordinate.model_validate(value) for value in json.loads(row["source_coordinates_json"]))
                 signed_manifest = self._with_physical_digests(connection, manifest)
@@ -426,16 +491,19 @@ class PostgresPublicationFence:
                     snapshot_seq=int(row["snapshot_seq"]), manifest=signed_manifest,
                     source_coordinates=coordinates,
                 )
-                connection.execute(text(
+                updated = connection.execute(text(
                     f"UPDATE {self._bundles_table} SET manifest_json = CAST(:manifest AS TEXT), "
                     "integrity_version = CAST(:version AS TEXT), integrity_key_id = CAST(:key_id AS TEXT), "
                     "integrity_payload_json = CAST(:payload AS TEXT), integrity_signature = CAST(:signature AS TEXT), "
                     "physical_digest_algorithm = CAST(:algorithm AS TEXT) WHERE destination_id = CAST(:destination AS TEXT) "
-                    "AND bundle_key = CAST(:bundle AS TEXT) AND bundle_id = CAST(:bundle_id AS TEXT)"
+                    "AND bundle_key = CAST(:bundle AS TEXT) AND bundle_id = CAST(:bundle_id AS TEXT) "
+                    "AND status = 'PROMOTED'"
                 ), {"manifest": signed_manifest.model_dump_json(), "version": payload.integrity_version,
                     "key_id": self.signer.key_id, "payload": canonical_integrity_payload(payload).decode(),
                     "signature": base64.b64encode(signature).decode(), "algorithm": payload.physical_digest_algorithm,
                     "destination": self.destination_id, "bundle": row["bundle_key"], "bundle_id": row["bundle_id"]})
+                if updated.rowcount != 1:
+                    raise _StalePromotionError
                 completed.append(str(row["bundle_id"]))
             return tuple(completed)
 
@@ -565,8 +633,12 @@ class PostgresPublicationFence:
                         raise ValueError(
                             "manifest source families do not match promotion"
                         )
-                    self._record_remote_stage(
-                        stage_connection,
+                with self.engine.begin() as connection:
+                    # The stage transaction may have committed long ago.  Read
+                    # physical facts again, sign them, persist the immutable
+                    # record, and advance the pointer under one final fence.
+                    signed_manifest = self._record_remote_stage(
+                        connection,
                         bundle_key=bundle_key,
                         bundle_id=bundle_id,
                         snapshot_seq=snapshot_seq,
@@ -575,7 +647,6 @@ class PostgresPublicationFence:
                         source_coordinates=source_coordinates,
                         manifest=manifest,
                     )
-                with self.engine.begin() as connection:
                     return self._promote_remote_manifest(
                         connection,
                         bundle_key=bundle_key,
@@ -585,7 +656,7 @@ class PostgresPublicationFence:
                         bundle_id=bundle_id,
                         cursors=cursors,
                         source_coordinates=source_coordinates,
-                        manifest=manifest,
+                        manifest=signed_manifest,
                     )
             except _StalePromotionError:
                 return RemotePromotionResult(disposition="STALE_PROMOTION")
@@ -1381,6 +1452,8 @@ def pin_local_bundle(
 def resolve_local_pin(
     database_path: str | Path,
     pin: BundlePin,
+    *,
+    public_key_ring: Mapping[str, str] | None = None,
 ) -> PinnedBundle:
     path = Path(database_path)
     with _duckdb_lock(path), duckdb.connect(str(path)) as connection:
@@ -1390,15 +1463,45 @@ def resolve_local_pin(
             [pin.destination_id, pin.bundle_key, pin.pin_id],
         ).fetchone()
         manifest_row = connection.execute(
-            f"SELECT snapshot_seq, manifest_json FROM {_BUNDLE_TABLE} "
+            f"SELECT snapshot_seq, manifest_json, integrity_version, integrity_key_id, "
+            "integrity_payload_json, integrity_signature, physical_digest_algorithm "
+            f"FROM {_BUNDLE_TABLE} "
             "WHERE destination_id = ? AND bundle_key = ? AND bundle_id = ?",
             [pin.destination_id, pin.bundle_key, pin.bundle_id],
         ).fetchone()
         if row is None or manifest_row is None or row[0] != pin.bundle_id:
             raise PinnedBundleGoneError(pin.pin_id)
         try:
+            integrity = manifest_row[2:]
+            # Legacy rows remain readable only during an explicit migration.
+            # Partial signed metadata is never interpreted as an attestation.
+            if any(value is not None for value in integrity):
+                if (
+                    public_key_ring is None
+                    or any(not isinstance(value, str) or not value for value in integrity)
+                    or integrity[0] != "dr-platform.bundle-integrity.v1"
+                ):
+                    raise ValueError("malformed local signed integrity")
+                payload = SignedBundleIntegrityPayload.model_validate_json(
+                    integrity[2]
+                )
+                if (
+                    payload.destination_id != pin.destination_id
+                    or payload.bundle_key != pin.bundle_key
+                    or payload.bundle_id != pin.bundle_id
+                    or payload.snapshot_seq != int(manifest_row[0])
+                    or payload.physical_digest_algorithm != integrity[4]
+                ):
+                    raise ValueError("mismatched local signed integrity")
+                encoded_key = public_key_ring.get(integrity[1])
+                if encoded_key is None or not _verify_spki_ed25519(
+                    base64.b64decode(encoded_key, validate=True),
+                    integrity_message(payload),
+                    base64.b64decode(integrity[3], validate=True),
+                ):
+                    raise ValueError("invalid local signed integrity")
             manifest = json.loads(manifest_row[1])
-        except (TypeError, ValueError) as exc:
+        except (binascii.Error, TypeError, ValueError) as exc:
             raise PinnedBundleGoneError(pin.pin_id) from exc
         if not isinstance(manifest, dict):
             raise PinnedBundleGoneError(pin.pin_id)
@@ -1446,6 +1549,25 @@ def resolve_local_pin(
                 raise PinnedBundleGoneError(pin.pin_id) from exc
             if checksum != expected_checksum:
                 raise PinnedBundleGoneError(pin.pin_id)
+            if any(value is not None for value in integrity):
+                proof = next(
+                    (item for item in payload.members if item.member == member),
+                    None,
+                )
+                ordering = ", ".join(_quoted(key) for key in unique_key)
+                physical = connection.execute(
+                    "SELECT COUNT(*), sha256(COALESCE(string_agg("
+                    "length(to_json(t)::VARCHAR)::VARCHAR || ':' || "
+                    "to_json(t)::VARCHAR, '' ORDER BY "
+                    f"{ordering}), '')) FROM {table} t"
+                ).fetchone()
+                if (
+                    proof is None or physical is None
+                    or proof.table_name != table_name
+                    or proof.row_count != int(physical[0])
+                    or proof.physical_digest != physical[1]
+                ):
+                    raise PinnedBundleGoneError(pin.pin_id)
             members[str(member)] = table_name
     return PinnedBundle(
         bundle_id=pin.bundle_id,

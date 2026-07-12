@@ -1,0 +1,5 @@
+[
+  {"name":"ascii-and-controls","value":{"z":"\u0000\b\t\n\f\r\"\\","a":"plain"},"canonical":"{\"a\":\"plain\",\"z\":\"\\u0000\\b\\t\\n\\f\\r\\\"\\\\\"}"},
+  {"name":"utf16-order","value":{"\ue000":1,"𐀀":2},"canonical":"{\"𐀀\":2,\"\":1}"},
+  {"name":"unicode-and-safe-integers","value":{"é":"雪","max":9007199254740991,"min":-9007199254740991},"canonical":"{\"max\":9007199254740991,\"min\":-9007199254740991,\"é\":\"雪\"}"}
+]
