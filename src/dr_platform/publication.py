@@ -78,6 +78,48 @@ class SourceCoordinate(BaseModel):
         return self
 
 
+def _canonical_source_coordinates(
+    coordinates: tuple[SourceCoordinate, ...],
+) -> str:
+    """Canonical persisted-coordinate representation covered by integrity."""
+
+    return _canonical(
+        [coordinate.model_dump(mode="json") for coordinate in coordinates]
+    )
+
+
+def _source_coordinates_sha256(
+    coordinates: tuple[SourceCoordinate, ...],
+) -> str:
+    return hashlib.sha256(
+        _canonical_source_coordinates(coordinates).encode()
+    ).hexdigest()
+
+
+def _parse_source_coordinates_json(value: str) -> tuple[SourceCoordinate, ...]:
+    parsed = json.loads(value)
+    if not isinstance(parsed, list) or not parsed:
+        raise ValueError("source coordinates must be a non-empty JSON array")
+    return tuple(SourceCoordinate.model_validate(item) for item in parsed)
+
+
+def _source_families_from_coordinates(
+    coordinates: tuple[SourceCoordinate, ...],
+) -> tuple[Literal["application", "dbos"], ...]:
+    families: list[Literal["application", "dbos"]] = []
+    for coordinate in coordinates:
+        family, separator, identity = coordinate.source_id.partition(":")
+        if separator != ":" or not identity:
+            raise ValueError("source coordinates must identify a known family")
+        if family == "application":
+            families.append("application")
+        elif family == "dbos":
+            families.append("dbos")
+        else:
+            raise ValueError("source coordinates must identify a known family")
+    return tuple(families)
+
+
 def capture_source_coordinate(
     engine: Engine,
     *,
@@ -552,9 +594,11 @@ class PostgresPublicationFence:
                 manifest = RemoteBundleManifest.model_validate_json(
                     row["manifest_json"]
                 )
-                coordinates = tuple(
-                    SourceCoordinate.model_validate(value)
-                    for value in json.loads(row["source_coordinates_json"])
+                coordinates = _parse_source_coordinates_json(
+                    row["source_coordinates_json"]
+                )
+                self._require_manifest_coordinates(
+                    coordinates, manifest.source_families
                 )
                 signed_manifest = self._with_physical_digests(
                     connection, manifest
@@ -923,14 +967,9 @@ class PostgresPublicationFence:
             bundle_id=bundle_id,
             snapshot_seq=snapshot_seq,
             integrity_version="dr-platform.bundle-integrity.v1",
-            source_coordinates_sha256=hashlib.sha256(
-                _canonical(
-                    [
-                        coordinate.model_dump(mode="json")
-                        for coordinate in source_coordinates
-                    ]
-                ).encode()
-            ).hexdigest(),
+            source_coordinates_sha256=_source_coordinates_sha256(
+                source_coordinates
+            ),
             physical_digest_algorithm=algorithm,
             members=manifest.members,
         )
@@ -1006,21 +1045,14 @@ class PostgresPublicationFence:
             set(source_families)
         ):
             raise ValueError("source families must be explicit and unique")
-        coordinate_families = tuple(
-            coordinate.source_id.partition(":")[0]
-            for coordinate in coordinates
-        )
-        valid_identities = all(
-            separator == ":" and identity
-            for coordinate in coordinates
-            for _, separator, identity in (
-                coordinate.source_id.partition(":"),
+        try:
+            coordinate_families = _source_families_from_coordinates(
+                coordinates
             )
-        )
-        if (
-            tuple(sorted(coordinate_families))
-            != tuple(sorted(source_families))
-            or not valid_identities
+        except ValueError:
+            coordinate_families = ()
+        if tuple(sorted(coordinate_families)) != tuple(
+            sorted(source_families)
         ):
             raise IncompatibleSnapshotError(
                 SnapshotCompatibility(
@@ -1172,12 +1204,7 @@ class PostgresPublicationFence:
             "bundle_id": bundle_id,
             "cursors": _canonical(dict(cursors)),
             "checksums": _canonical(dict(checksums)),
-            "coordinates": _canonical(
-                [
-                    coordinate.model_dump(mode="json")
-                    for coordinate in source_coordinates
-                ]
-            ),
+            "coordinates": _canonical_source_coordinates(source_coordinates),
             "manifest": manifest.model_dump_json(),
         }
         previous = connection.execute(
@@ -1325,7 +1352,7 @@ class PostgresPublicationFence:
             with self.engine.connect() as connection:
                 row = connection.execute(
                     text(
-                        f"SELECT b.snapshot_seq, b.manifest_json, b.integrity_version, b.integrity_key_id, "
+                        f"SELECT b.snapshot_seq, b.source_coordinates_json, b.manifest_json, b.integrity_version, b.integrity_key_id, "
                         "b.integrity_payload_json, b.integrity_signature, b.physical_digest_algorithm "
                         f"FROM {self._pins_table} p "
                         f"JOIN {self._bundles_table} b ON "
@@ -1347,29 +1374,32 @@ class PostgresPublicationFence:
                 # Resolve only the pinned bundle's immutable record.  Never
                 # consult mutable current publication state here: a successor
                 # promotion must not change an existing pin's proof.
-                manifest = RemoteBundleManifest.model_validate_json(row[1])
+                coordinates = _parse_source_coordinates_json(row[1])
+                manifest = RemoteBundleManifest.model_validate_json(row[2])
                 payload = SignedBundleIntegrityPayload.model_validate_json(
-                    row[4]
+                    row[5]
                 )
                 if (
-                    row[2] != "dr-platform.bundle-integrity.v1"
-                    or not isinstance(row[3], str)
-                    or not isinstance(row[5], str)
+                    row[3] != "dr-platform.bundle-integrity.v1"
+                    or not isinstance(row[4], str)
                     or not isinstance(row[6], str)
+                    or not isinstance(row[7], str)
                     or payload.destination_id != pin.destination_id
                     or payload.bundle_key != pin.bundle_key
                     or payload.bundle_id != pin.bundle_id
                     or payload.snapshot_seq != int(row[0])
-                    or payload.physical_digest_algorithm != row[6]
+                    or payload.source_coordinates_sha256
+                    != _source_coordinates_sha256(coordinates)
+                    or payload.physical_digest_algorithm != row[7]
                 ):
                     raise ValueError(
                         "missing or mismatched signed integrity payload"
                     )
-                encoded_key = self.public_key_ring.get(row[3])
+                encoded_key = self.public_key_ring.get(row[4])
                 if encoded_key is None or not _verify_spki_ed25519(
                     base64.b64decode(encoded_key, validate=True),
                     integrity_message(payload),
-                    base64.b64decode(row[5], validate=True),
+                    base64.b64decode(row[6], validate=True),
                 ):
                     raise ValueError("invalid remote signed integrity")
                 if tuple(manifest.members) != tuple(payload.members):
@@ -1378,8 +1408,16 @@ class PostgresPublicationFence:
                     )
                 signed_manifest = RemoteBundleManifest(
                     members=payload.members,
-                    source_families=manifest.source_families,
+                    source_families=_source_families_from_coordinates(
+                        coordinates
+                    ),
                 )
+                if tuple(sorted(manifest.source_families)) != tuple(
+                    sorted(signed_manifest.source_families)
+                ):
+                    raise ValueError(
+                        "remote manifest provenance does not match signed coordinates"
+                    )
                 self._validate_remote_manifest(connection, signed_manifest)
                 physical = self._with_physical_digests(
                     connection, signed_manifest

@@ -8,6 +8,16 @@ algorithm. Signatures cover `dr-platform.bundle-integrity.v1\0` followed by
 canonical JSON. `BundleIntegritySigner` is injected; `OpenSslEd25519Signer`
 keeps PEM private keys outside publication state.
 
+The source-coordinate digest is SHA-256 of `_canonical` JSON for the parsed
+`source_coordinates_json` array: source-coordinate objects retain their stored
+array order, object keys are sorted, and datetimes use their JSON ISO-8601
+form. Readers parse that JSON as `SourceCoordinate`, re-canonicalize it, and
+derive manifest source families from the authenticated `source_id` prefixes;
+the unsigned manifest may not supply independent provenance.
+Local DuckDB bundle manifests do not persist source coordinates or source
+families, so their existing signed empty coordinate digest has no corresponding
+local provenance field to validate.
+
 Migration adds nullable signed fields, physically validates and signs every
 current, retained, and active-pinned bundle under the publication fence, then
 rejects promotion without a signer. It must abort rather than strand a

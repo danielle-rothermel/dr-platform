@@ -833,6 +833,148 @@ def test_remote_backfill_signs_legacy_bundle_under_current_fence(
     assert fence.resolve_pin(pin).bundle_id == "legacy"
 
 
+def test_remote_pin_authenticates_persisted_provenance(
+    pg_engine: Engine,
+) -> None:
+    _require_pgcrypto(pg_engine)
+    suffix = uuid4().hex[:12]
+    signer, key_ring = signed_integrity_test_material()
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"provenance-{suffix}",
+        table_name=f"provenance_state_{suffix}",
+        signer=signer,
+        public_key_ring=key_ring,
+    )
+    fence.ensure_schema()
+    lease = fence.acquire_lease(
+        bundle_key="analysis", run_id="owner", lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    table_name = fence.stage_table_name(
+        member="member",
+        run_id="owner",
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+    )
+    coordinate = capture_source_coordinate(
+        pg_engine, source_id="application", snapshot_seq=1
+    )
+
+    def stage(connection: Connection) -> RemoteBundleManifest:
+        connection.execute(text(f'CREATE TABLE "{table_name}" (id BIGINT)'))
+        return RemoteBundleManifest(
+            source_families=("application",),
+            members=(
+                RemoteBundleMember(
+                    member="member",
+                    table_name=table_name,
+                    key_columns=("id",),
+                    row_count=0,
+                    checksum=_EMPTY_CHECKSUM,
+                ),
+            ),
+        )
+
+    assert (
+        fence.promote(
+            bundle_key="analysis",
+            run_id="owner",
+            fencing_token=lease.fencing_token,
+            snapshot_seq=1,
+            bundle_id="bundle",
+            cursors={},
+            source_coordinates=(coordinate,),
+            source_families=("application",),
+            stage=stage,
+        ).disposition
+        == "PROMOTED"
+    )
+    pin = fence.pin_bundle(bundle_key="analysis", pin_id="provenance-pin")
+    assert fence.resolve_pin(pin).bundle_id == "bundle"
+    with pg_engine.connect() as connection:
+        original_manifest = connection.execute(
+            text(
+                f"SELECT manifest_json FROM {fence._bundles_table} "
+                "WHERE destination_id = :destination"
+            ),
+            {"destination": fence.destination_id},
+        ).scalar_one()
+
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                f"UPDATE {fence._bundles_table} SET source_coordinates_json = "
+                "CAST(:coordinates AS TEXT) "
+                "WHERE destination_id = :destination"
+            ),
+            {
+                "coordinates": json.dumps(
+                    [
+                        coordinate.model_copy(
+                            update={"database_server": "forged-server"}
+                        ).model_dump(mode="json")
+                    ]
+                ),
+                "destination": fence.destination_id,
+            },
+        )
+    with pytest.raises(PinnedBundleGoneError, match="PINNED_BUNDLE_GONE"):
+        fence.resolve_pin(pin)
+
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                f"UPDATE {fence._bundles_table} SET source_coordinates_json = "
+                "CAST(:coordinates AS TEXT), "
+                "manifest_json = CAST(:manifest AS TEXT) "
+                "WHERE destination_id = :destination"
+            ),
+            {
+                "coordinates": json.dumps(
+                    [coordinate.model_dump(mode="json")]
+                ),
+                "manifest": json.dumps(
+                    {
+                        **json.loads(original_manifest),
+                        "source_families": ["dbos"],
+                    }
+                ),
+                "destination": fence.destination_id,
+            },
+        )
+    with pytest.raises(PinnedBundleGoneError, match="PINNED_BUNDLE_GONE"):
+        fence.resolve_pin(pin)
+
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                f"UPDATE {fence._bundles_table} SET "
+                "manifest_json = CAST(:manifest AS TEXT) "
+                "WHERE destination_id = :destination"
+            ),
+            {
+                "manifest": original_manifest,
+                "destination": fence.destination_id,
+            },
+        )
+    rotated_reader = PostgresPublicationFence(
+        pg_engine,
+        destination_id=fence.destination_id,
+        table_name=fence.table_name,
+        public_key_ring={**key_ring, "next-ed25519": "next-public-key"},
+    )
+    assert rotated_reader.resolve_pin(pin).bundle_id == "bundle"
+    revoked_reader = PostgresPublicationFence(
+        pg_engine,
+        destination_id=fence.destination_id,
+        table_name=fence.table_name,
+        public_key_ring={"next-ed25519": "next-public-key"},
+    )
+    with pytest.raises(PinnedBundleGoneError, match="PINNED_BUNDLE_GONE"):
+        revoked_reader.resolve_pin(pin)
+
+
 def test_remote_backfill_rechecks_fence_before_legacy_write(
     pg_engine: Engine,
 ) -> None:
