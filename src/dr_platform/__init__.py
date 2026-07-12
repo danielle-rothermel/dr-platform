@@ -15,6 +15,12 @@ from dr_platform.manifests import (
     ManifestSource,
     OperationManifest,
 )
+from dr_platform.reconciliation import (
+    NextAttemptRequest,
+    NextAttemptResult,
+    request_next_attempt,
+)
+from dr_platform.reconciliation_runtime import reconcile
 from dr_platform.records import (
     AttemptRecord,
     EligibilityReference,
@@ -72,6 +78,8 @@ __all__ = [
     "ManifestSource",
     "NextAttemptDisposition",
     "NextAttemptReason",
+    "NextAttemptRequest",
+    "NextAttemptResult",
     "OperationManifest",
     "OperationRecord",
     "OperationStatus",
@@ -92,6 +100,8 @@ __all__ = [
     "abandon_registration",
     "build_dbos_config",
     "build_platform_dbos_config",
+    "reconcile",
+    "request_next_attempt",
     "submit",
     "submit_jsonl",
     "upgrade_platform_schema",

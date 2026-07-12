@@ -1686,7 +1686,7 @@ def _acquire_workflow_reference_locks(
     connection: Connection,
     workflow_ids: Sequence[str],
 ) -> None:
-    for workflow_id in workflow_ids:
+    for workflow_id in sorted(set(workflow_ids)):
         connection.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:id, 0))"),
             {"id": workflow_id},

@@ -31,6 +31,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from dr_platform.status import (
     AttemptEnqueueState,
     AttemptExecutionState,
+    AttemptRetryReason,
     CancellationDisposition,
     CancellationOrigin,
     EnqueueClaimDisposition,
@@ -528,7 +529,7 @@ class PlatformSchema:
             ),
             CheckConstraint(
                 "retry_reason IS NULL OR "
-                + enum_check("retry_reason", NextAttemptReason),
+                + enum_check("retry_reason", AttemptRetryReason),
                 name=name("ck_attempts_retry_reason"),
             ),
             CheckConstraint(
@@ -701,6 +702,34 @@ class PlatformSchema:
                 "claim_id",
                 "workflow_id",
                 name=name("uq_claims_workflow_provenance"),
+            ),
+        )
+
+        self.missing_reobservations = Table(
+            name("missing_reobservations"),
+            self.metadata,
+            Column("item_id", Text, primary_key=True),
+            Column("attempt", Integer, primary_key=True),
+            Column(
+                "last_reobserved_at",
+                DateTime(timezone=True),
+                nullable=False,
+            ),
+            Column("observation_count", Integer, nullable=False),
+            Column("created_at", DateTime(timezone=True), nullable=False),
+            Column("change_seq", BigInteger, nullable=False),
+            ForeignKeyConstraint(
+                ["item_id", "attempt"],
+                [
+                    f"{self.item_attempts.name}.item_id",
+                    f"{self.item_attempts.name}.attempt",
+                ],
+                ondelete="RESTRICT",
+                name=name("fk_missing_reobservations_attempt"),
+            ),
+            CheckConstraint(
+                "observation_count > 0",
+                name=name("ck_missing_reobservations_count"),
             ),
         )
 
@@ -979,6 +1008,16 @@ class PlatformSchema:
             postgresql_where=self.enqueue_compensations.c.cancel_disposition.in_(
                 ["pending", "failed"]
             ),
+        )
+        Index(
+            f"ix_{prefix}_missing_reobservations_schedule",
+            self.missing_reobservations.c.last_reobserved_at,
+            self.missing_reobservations.c.item_id,
+            self.missing_reobservations.c.attempt,
+        )
+        Index(
+            f"ix_{prefix}_missing_reobservations_change_seq",
+            self.missing_reobservations.c.change_seq,
         )
         Index(
             f"ix_{prefix}_compensations_change_seq",

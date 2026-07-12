@@ -7,7 +7,7 @@ from typing import Any, cast
 import pytest
 from sqlalchemy import Engine
 
-import dr_platform.enqueue_runtime as runtime_module
+import dr_platform.reconciliation_runtime as runtime_module
 import dr_platform.submission as submission_module
 from dr_platform.manifests import (
     ExecutionTargetRef,
@@ -60,6 +60,7 @@ def test_completed_registration_resubmit_repairs_before_new_claims(
         (),
         {"ref": target_ref, "workflow_role": "generation"},
     )()
+    expected_target_ref = target_ref
     manifest = _manifest(target_ref)
     repair_stages: list[str] = []
     expected = SubmitResult(
@@ -77,7 +78,7 @@ def test_completed_registration_resubmit_repairs_before_new_claims(
 
     class Resolver:
         def resolve(self, target_ref: Any) -> Any:
-            assert target_ref == target.ref
+            assert target_ref == expected_target_ref
             return target
 
     monkeypatch.setattr(
@@ -88,27 +89,10 @@ def test_completed_registration_resubmit_repairs_before_new_claims(
         "_create_or_claim_operation",
         lambda **kwargs: 1,
     )
-    def capture(stage: str) -> Any:
-        def fake_stage(_engine: Engine, **_kwargs: Any) -> None:
-            repair_stages.append(stage)
+    def capture_reconcile(_engine: Engine, **_kwargs: Any) -> None:
+        repair_stages.append("reconcile")
 
-        return fake_stage
-
-    monkeypatch.setattr(
-        runtime_module,
-        "recover_call_started_page",
-        capture("call-started-recovery"),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "enqueue_replacement_page",
-        capture("never-started-replacement"),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "enqueue_pending_page",
-        capture("pending-claim"),
-    )
+    monkeypatch.setattr(runtime_module, "reconcile", capture_reconcile)
     monkeypatch.setattr(
         submission_module,
         "_load_submit_result",
@@ -127,42 +111,21 @@ def test_completed_registration_resubmit_repairs_before_new_claims(
     )
 
     assert result is expected
-    assert repair_stages == [
-        "call-started-recovery",
-        "never-started-replacement",
-        "pending-claim",
-    ]
+    assert repair_stages == ["reconcile"]
 
 
-def test_resubmit_repairs_both_claim_crash_cuts_before_new_claims(
+def test_resubmit_routes_lifecycle_through_reconcile_facade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, Engine, dict[str, Any]]] = []
+    calls: list[tuple[Engine, dict[str, Any]]] = []
     queue_lookup = cast("Any", object())
     adapter = cast("Any", object())
     observer = cast("Any", object())
 
-    def capture(stage: str) -> Any:
-        def fake_stage(engine: Engine, **kwargs: Any) -> None:
-            calls.append((stage, engine, kwargs))
+    def capture(engine: Engine, **kwargs: Any) -> None:
+        calls.append((engine, kwargs))
 
-        return fake_stage
-
-    monkeypatch.setattr(
-        runtime_module,
-        "recover_call_started_page",
-        capture("call-started-recovery"),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "enqueue_replacement_page",
-        capture("never-started-replacement"),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "enqueue_pending_page",
-        capture("pending-claim"),
-    )
+    monkeypatch.setattr(runtime_module, "reconcile", capture)
     engine = cast("Engine", object())
     resolver = cast("Any", object())
     schema = submission_module.PlatformSchema()
@@ -177,19 +140,13 @@ def test_resubmit_repairs_both_claim_crash_cuts_before_new_claims(
         workflow_observer=observer,
     )
 
-    assert [stage for stage, _, _ in calls] == [
-        "call-started-recovery",
-        "never-started-replacement",
-        "pending-claim",
-    ]
-    for _stage, called_engine, kwargs in calls:
-        assert called_engine is engine
-        assert kwargs["resolver"] is resolver
-        assert kwargs["queue_lookup"] is queue_lookup
-        assert kwargs["adapter"] is adapter
-        assert kwargs["options"].page_size == 23
-        assert kwargs["options"].lease_seconds == 41
-        assert kwargs["schema"] is schema
-    assert calls[0][2]["observer"] is observer
-    assert "observer" not in calls[1][2]
-    assert "observer" not in calls[2][2]
+    assert len(calls) == 1
+    called_engine, kwargs = calls[0]
+    assert called_engine is engine
+    assert kwargs["resolver"] is resolver
+    assert kwargs["queue_lookup"] is queue_lookup
+    assert kwargs["enqueue_adapter"] is adapter
+    assert kwargs["options"].page_size == 23
+    assert kwargs["options"].claim_lease_seconds == 41
+    assert kwargs["schema"] is schema
+    assert kwargs["recovery_observer"] is observer

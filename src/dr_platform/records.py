@@ -29,6 +29,7 @@ from dr_platform.status import (
     TERMINAL_OPERATION_STATUSES,
     AttemptEnqueueState,
     AttemptExecutionState,
+    AttemptRetryReason,
     CancellationDisposition,
     CancellationOrigin,
     EnqueueClaimDisposition,
@@ -318,7 +319,7 @@ class AttemptRecord(BaseModel):
     failure: FailureSnapshot | None = None
     source_attempt: NonNegativeInt | None = None
     source_workflow_id: NonEmptyStr | None = None
-    retry_reason: NextAttemptReason | None = None
+    retry_reason: AttemptRetryReason | None = None
     next_attempt_request_id: NonEmptyStr | None = None
     source_application_version: NonEmptyStr
     missing_observation_count: NonNegativeInt = 0
@@ -454,8 +455,7 @@ class AttemptRecord(BaseModel):
         if (
             self.missing_first_observed_at is not None
             and self.missing_last_observed_at is not None
-            and self.missing_last_observed_at
-            < self.missing_first_observed_at
+            and self.missing_last_observed_at < self.missing_first_observed_at
         ):
             raise ValueError(
                 "last missing observation cannot precede the first"
@@ -617,9 +617,7 @@ class EnqueueClaimRecord(BaseModel):
         if self.disposition is EnqueueClaimDisposition.INVALIDATED and any(
             value is None for value in invalidation_values
         ):
-            raise ValueError(
-                "invalidated claims require invalidation facts"
-            )
+            raise ValueError("invalidated claims require invalidation facts")
         if self.disposition is not EnqueueClaimDisposition.INVALIDATED and any(
             value is not None for value in invalidation_values
         ):

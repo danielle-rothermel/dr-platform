@@ -114,6 +114,12 @@ class NextAttemptReason(StrEnum):
     OPERATOR_CANCEL_RETRY = "operator_cancel_retry"
 
 
+class AttemptRetryReason(StrEnum):
+    AUTOMATIC_EXECUTION_ERROR = "automatic_execution_error"
+    DOMAIN_OUTCOME = "domain_outcome"
+    OPERATOR_CANCEL_RETRY = "operator_cancel_retry"
+
+
 class NextAttemptDisposition(StrEnum):
     CREATED = "created"
     MAX_ATTEMPTS_EXHAUSTED = "max_attempts_exhausted"
