@@ -34,12 +34,12 @@ from sqlalchemy import (
     and_,
     func,
     insert,
-    or_,
     select,
     text,
     update,
 )
 
+from dr_platform.cancellation_truth import workflow_reference_conflict
 from dr_platform.db import PlatformSchema
 from dr_platform.items import item_id, shuffle_rank
 from dr_platform.manifests import (
@@ -54,9 +54,6 @@ from dr_platform.records import ItemRecord, RetryPolicy
 from dr_platform.status import (
     AttemptEnqueueState,
     AttemptExecutionState,
-    CancellationDisposition,
-    EnqueueClaimDisposition,
-    EnqueueCompensationDisposition,
     ItemInsertStatus,
     OperationStatus,
     ServiceClass,
@@ -837,85 +834,11 @@ def _validate_workflow_reference_guards(
     workflow_ids: list[str],
 ) -> None:
     """Reject links while cancellation or late-enqueue repair is unresolved."""
-    if not workflow_ids:
-        return
-    unresolved_cancellation = connection.execute(
-        select(schema.item_attempts.c.workflow_id)
-        .where(
-            and_(
-                schema.item_attempts.c.workflow_id.in_(workflow_ids),
-                schema.item_attempts.c.cancellation_request_id.is_not(None),
-                or_(
-                    schema.item_attempts.c.cancellation_disposition.is_(None),
-                    schema.item_attempts.c.cancellation_disposition
-                    == CancellationDisposition.FAILED.value,
-                ),
-            )
-        )
-        .limit(1)
-    ).first()
-    if unresolved_cancellation is not None:
-        raise RegistrationConflictError(
-            "workflow has unresolved cancellation intent"
-        )
-    unresolved_compensation = connection.execute(
-        select(schema.enqueue_claims.c.workflow_id)
-        .select_from(schema.enqueue_claims)
-        .outerjoin(
-            schema.enqueue_compensations,
-            and_(
-                schema.enqueue_compensations.c.item_id
-                == schema.enqueue_claims.c.item_id,
-                schema.enqueue_compensations.c.attempt
-                == schema.enqueue_claims.c.attempt,
-                schema.enqueue_compensations.c.claim_id
-                == schema.enqueue_claims.c.claim_id,
-            ),
-        )
-        .where(
-            and_(
-                schema.enqueue_claims.c.workflow_id.in_(workflow_ids),
-                schema.enqueue_claims.c.disposition
-                == EnqueueClaimDisposition.INVALIDATED.value,
-                schema.enqueue_claims.c.enqueue_call_started_at.is_not(None),
-                or_(
-                    schema.enqueue_compensations.c.claim_id.is_(None),
-                    schema.enqueue_compensations.c.cancel_disposition.in_(
-                        [
-                            EnqueueCompensationDisposition.PENDING.value,
-                            EnqueueCompensationDisposition.FAILED.value,
-                        ]
-                    ),
-                ),
-            )
-        )
-        .limit(1)
-    ).first()
-    if unresolved_compensation is not None:
-        raise RegistrationConflictError(
-            "workflow has unresolved late-enqueue compensation"
-        )
-    unresolved_successor = connection.execute(
-        select(schema.enqueue_compensation_hazards.c.workflow_id)
-        .where(
-            and_(
-                schema.enqueue_compensation_hazards.c.workflow_id.in_(
-                    workflow_ids
-                ),
-                schema.enqueue_compensation_hazards.c.cancel_disposition.in_(
-                    [
-                        EnqueueCompensationDisposition.PENDING.value,
-                        EnqueueCompensationDisposition.FAILED.value,
-                    ]
-                ),
-            )
-        )
-        .limit(1)
-    ).first()
-    if unresolved_successor is not None:
-        raise RegistrationConflictError(
-            "workflow has unresolved late-enqueue successor hazard"
-        )
+    conflict = workflow_reference_conflict(
+        connection, schema=schema, workflow_ids=workflow_ids
+    )
+    if conflict is not None:
+        raise RegistrationConflictError(conflict)
 
 
 def _operation_insert_values(  # noqa: PLR0913

@@ -16,6 +16,10 @@ from pydantic import (
 )
 from sqlalchemy import Connection, Engine, and_, func, or_, select
 
+from dr_platform.cancellation_truth import (
+    incomplete_cancellation_count,
+    incomplete_compensation_count,
+)
 from dr_platform.db import PlatformSchema
 from dr_platform.reconciliation_runtime import (
     DbosStepObservation,
@@ -494,31 +498,11 @@ def health_report(  # noqa: PLR0913
                 > 1
             ),
         )
-        incomplete_cancellation = _count(
-            connection,
-            select(func.count())
-            .select_from(attempts)
-            .where(
-                and_(
-                    attempts.c.cancellation_request_id.is_not(None),
-                    attempts.c.cancellation_disposition.is_(None),
-                )
-            ),
+        incomplete_cancellation = incomplete_cancellation_count(
+            connection, schema=selected
         )
-        compensations = selected.enqueue_compensations
-        incomplete_compensation = _count(
-            connection,
-            select(func.count())
-            .select_from(compensations)
-            .where(compensations.c.resolved_at.is_(None)),
-        )
-        incomplete_compensation += _count(
-            connection,
-            select(func.count())
-            .select_from(selected.enqueue_compensation_hazards)
-            .where(
-                selected.enqueue_compensation_hazards.c.resolved_at.is_(None)
-            ),
+        incomplete_compensation = incomplete_compensation_count(
+            connection, schema=selected
         )
     queued_age = _age_seconds(now, queued_start)
     active_age = _age_seconds(now, active_start)

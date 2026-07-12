@@ -534,11 +534,20 @@ def test_lost_successful_outcome_creates_exact_pending_compensation(
     store = PostgresClaimTransitionStore(pg_engine, schema=schema)
     assert store.mark_enqueue_call_started(claim=claim)
     with pg_engine.begin() as connection:
+        now = connection.scalar(select(text("clock_timestamp()")))
         connection.execute(
             update(schema.item_attempts).values(
                 enqueue_state=AttemptEnqueueState.PENDING.value,
                 current_claim_id=None,
-                updated_at=text("clock_timestamp()"),
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            update(schema.enqueue_claims).values(
+                disposition=EnqueueClaimDisposition.INVALIDATED.value,
+                invalidated_at=now,
+                invalidated_by="test-cancellation",
+                resolved_at=now,
             )
         )
     outcome = _Outcome(
@@ -559,6 +568,48 @@ def test_lost_successful_outcome_creates_exact_pending_compensation(
         )
     assert len(rows) == 1
     assert rows[0]["cancel_disposition"] == "pending"
+
+
+def test_lost_matching_recorded_outcome_is_idempotent(
+    pg_engine: Engine,
+) -> None:
+    schema, _ = _register(
+        pg_engine,
+        service_classes=(ServiceClass.STANDARD,),
+    )
+    claimed = claim_pending_attempts(
+        pg_engine,
+        admit_targets=_admit_targets,
+        schema=schema,
+        claim_id_factory=_claim_ids("claim"),
+    ).claims[0]
+    claim = _claim_record(
+        pg_engine,
+        schema,
+        item_id=claimed.item_id,
+        attempt=claimed.attempt,
+        claim_id=claimed.claim_id,
+    )
+    outcome = _Outcome(
+        workflow_id=claim.workflow_id,
+        disposition="enqueued",
+        effective_service_priority=ServiceClass.STANDARD.priority,
+    )
+    store = PostgresClaimTransitionStore(pg_engine, schema=schema)
+
+    assert store.mark_enqueue_call_started(claim=claim)
+    assert store.record_enqueue_outcome(claim=claim, outcome=outcome)
+    store.ensure_lost_outcome_compensation(claim=claim, outcome=outcome)
+
+    with pg_engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(text("count(*)")).select_from(
+                    schema.enqueue_compensations
+                )
+            )
+            == 0
+        )
 
 
 def test_first_compensation_write_rejects_forged_workflow_provenance(

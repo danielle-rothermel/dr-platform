@@ -398,7 +398,7 @@ def test_absent_late_enqueue_hazard_blocks_new_reference(
         }
     )
 
-    cancel_operation(
+    cancellation = cancel_operation(
         CancellationRequest(
             operation_key="hazard-origin",
             request_id="hazard-request",
@@ -416,6 +416,17 @@ def test_absent_late_enqueue_hazard_blocks_new_reference(
             )
             == EnqueueCompensationDisposition.PENDING.value
         )
+        operation_status = connection.scalar(
+            select(schema.operations.c.status)
+        )
+        terminal_attempt = dict(
+            connection.execute(select(schema.item_attempts)).mappings().one()
+        )
+    assert cancellation.complete is False
+    assert operation_status == OperationStatus.CANCELLING.value
+    assert terminal_attempt["execution_state"] == (
+        AttemptExecutionState.CANCELLED.value
+    )
     with pytest.raises(
         RegistrationConflictError,
         match="unresolved late-enqueue compensation",
@@ -425,6 +436,157 @@ def test_absent_late_enqueue_hazard_blocks_new_reference(
             schema,
             operation_key="hazard-link",
             item_keys=("shared",),
+        )
+
+
+def test_retry_reference_paths_share_unresolved_cancellation_guard(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    schema = PlatformSchema()
+    registry = _register_operation(
+        pg_engine,
+        schema,
+        operation_key="retry-guard-origin",
+        item_keys=("shared",),
+    )
+    now = func.clock_timestamp()
+    with pg_engine.begin() as connection:
+        origin_item_id = connection.scalar(
+            select(schema.items.c.item_id).where(
+                schema.items.c.operation_key == "retry-guard-origin"
+            )
+        )
+        connection.execute(
+            update(schema.item_attempts)
+            .where(schema.item_attempts.c.item_id == origin_item_id)
+            .values(
+                enqueue_state=AttemptEnqueueState.ENQUEUED.value,
+                enqueued_at=now,
+                effective_service_priority=ServiceClass.STANDARD.priority,
+                priority_source="enqueued_here",
+                execution_state=AttemptExecutionState.SUCCEEDED.value,
+                terminal_at=now,
+                updated_at=now,
+            )
+        )
+    assert origin_item_id is not None
+    request_next_attempt(
+        NextAttemptRequest(
+            item_id=origin_item_id,
+            source_attempt=0,
+            request_key="create-guard-workflow",
+            reason=NextAttemptReason.DOMAIN_OUTCOME,
+            eligibility=EligibilityReference(
+                kind="domain_outcome",
+                record_id="outcome-1",
+                digest="outcome-digest",
+            ),
+            requested_by="caller",
+        ),
+        engine=pg_engine,
+        resolver=registry,
+        schema=schema,
+    )
+    with pg_engine.begin() as connection:
+        connection.execute(
+            update(schema.item_attempts)
+            .where(
+                schema.item_attempts.c.item_id == origin_item_id,
+                schema.item_attempts.c.attempt == 1,
+            )
+            .values(
+                enqueue_state=AttemptEnqueueState.ENQUEUED.value,
+                enqueued_at=now,
+                effective_service_priority=ServiceClass.STANDARD.priority,
+                priority_source="enqueued_here",
+                execution_state=AttemptExecutionState.ACTIVE.value,
+                updated_at=now,
+            )
+        )
+    cancel_operation(
+        CancellationRequest(
+            operation_key="retry-guard-origin",
+            request_id="retry-guard-cancellation",
+            requested_by="operator",
+        ),
+        engine=pg_engine,
+        schema=schema,
+        canceller=_Canceller(failing={"workflow:shared:1"}),
+    )
+
+    requested_registry = _register_operation(
+        pg_engine,
+        schema,
+        operation_key="requested-guard-target",
+        item_keys=("shared",),
+    )
+    with pg_engine.begin() as connection:
+        requested_item_id = connection.scalar(
+            select(schema.items.c.item_id).where(
+                schema.items.c.operation_key == "requested-guard-target"
+            )
+        )
+        connection.execute(
+            update(schema.item_attempts)
+            .where(schema.item_attempts.c.item_id == requested_item_id)
+            .values(
+                execution_state=AttemptExecutionState.SUCCEEDED.value,
+                terminal_at=now,
+                updated_at=now,
+            )
+        )
+    assert requested_item_id is not None
+    with pytest.raises(
+        ReconciliationConflictError,
+        match="unresolved cancellation intent",
+    ):
+        request_next_attempt(
+            NextAttemptRequest(
+                item_id=requested_item_id,
+                source_attempt=0,
+                request_key="blocked-requested-retry",
+                reason=NextAttemptReason.DOMAIN_OUTCOME,
+                eligibility=EligibilityReference(
+                    kind="domain_outcome",
+                    record_id="outcome-2",
+                    digest="outcome-digest",
+                ),
+                requested_by="caller",
+            ),
+            engine=pg_engine,
+            resolver=requested_registry,
+            schema=schema,
+        )
+
+    automatic_registry = _register_operation(
+        pg_engine,
+        schema,
+        operation_key="automatic-guard-target",
+        item_keys=("shared",),
+    )
+    _mark_enqueued(pg_engine, schema, operation_key="automatic-guard-target")
+    with pytest.raises(
+        ReconciliationConflictError,
+        match="unresolved cancellation intent",
+    ):
+        apply_reconciliation_observations(
+            pg_engine,
+            observations={
+                "workflow:shared:0": ReconciliationObservation(
+                    workflow_id="workflow:shared:0",
+                    disposition=ReconciliationObservationDisposition.ERROR,
+                    dbos_status=DbosWorkflowStatus.ERROR,
+                    failure=FailureSnapshot(
+                        failure_class=FailureClass.TRANSIENT,
+                        error_type="RetryableFailure",
+                        message="safe diagnostic",
+                    ),
+                )
+            },
+            resolver=automatic_registry,
+            options=ReconcileOptions(page_size=10),
+            schema=schema,
         )
 
 
@@ -614,6 +776,16 @@ def test_absence_threshold_unblocks_and_late_appearance_appends_successor(
         )
     assert resolved_successor["cancel_disposition"] == "cancelled"
     assert resolved_successor["resolved_at"] is not None
+    with pg_engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(schema.operations.c.status).where(
+                    schema.operations.c.operation_key
+                    == "bounded-absence-origin"
+                )
+            )
+            == OperationStatus.CANCELLED.value
+        )
     assert canceller.calls == [
         (claim.workflow_id, False),
         (claim.workflow_id, False),
@@ -979,6 +1151,12 @@ def test_topology_drift_fails_closed_without_recursive_cancel(
             connection.scalar(select(schema.operations.c.status))
             == "cancelling"
         )
+    report = health_report(
+        engine=pg_engine,
+        schema=schema,
+        now=datetime.now(tz=UTC),
+    )
+    assert report.incomplete_cancellation_count == 1
 
 
 def test_cancelled_attempt_is_sticky_against_late_success(
@@ -1161,6 +1339,45 @@ def test_ambiguous_foreign_cancellation_provenance_fails_closed(
     with pytest.raises(
         ReconciliationConflictError,
         match="foreign cancellation provenance is ambiguous",
+    ):
+        apply_reconciliation_observations(
+            pg_engine,
+            observations={
+                workflow_id: ReconciliationObservation(
+                    workflow_id=workflow_id,
+                    disposition=(
+                        ReconciliationObservationDisposition.CANCELLED
+                    ),
+                    dbos_status=DbosWorkflowStatus.CANCELLED,
+                )
+            },
+            resolver=registry,
+            options=ReconcileOptions(page_size=10),
+            schema=schema,
+        )
+
+
+def test_missing_foreign_cancellation_provenance_fails_closed(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    schema = PlatformSchema()
+    registry = _register_operation(
+        pg_engine,
+        schema,
+        operation_key="unattributed-cancellation",
+        item_keys=("shared",),
+    )
+    _mark_enqueued(pg_engine, schema)
+    with pg_engine.connect() as connection:
+        workflow_id = connection.scalar(
+            select(schema.item_attempts.c.workflow_id)
+        )
+    assert workflow_id is not None
+
+    with pytest.raises(
+        ReconciliationConflictError,
+        match="foreign cancellation provenance is missing",
     ):
         apply_reconciliation_observations(
             pg_engine,

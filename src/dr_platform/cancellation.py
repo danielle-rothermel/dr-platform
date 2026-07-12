@@ -19,6 +19,9 @@ from sqlalchemy import (
     update,
 )
 
+from dr_platform.cancellation_truth import (
+    operation_has_unresolved_cancellation,
+)
 from dr_platform.claims import (
     _acquire_export_writer_lock,
     _acquire_workflow_reference_locks,
@@ -116,6 +119,7 @@ class CancellationResult(BaseModel):
 
     request: CancellationRequest
     results: tuple[CancellationAttemptResult, ...]
+    complete: bool
 
 
 def cancel_operation(
@@ -131,6 +135,12 @@ def cancel_operation(
     if planned and all(
         row.get("_non_durable_already_cancelled") is True for row in planned
     ):
+        with engine.connect() as connection:
+            complete = not operation_has_unresolved_cancellation(
+                connection,
+                schema=selected_schema,
+                operation_key=request.operation_key,
+            )
         return CancellationResult(
             request=request,
             results=tuple(
@@ -142,6 +152,7 @@ def cancel_operation(
                 )
                 for row in planned
             ),
+            complete=complete,
         )
     for row in planned:
         if row["cancellation_disposition"] in {
@@ -777,6 +788,11 @@ def _load_result(
 ) -> CancellationResult:
     with engine.connect() as connection:
         rows = _request_rows(connection, schema=schema, request=request)
+        complete = not operation_has_unresolved_cancellation(
+            connection,
+            schema=schema,
+            operation_key=request.operation_key,
+        )
     observed = [
         CancellationAttemptResult(
             item_id=row["item_id"],
@@ -801,6 +817,7 @@ def _load_result(
     return CancellationResult(
         request=request,
         results=tuple(observed + persisted),
+        complete=complete,
     )
 
 
@@ -1292,6 +1309,12 @@ def _finalize_compensation_repair(
                 failure=failure,
                 successor=successor,
             )
+        _refresh_operation_lifecycle(
+            connection,
+            schema=schema,
+            operation_key=str(candidate["operation_key"]),
+            now=_database_now(connection),
+        )
 
 
 def _record_compensation_absence(
