@@ -196,6 +196,7 @@ class RemoteBundleMember(BaseModel):
     checksum: NonEmptyStr
     physical_digest: NonEmptyStr | None = None
     column_schema: tuple[ProjectionColumn, ...] = ()
+    columns: tuple[NonEmptyStr, ...] = ()
 
     @model_validator(mode="after")
     def validate_identifiers(self) -> RemoteBundleMember:
@@ -1659,11 +1660,17 @@ def resolve_local_pin(
             raise PinnedBundleGoneError(pin.pin_id)
         signed_facts = {
             signed.member: {
-                "table": signed.table_name,
-                "column_schema": [
-                    column.model_dump(mode="json")
-                    for column in signed.column_schema
-                ],
+            "table": signed.table_name,
+                **(
+                    {
+                        "column_schema": [
+                            column.model_dump(mode="json")
+                            for column in signed.column_schema
+                        ]
+                    }
+                    if signed.column_schema
+                    else {"columns": list(signed.columns)}
+                ),
                 "unique_key": list(signed.key_columns),
                 "checksum": signed.checksum,
             }
@@ -1798,28 +1805,44 @@ def backfill_local_protected_integrity(
                 for member, facts in manifest.items():
                     if not isinstance(facts, dict):
                         raise ValueError("legacy local member is malformed")
-                    columns = tuple(
+                    column_schema = tuple(
                         ProjectionColumn.model_validate(column)
-                        for column in facts["column_schema"]
+                        for column in facts.get("column_schema", ())
                     )
+                    raw_columns = tuple(
+                        str(column) for column in facts.get("columns", ())
+                    )
+                    if not column_schema and not raw_columns:
+                        raise ValueError("legacy local member has no columns")
                     unique_key = tuple(str(key) for key in facts["unique_key"])
                     table_name = str(facts["table"])
                     table = _quoted(table_name)
-                    rows_for_member = _application_destination_rows(
-                        connection,
-                        member=str(member),
-                        table_name=table_name,
-                        column_schema=columns,
-                    )
-                    spec = ProjectionSpec(
-                        member=str(member),
-                        columns=tuple(column.name for column in columns),
-                        column_schema=columns,
-                        unique_key=unique_key,
-                    )
-                    _, checksums = _validate_application_rows(
-                        (spec,), {str(member): rows_for_member}
-                    )
+                    if column_schema:
+                        rows_for_member = _application_destination_rows(
+                            connection,
+                            member=str(member),
+                            table_name=table_name,
+                            column_schema=column_schema,
+                        )
+                        spec = ProjectionSpec(
+                            member=str(member),
+                            columns=tuple(column.name for column in column_schema),
+                            column_schema=column_schema,
+                            unique_key=unique_key,
+                        )
+                        _, checksums = _validate_application_rows(
+                            (spec,), {str(member): rows_for_member}
+                        )
+                        checksum = checksums[str(member)]
+                    else:
+                        rows = [
+                            dict(zip(raw_columns, values, strict=True))
+                            for values in connection.execute(
+                                f"SELECT {', '.join(f'CAST({_quoted(column)} AS VARCHAR)' for column in raw_columns)} "
+                                f"FROM {table} ORDER BY {', '.join(_quoted(key) for key in unique_key)}"
+                            ).fetchall()
+                        ]
+                        checksum = hashlib.sha256(_canonical(rows).encode()).hexdigest()
                     ordering = ", ".join(_quoted(key) for key in unique_key)
                     physical = connection.execute(
                         "SELECT COUNT(*), sha256(COALESCE(string_agg("
@@ -1836,9 +1859,10 @@ def backfill_local_protected_integrity(
                             table_name=table_name,
                             key_columns=unique_key,
                             row_count=int(physical[0]),
-                            checksum=checksums[str(member)],
+                            checksum=checksum,
                             physical_digest=str(physical[1]),
-                            column_schema=columns,
+                            column_schema=column_schema,
+                            columns=raw_columns if not column_schema else (),
                         )
                     )
                 payload = SignedBundleIntegrityPayload(
@@ -1857,7 +1881,8 @@ def backfill_local_protected_integrity(
                     f"UPDATE {_BUNDLE_TABLE} SET integrity_version = ?, integrity_key_id = ?, "
                     "integrity_payload_json = ?, integrity_signature = ?, "
                     "physical_digest_algorithm = ? WHERE destination_id = ? "
-                    "AND bundle_key = ? AND bundle_id = ? AND integrity_version IS NULL",
+                    "AND bundle_key = ? AND bundle_id = ? AND integrity_version IS NULL "
+                    "RETURNING bundle_id",
                     [
                         payload.integrity_version,
                         signer.key_id,
@@ -1871,7 +1896,7 @@ def backfill_local_protected_integrity(
                         str(bundle_id),
                     ],
                 )
-                if updated.rowcount != 1:
+                if updated.fetchone() != (str(bundle_id),):
                     raise ValueError("local integrity backfill became stale")
                 completed.append(str(bundle_id))
             connection.execute("COMMIT")

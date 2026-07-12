@@ -21,6 +21,7 @@ from dr_platform import (
     RemoteBundleManifest,
     RemoteBundleMember,
     SourceCoordinate,
+    backfill_local_protected_integrity,
     capture_source_coordinate,
     check_snapshot_compatibility,
     cleanup_local_bundles,
@@ -636,6 +637,38 @@ def test_active_pin_survives_cleanup_then_missing_bundle_is_typed(
     )
     assert resolved.bundle_id == first.destinations[0].bundle_id
     assert schema.operations.name in resolved.members
+
+    # A legacy row is unreadable until a holder of the current fence signs it;
+    # the existing pin continues to identify the same immutable bundle.
+    with duckdb.connect(str(database)) as destination:
+        destination.execute(
+            "UPDATE __dr_platform_export_bundles "
+            "SET integrity_version = NULL, "
+            "integrity_key_id = NULL, integrity_payload_json = NULL, "
+            "integrity_signature = NULL, physical_digest_algorithm = NULL "
+            "WHERE bundle_id = ?",
+            [first.destinations[0].bundle_id],
+        )
+        destination.execute(
+            "UPDATE __dr_platform_export_state SET owner = ?, "
+            "lease_expires_at = epoch_ms(now()) + 60000 WHERE bundle_key = ?",
+            ["integrity-backfill", "platform-kernel"],
+        )
+    with pytest.raises(PinnedBundleGoneError, match="PINNED_BUNDLE_GONE"):
+        resolve_local_pin(
+            database,
+            pin,
+            public_key_ring=signed_integrity_test_material()[1],
+        )
+    assert backfill_local_protected_integrity(
+        database,
+        signer=signed_integrity_test_material()[0],
+        run_id="integrity-backfill",
+        fencing_token=2,
+    ) == (first.destinations[0].bundle_id,)
+    assert resolve_local_pin(
+        database, pin, public_key_ring=signed_integrity_test_material()[1]
+    ).bundle_id == first.destinations[0].bundle_id
 
     with duckdb.connect(str(database)) as destination:
         destination.execute(

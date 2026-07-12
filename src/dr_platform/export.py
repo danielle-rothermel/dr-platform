@@ -982,6 +982,7 @@ def _local_signed_integrity(
                 checksum=checksums[spec.member],
                 physical_digest=row[1],
                 column_schema=spec.column_schema,
+                columns=spec.columns if not spec.column_schema else (),
             )
         )
     payload = SignedBundleIntegrityPayload(
