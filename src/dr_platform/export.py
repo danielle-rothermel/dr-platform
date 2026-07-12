@@ -3,7 +3,7 @@
 Only the platform kernel is owned here.  Application projections, DBOS data,
 and remote destinations deliberately remain outside this module.
 """
-# ruff: noqa: BLE001, E501, FBT001, PLR0911, PLR0912, PLR0913, PLR0915, S608, TC003, TRY300
+# ruff: noqa: BLE001, E501, FBT001, PLR0911, PLR0912, PLR0913, PLR0915, S608, TRY300
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import json
 import os
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from datetime import date, datetime
 from enum import Enum
@@ -36,10 +36,13 @@ from sqlalchemy.sql import sqltypes
 
 from dr_platform.db import PlatformSchema
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
+from dr_platform.telemetry import validated_telemetry_attributes
 
 NonEmptyStr = Annotated[StrictStr, Field(min_length=1)]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
+FullRebuildBuilder = Callable[[], None]
+DbosTelemetryHook = Callable[[Mapping[str, str | int | float | bool]], None]
 
 
 class ProjectionSpec(BaseModel):
@@ -51,6 +54,7 @@ class ProjectionSpec(BaseModel):
     columns: tuple[NonEmptyStr, ...]
     unique_key: tuple[NonEmptyStr, ...]
     references: tuple[tuple[NonEmptyStr, NonEmptyStr, NonEmptyStr], ...] = ()
+    full_rebuild_builder: FullRebuildBuilder | None = None
 
 
 class ExportOptions(BaseModel):
@@ -81,6 +85,18 @@ class DestinationResult(BaseModel):
     error: StrictStr | None = None
 
 
+class LocalDestinationResult(DestinationResult):
+    """Outcome for the local DuckDB bundle destination."""
+
+    destination_kind: Literal["local_duckdb"] = "local_duckdb"
+
+
+class PostgresDestinationResult(DestinationResult):
+    """Outcome for a PostgresPublicationFence-backed destination."""
+
+    destination_kind: Literal["postgres"] = "postgres"
+
+
 class ExportResult(BaseModel):
     """Frozen source-cut facts and independent destination outcomes."""
 
@@ -91,7 +107,9 @@ class ExportResult(BaseModel):
     snapshot_seq: NonNegativeInt
     member_counts: Mapping[StrictStr, NonNegativeInt]
     member_checksums: Mapping[StrictStr, NonEmptyStr]
-    destinations: tuple[DestinationResult, ...]
+    destinations: tuple[
+        LocalDestinationResult | PostgresDestinationResult, ...
+    ]
 
     def model_post_init(self, __context: Any) -> None:
         """Deep-freeze the mapping-shaped source facts."""
@@ -122,6 +140,28 @@ _SENSITIVE_KERNEL_COLUMNS = {
     "items": frozenset({"spec"}),
     "throttle_state": frozenset({"last_message", "metadata"}),
 }
+
+
+def capture_dbos_publication_telemetry(
+    hook: DbosTelemetryHook | None,
+    *,
+    destination_id: str,
+    disposition: str,
+    snapshot_seq: int,
+) -> None:
+    """Emit only allowlisted DBOS publication facts to an optional hook."""
+
+    if hook is None:
+        return
+    hook(
+        validated_telemetry_attributes(
+            {
+                "platform.publication.destination_id": destination_id,
+                "platform.publication.disposition": disposition,
+                "platform.publication.snapshot_seq": snapshot_seq,
+            }
+        )
+    )
 
 
 def export(
@@ -176,7 +216,7 @@ def export(
                     member_counts=counts,
                     member_checksums=checksums,
                     destinations=(
-                        DestinationResult(
+                        LocalDestinationResult(
                             destination_id=options.destination_id,
                             status=status,
                             bundle_id=bundle_id,
@@ -214,6 +254,7 @@ def _kernel_specs(
         schema.next_attempt_requests,
         schema.enqueue_compensations,
         schema.throttle_state,
+        schema.missing_reobservations,
     )
     supplied = {item.member: item for item in declared}
     unknown = set(supplied).difference(table.name for table in tables)
@@ -718,7 +759,7 @@ def _empty_result(
         member_counts=counts,
         member_checksums=checksums,
         destinations=(
-            DestinationResult(
+            LocalDestinationResult(
                 destination_id=options.destination_id,
                 status=status,
                 fencing_token=token,

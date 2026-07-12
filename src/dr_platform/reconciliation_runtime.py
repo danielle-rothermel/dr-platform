@@ -298,7 +298,6 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
     from dr_platform.claims import ClaimPageOptions  # noqa: PLC0415
     from dr_platform.enqueue_runtime import (  # noqa: PLC0415
         DbosWorkflowObserver,
-        EnqueuePageResult,
         enqueue_pending_page,
         enqueue_replacement_page,
         recover_call_started_page,
@@ -342,21 +341,18 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
                 schema=schema,
                 limit=selected.page_size,
             )
-        recovery = (
-            EnqueuePageResult(items=())
-            if selected.operation_key is not None
-            else recover_call_started_page(
-                engine,
-                resolver=resolver,
-                queue_lookup=selected_queue_lookup,
-                options=ClaimPageOptions(
-                    page_size=selected.page_size,
-                    lease_seconds=selected.claim_lease_seconds,
-                ),
-                schema=schema,
-                adapter=enqueue_adapter,
-                observer=recovery_observer or DbosWorkflowObserver(),
-            )
+        recovery = recover_call_started_page(
+            engine,
+            resolver=resolver,
+            queue_lookup=selected_queue_lookup,
+            options=ClaimPageOptions(
+                page_size=selected.page_size,
+                lease_seconds=selected.claim_lease_seconds,
+            ),
+            schema=schema,
+            adapter=enqueue_adapter,
+            observer=recovery_observer or DbosWorkflowObserver(),
+            operation_key=selected.operation_key,
         )
         remaining = selected.page_size - len(recovery.items)
         actionable = (
@@ -397,12 +393,13 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
         remaining -= len(missing)
         replacement_count = 0
         pending_count = 0
-        if remaining > 0 and selected.operation_key is None:
+        if remaining > 0:
             common = {
                 "resolver": resolver,
                 "queue_lookup": selected_queue_lookup,
                 "schema": schema,
                 "adapter": enqueue_adapter,
+                "operation_key": selected.operation_key,
             }
             replacements = enqueue_replacement_page(
                 engine,

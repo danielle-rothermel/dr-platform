@@ -221,9 +221,7 @@ def index_jsonl_manifest_source(
                     f"Operation group_key {group_key!r} on line {line_number}"
                 )
             if item.item_key in seen_item_keys:
-                raise ValueError(
-                    f"duplicate JSONL item_key {item.item_key!r}"
-                )
+                raise ValueError(f"duplicate JSONL item_key {item.item_key!r}")
             seen_item_keys.add(item.item_key)
             refs.append(
                 JsonlItemRef(
@@ -360,9 +358,7 @@ def _parse_item(
     line_number: int | None,
     fields: JsonlFieldNames,
 ) -> _JsonlItem:
-    location = (
-        f" on line {line_number}" if line_number is not None else ""
-    )
+    location = f" on line {line_number}" if line_number is not None else ""
     try:
         payload = JSON_OBJECT_ADAPTER.validate_json(
             line.decode(UTF8_ENCODING),

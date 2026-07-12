@@ -80,9 +80,7 @@ def _write_rows(
     *,
     prefix: str = "",
 ) -> None:
-    content = prefix + "".join(
-        f"{canonical_json(row)}\n" for row in rows
-    )
+    content = prefix + "".join(f"{canonical_json(row)}\n" for row in rows)
     path.write_text(content, encoding="utf-8")
 
 
@@ -231,9 +229,7 @@ def test_reread_rejects_record_appended_after_preflight(
     source = index_jsonl_manifest_source(path, group_key="experiment")
     with path.open("a", encoding="utf-8") as file:
         file.write(
-            canonical_json(
-                {"item_key": "item-c", "group_key": "experiment"}
-            )
+            canonical_json({"item_key": "item-c", "group_key": "experiment"})
             + "\n"
         )
 

@@ -354,7 +354,7 @@ def test_every_change_tracked_table_has_change_sequence_first_index() -> None:
         ), suffix
 
 
-def test_migration_lineage_has_fresh_baseline_and_p3_provenance() -> None:
+def test_migration_lineage_has_only_the_final_baseline() -> None:
     from dr_platform.db import migrate
 
     versions_dir = (
@@ -368,9 +368,6 @@ def test_migration_lineage_has_fresh_baseline_and_p3_provenance() -> None:
 
     assert versions == [
         "0001_platform_baseline.py",
-        "0002_claim_workflow_provenance.py",
-        "0003_attempt_retry_reason.py",
-        "0004_missing_reobservation_schedule.py",
     ]
     assert not hasattr(migrate, "stamp_platform_schema")
     assert not hasattr(dr_platform, "stamp_platform_schema")

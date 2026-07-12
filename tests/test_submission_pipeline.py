@@ -89,6 +89,7 @@ def test_completed_registration_resubmit_repairs_before_new_claims(
         "_create_or_claim_operation",
         lambda **kwargs: 1,
     )
+
     def capture_reconcile(_engine: Engine, **_kwargs: Any) -> None:
         repair_stages.append("reconcile")
 

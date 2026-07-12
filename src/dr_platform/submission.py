@@ -295,9 +295,7 @@ def prepare_manifest(  # noqa: PLR0913 -- explicit public facade contract
             end_index=end_index,
         )
         _reject_duplicate_item_keys(prepared, seen_item_keys=seen_item_keys)
-        page_leaves: list[Jsonable] = [
-            item.leaf_digest for item in prepared
-        ]
+        page_leaves: list[Jsonable] = [item.leaf_digest for item in prepared]
         leaf_digests.extend(page_leaves)
         recipe_digests.extend(
             item.execution_recipe_digest for item in prepared
@@ -478,11 +476,15 @@ def abandon_registration(  # noqa: PLR0913 -- explicit public facade contract
     operations = selected_schema.operations
     with engine.begin() as connection:
         _acquire_export_writer_lock(connection)
-        row = connection.execute(
-            select(operations)
-            .where(operations.c.operation_key == operation_key)
-            .with_for_update()
-        ).mappings().one_or_none()
+        row = (
+            connection.execute(
+                select(operations)
+                .where(operations.c.operation_key == operation_key)
+                .with_for_update()
+            )
+            .mappings()
+            .one_or_none()
+        )
         if row is None:
             raise RegistrationIneligibleError(
                 f"unknown Operation {operation_key!r}"
@@ -530,11 +532,15 @@ def abandon_registration(  # noqa: PLR0913 -- explicit public facade contract
                 platform_cut_version=operations.c.platform_cut_version + 1,
             )
         )
-        updated = connection.execute(
-            select(operations).where(
-                operations.c.operation_key == operation_key
+        updated = (
+            connection.execute(
+                select(operations).where(
+                    operations.c.operation_key == operation_key
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         return _abandonment_result(updated)
 
 
@@ -555,11 +561,15 @@ def _create_or_claim_operation(  # noqa: PLR0913
             connection,
             manifest.operation_key,
         )
-        row = connection.execute(
-            select(operations)
-            .where(operations.c.operation_key == manifest.operation_key)
-            .with_for_update()
-        ).mappings().one_or_none()
+        row = (
+            connection.execute(
+                select(operations)
+                .where(operations.c.operation_key == manifest.operation_key)
+                .with_for_update()
+            )
+            .mappings()
+            .one_or_none()
+        )
         now = _database_now(connection)
         if row is None:
             if manifest.item_count == 0:
@@ -669,11 +679,15 @@ def _register_page(  # noqa: PLR0913
     with engine.begin() as connection:
         _acquire_export_writer_lock(connection)
         _acquire_workflow_reference_locks(connection, workflow_ids)
-        row = connection.execute(
-            select(operations)
-            .where(operations.c.operation_key == manifest.operation_key)
-            .with_for_update()
-        ).mappings().one()
+        row = (
+            connection.execute(
+                select(operations)
+                .where(operations.c.operation_key == manifest.operation_key)
+                .with_for_update()
+            )
+            .mappings()
+            .one()
+        )
         now = _database_now(connection)
         _validate_page_authority(
             row=row,
@@ -887,9 +901,7 @@ def _operation_insert_values(  # noqa: PLR0913
         ),
         "target_key": manifest.target_ref.target_key,
         "target_version": manifest.target_ref.target_version,
-        "target_contract_digest": (
-            manifest.target_ref.target_contract_digest
-        ),
+        "target_contract_digest": (manifest.target_ref.target_contract_digest),
         "platform_cut_version": 1,
         "registration_cursor": 0,
         "registration_lease_id": lease_id,
@@ -935,9 +947,7 @@ def _validate_exact_replay(
         ),
         "target_key": manifest.target_ref.target_key,
         "target_version": manifest.target_ref.target_version,
-        "target_contract_digest": (
-            manifest.target_ref.target_contract_digest
-        ),
+        "target_contract_digest": (manifest.target_ref.target_contract_digest),
         "retry_policy": options.retry_policy.model_dump(mode="json"),
         "spec": spec,
         "metadata": metadata,
@@ -1034,9 +1044,7 @@ def _prepare_and_validate_page(
         start_index=page.start_index,
         end_index=page.end_index,
     )
-    page_leaves: list[Jsonable] = [
-        item.leaf_digest for item in prepared
-    ]
+    page_leaves: list[Jsonable] = [item.leaf_digest for item in prepared]
     digest = sha256_json_digest(page_leaves)
     if digest != page.page_digest:
         raise RegistrationConflictError(
@@ -1315,11 +1323,15 @@ def _load_submit_result(
     *, engine: Engine, schema: PlatformSchema, operation_key: str
 ) -> SubmitResult:
     with engine.connect() as connection:
-        row = connection.execute(
-            select(schema.operations).where(
-                schema.operations.c.operation_key == operation_key
+        row = (
+            connection.execute(
+                select(schema.operations).where(
+                    schema.operations.c.operation_key == operation_key
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     return SubmitResult(
         operation_key=row["operation_key"],
         status=OperationStatus(row["status"]),
@@ -1328,9 +1340,7 @@ def _load_submit_result(
         inserted_count=row["inserted_count"],
         already_present_count=row["already_present_count"],
         enqueued_count=row["enqueued_count"],
-        workflow_already_present_count=(
-            row["workflow_already_present_count"]
-        ),
+        workflow_already_present_count=(row["workflow_already_present_count"]),
         enqueue_failed_count=row["enqueue_failed_count"],
         total_failure_count=(
             row["enqueue_failed_count"] + row["terminal_failed_count"]

@@ -39,6 +39,7 @@ NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
 _IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 _MINIMUM_COMPATIBLE_SOURCES = 2
+_COMBINED_SOURCE_FAMILIES = frozenset({"application", "dbos"})
 
 
 class SourceCoordinate(BaseModel):
@@ -47,6 +48,7 @@ class SourceCoordinate(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     source_id: NonEmptyStr
+    database_server: NonEmptyStr
     captured_at: datetime
     snapshot_seq: NonNegativeInt | None = None
 
@@ -71,6 +73,7 @@ def capture_source_coordinate(
         ).one()
     return SourceCoordinate(
         source_id=f"{source_id}:{row[0]}",
+        database_server=str(row[0]),
         captured_at=row[1],
         snapshot_seq=snapshot_seq,
     )
@@ -186,6 +189,7 @@ class RemoteBundleManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     members: tuple[RemoteBundleMember, ...]
+    source_families: tuple[Literal["application", "dbos"], ...]
 
     @model_validator(mode="after")
     def validate_members(self) -> RemoteBundleManifest:
@@ -194,6 +198,10 @@ class RemoteBundleManifest(BaseModel):
             raise ValueError(
                 "remote bundle members must be non-empty and unique"
             )
+        if not self.source_families or len(self.source_families) != len(
+            set(self.source_families)
+        ):
+            raise ValueError("remote bundle source families must be explicit")
         return self
 
     @property
@@ -373,30 +381,49 @@ class PostgresPublicationFence:
         bundle_id: str,
         cursors: Mapping[str, int],
         source_coordinates: tuple[SourceCoordinate, ...],
+        source_families: tuple[Literal["application", "dbos"], ...],
         stage: Callable[[Connection], RemoteBundleManifest],
     ) -> RemotePromotionResult:
         """Stage, validate, persist, and fenced-promote one remote bundle."""
 
         if not source_coordinates:
             raise ValueError("source_coordinates must not be empty")
+        self._require_manifest_coordinates(source_coordinates, source_families)
         if self.kind == "motherduck":
             # CURRENT_TIMESTAMP is transaction-stable on MotherDuck.  Commit
-            # staging first so the final fence transaction gets a fresh
+            # a pre-stage lease check prevents a stale writer from creating a
+            # separately committed stage; the final fence gets a fresh
             # database timestamp and cannot outlive its Lease invisibly.
-            with self.engine.begin() as stage_connection:
-                manifest = stage(stage_connection)
-                self._validate_remote_manifest(stage_connection, manifest)
-                self._record_remote_stage(
-                    stage_connection,
-                    bundle_key=bundle_key,
-                    bundle_id=bundle_id,
-                    snapshot_seq=snapshot_seq,
-                    run_id=run_id,
-                    fencing_token=fencing_token,
-                    source_coordinates=source_coordinates,
-                    manifest=manifest,
-                )
             try:
+                with self.engine.begin() as connection:
+                    self._require_current_lease(
+                        connection, bundle_key, run_id, fencing_token
+                    )
+                with self.engine.begin() as stage_connection:
+                    manifest = stage(stage_connection)
+                    self._validate_remote_manifest(
+                        stage_connection,
+                        manifest,
+                        expected_tables=self._candidate_tables(
+                            manifest, run_id, fencing_token, snapshot_seq
+                        ),
+                        reject_reader_tables=True,
+                        bundle_key=bundle_key,
+                    )
+                    if manifest.source_families != source_families:
+                        raise ValueError(
+                            "manifest source families do not match promotion"
+                        )
+                    self._record_remote_stage(
+                        stage_connection,
+                        bundle_key=bundle_key,
+                        bundle_id=bundle_id,
+                        snapshot_seq=snapshot_seq,
+                        run_id=run_id,
+                        fencing_token=fencing_token,
+                        source_coordinates=source_coordinates,
+                        manifest=manifest,
+                    )
                 with self.engine.begin() as connection:
                     return self._promote_remote_manifest(
                         connection,
@@ -415,7 +442,19 @@ class PostgresPublicationFence:
         try:
             with self.engine.begin() as connection:
                 manifest = stage(connection)
-                self._validate_remote_manifest(connection, manifest)
+                self._validate_remote_manifest(
+                    connection,
+                    manifest,
+                    expected_tables=self._candidate_tables(
+                        manifest, run_id, fencing_token, snapshot_seq
+                    ),
+                    reject_reader_tables=True,
+                    bundle_key=bundle_key,
+                )
+                if manifest.source_families != source_families:
+                    raise ValueError(
+                        "manifest source families do not match promotion"
+                    )
                 self._record_remote_stage(
                     connection,
                     bundle_key=bundle_key,
@@ -480,10 +519,182 @@ class PostgresPublicationFence:
             },
         )
 
-    def _validate_remote_manifest(
-        self, connection: Connection, manifest: RemoteBundleManifest
+    def stage_table_name(
+        self,
+        *,
+        member: str,
+        run_id: str,
+        fencing_token: int,
+        snapshot_seq: int,
+    ) -> str:
+        """Return the deterministic, candidate-owned staging table name."""
+
+        if _IDENTIFIER.fullmatch(member) is None:
+            raise ValueError("member must be a safe SQL identifier")
+        run_digest = hashlib.sha256(run_id.encode()).hexdigest()[:16]
+        member_digest = hashlib.sha256(member.encode()).hexdigest()[:12]
+        return f"drp_stage_{fencing_token}_{snapshot_seq}_{run_digest}_{member_digest}"
+
+    def _candidate_tables(
+        self,
+        manifest: RemoteBundleManifest,
+        run_id: str,
+        fencing_token: int,
+        snapshot_seq: int,
+    ) -> dict[str, str]:
+        return {
+            member.member: self.stage_table_name(
+                member=member.member,
+                run_id=run_id,
+                fencing_token=fencing_token,
+                snapshot_seq=snapshot_seq,
+            )
+            for member in manifest.members
+        }
+
+    def _require_current_lease(
+        self,
+        connection: Connection,
+        bundle_key: str,
+        run_id: str,
+        fencing_token: int,
     ) -> None:
+        current = connection.execute(
+            text(
+                f"SELECT 1 FROM {self._table} "
+                "WHERE destination_id = CAST(:destination AS TEXT) "
+                "AND bundle_key = CAST(:bundle AS TEXT) "
+                "AND owner = CAST(:run AS TEXT) "
+                "AND fencing_token = CAST(:token AS BIGINT) "
+                f"AND lease_expires_at > {self._now}"
+            ),
+            {
+                "destination": self.destination_id,
+                "bundle": bundle_key,
+                "run": run_id,
+                "token": fencing_token,
+            },
+        ).one_or_none()
+        if current is None:
+            raise _StalePromotionError
+
+    def _require_manifest_coordinates(
+        self,
+        coordinates: tuple[SourceCoordinate, ...],
+        source_families: tuple[Literal["application", "dbos"], ...],
+    ) -> None:
+        """Fail closed before a separately committed MotherDuck stage."""
+
+        if not source_families or len(source_families) != len(
+            set(source_families)
+        ):
+            raise ValueError("source families must be explicit and unique")
+        coordinate_families = tuple(
+            coordinate.source_id.partition(":")[0]
+            for coordinate in coordinates
+        )
+        if tuple(sorted(coordinate_families)) != tuple(
+            sorted(source_families)
+        ):
+            raise IncompatibleSnapshotError(
+                SnapshotCompatibility(
+                    disposition="MISSING_COORDINATE",
+                    observed_skew_ms=None,
+                    max_capture_skew_ms=100,
+                    source_ids=tuple(
+                        coordinate.source_id for coordinate in coordinates
+                    ),
+                )
+            )
+        if frozenset(source_families) == _COMBINED_SOURCE_FAMILIES:
+            if (
+                len({coordinate.database_server for coordinate in coordinates})
+                < _MINIMUM_COMPATIBLE_SOURCES
+            ):
+                raise IncompatibleSnapshotError(
+                    SnapshotCompatibility(
+                        disposition="MISSING_COORDINATE",
+                        observed_skew_ms=None,
+                        max_capture_skew_ms=100,
+                        source_ids=tuple(
+                            coordinate.source_id for coordinate in coordinates
+                        ),
+                    )
+                )
+            require_compatible_snapshot(coordinates)
+
+    def _reader_table_names(
+        self, connection: Connection, bundle_key: str
+    ) -> set[str]:
+        current = connection.execute(
+            text(
+                f"SELECT bundle_id FROM {self._table} "
+                "WHERE destination_id = CAST(:destination AS TEXT) "
+                "AND bundle_key = CAST(:bundle AS TEXT)"
+            ),
+            {"destination": self.destination_id, "bundle": bundle_key},
+        ).scalar_one_or_none()
+        bundles = {str(current)} if current is not None else set()
+        bundles.update(
+            str(row[0])
+            for row in connection.execute(
+                text(
+                    f"SELECT bundle_id FROM {self._pins_table} "
+                    "WHERE destination_id = CAST(:destination AS TEXT) "
+                    "AND bundle_key = CAST(:bundle AS TEXT) "
+                    f"AND expires_at > {self._now}"
+                ),
+                {"destination": self.destination_id, "bundle": bundle_key},
+            )
+        )
+        if not bundles:
+            return set()
+        return {
+            member.table_name
+            for row in connection.execute(
+                text(
+                    f"SELECT manifest_json FROM {self._bundles_table} "
+                    "WHERE destination_id = CAST(:destination AS TEXT) "
+                    "AND bundle_key = CAST(:bundle AS TEXT) "
+                    "AND bundle_id = ANY(CAST(:bundle_ids AS TEXT[]))"
+                ),
+                {
+                    "destination": self.destination_id,
+                    "bundle": bundle_key,
+                    "bundle_ids": list(bundles),
+                },
+            )
+            for member in RemoteBundleManifest.model_validate_json(
+                row[0]
+            ).members
+        }
+
+    def _validate_remote_manifest(
+        self,
+        connection: Connection,
+        manifest: RemoteBundleManifest,
+        *,
+        expected_tables: Mapping[str, str] | None = None,
+        reject_reader_tables: bool = False,
+        bundle_key: str = "",
+    ) -> None:
+        reader_tables = (
+            self._reader_table_names(connection, bundle_key=bundle_key)
+            if reject_reader_tables
+            else set()
+        )
         for member in manifest.members:
+            if (
+                expected_tables is not None
+                and member.table_name != expected_tables.get(member.member)
+            ):
+                raise ValueError(
+                    "remote manifest names a table outside its candidate"
+                )
+            if member.table_name in reader_tables:
+                raise ValueError(
+                    "remote manifest names a current or pinned table"
+                )
             table = f'"{member.schema_name}"."{member.table_name}"'
             rows = [
                 dict(row)

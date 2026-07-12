@@ -32,6 +32,7 @@ from dr_platform.export import (
     _create_destination_tables,
     _release_lease,
     _stage_and_promote,
+    capture_dbos_publication_telemetry,
 )
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
 from tests.contracts.test_platform_v6_cancellation import _register_operation
@@ -57,6 +58,7 @@ def test_empty_kernel_export_promotes_and_replays(
         "platform_next_attempt_requests",
         "platform_enqueue_compensations",
         "platform_throttle_state",
+        "platform_missing_reobservations",
     }
 
     replay = export(
@@ -70,6 +72,35 @@ def test_empty_kernel_export_promotes_and_replays(
             "SELECT committed_snapshot_seq FROM __dr_platform_export_state"
         ).fetchone()
     assert pointer == (replay.snapshot_seq,)
+
+
+def test_projection_full_rebuild_contract_and_dbos_telemetry_are_frozen() -> (
+    None
+):
+    def rebuild() -> None:
+        return None
+
+    spec = ProjectionSpec(
+        member="projection",
+        columns=("id",),
+        unique_key=("id",),
+        full_rebuild_builder=rebuild,
+    )
+    assert spec.full_rebuild_builder is rebuild
+    captured: list[dict[str, str | int | float | bool]] = []
+    capture_dbos_publication_telemetry(
+        lambda attributes: captured.append(dict(attributes)),
+        destination_id="postgres-reporting",
+        disposition="PROMOTED",
+        snapshot_seq=7,
+    )
+    assert captured == [
+        {
+            "platform.publication.destination_id": "postgres-reporting",
+            "platform.publication.disposition": "PROMOTED",
+            "platform.publication.snapshot_seq": 7,
+        }
+    ]
 
 
 def test_local_lease_fence_and_fault_preserve_pointer(tmp_path) -> None:

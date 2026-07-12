@@ -35,15 +35,35 @@ from tests.contracts.test_platform_v6_cancellation import _register_operation
 _EMPTY_CHECKSUM = hashlib.sha256(b"[]").hexdigest()
 
 
+def _empty_candidate_manifest(
+    connection: Connection, table_name: str
+) -> RemoteBundleManifest:
+    connection.execute(text(f'CREATE TABLE "{table_name}" (id BIGINT)'))
+    return RemoteBundleManifest(
+        source_families=("application",),
+        members=(
+            RemoteBundleMember(
+                member="member",
+                table_name=table_name,
+                key_columns=("id",),
+                row_count=0,
+                checksum=_EMPTY_CHECKSUM,
+            ),
+        ),
+    )
+
+
 def test_compatibility_uses_truthful_timestamps_not_equal_sequences() -> None:
     captured = datetime(2026, 1, 1, tzinfo=UTC)
     application = SourceCoordinate(
         source_id="application",
+        database_server="application-db",
         captured_at=captured,
         snapshot_seq=9,
     )
     dbos = SourceCoordinate(
         source_id="dbos",
+        database_server="dbos-db",
         captured_at=captured + timedelta(milliseconds=101),
         snapshot_seq=9,
     )
@@ -65,15 +85,133 @@ def test_compatibility_uses_truthful_timestamps_not_equal_sequences() -> None:
     assert compatible.disposition == "COMPATIBLE"
 
 
+def test_combined_remote_promotion_fails_before_staging(
+    pg_engine: Engine,
+) -> None:
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"compatibility-{uuid4().hex}",
+        table_name=f"publication_state_{uuid4().hex[:12]}",
+    )
+    fence.ensure_schema()
+    captured = datetime(2026, 1, 1, tzinfo=UTC)
+    coordinates = (
+        SourceCoordinate(
+            source_id="application:one",
+            database_server="shared-server",
+            captured_at=captured,
+        ),
+        SourceCoordinate(
+            source_id="dbos:one",
+            database_server="dbos-server",
+            captured_at=captured + timedelta(milliseconds=101),
+        ),
+    )
+    lease = fence.acquire_lease(
+        bundle_key="analysis", run_id="owner", lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    staged = False
+
+    def stage(_connection: Connection) -> RemoteBundleManifest:
+        nonlocal staged
+        staged = True
+        raise AssertionError("compatibility must be checked before staging")
+
+    with pytest.raises(IncompatibleSnapshotError) as raised:
+        fence.promote(
+            bundle_key="analysis",
+            run_id="owner",
+            fencing_token=lease.fencing_token,
+            snapshot_seq=1,
+            bundle_id="candidate",
+            cursors={},
+            source_coordinates=coordinates,
+            source_families=("application", "dbos"),
+            stage=stage,
+        )
+    assert raised.value.result.disposition == "INCOMPATIBLE"
+    assert not staged
+
+    second_lease = fence.acquire_lease(
+        bundle_key="analysis", run_id="owner", lease_seconds=60
+    )
+    assert second_lease.fencing_token is not None
+    with pytest.raises(IncompatibleSnapshotError) as missing:
+        fence.promote(
+            bundle_key="analysis",
+            run_id="owner",
+            fencing_token=second_lease.fencing_token,
+            snapshot_seq=1,
+            bundle_id="missing-coordinate",
+            cursors={},
+            source_coordinates=coordinates[:1],
+            source_families=("application", "dbos"),
+            stage=stage,
+        )
+    assert missing.value.result.disposition == "MISSING_COORDINATE"
+    assert not staged
+
+
+def test_remote_bad_builder_cannot_name_an_unowned_candidate_table(
+    pg_engine: Engine,
+) -> None:
+    state_table = f"publication_state_{uuid4().hex[:12]}"
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"bad-builder-{uuid4().hex}",
+        table_name=state_table,
+        kind="motherduck",
+    )
+    fence.ensure_schema()
+    lease = fence.acquire_lease(
+        bundle_key="analysis", run_id="owner", lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    coordinate = SourceCoordinate(
+        source_id="application:server",
+        database_server="application-server",
+        captured_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    with pytest.raises(ValueError, match="outside its candidate"):
+        fence.promote(
+            bundle_key="analysis",
+            run_id="owner",
+            fencing_token=lease.fencing_token,
+            snapshot_seq=1,
+            bundle_id="bad",
+            cursors={},
+            source_coordinates=(coordinate,),
+            source_families=("application",),
+            stage=lambda _connection: RemoteBundleManifest(
+                source_families=("application",),
+                members=(
+                    RemoteBundleMember(
+                        member="member",
+                        table_name="not_candidate_owned",
+                        key_columns=("id",),
+                        row_count=0,
+                        checksum=_EMPTY_CHECKSUM,
+                    ),
+                ),
+            ),
+        )
+    with pg_engine.connect() as connection:
+        committed = connection.execute(
+            text(
+                f'SELECT committed_snapshot_seq FROM "{state_table}" '
+                "WHERE bundle_key = 'analysis'"
+            )
+        ).scalar_one()
+    assert committed == 0
+
+
 @pytest.mark.parametrize("kind", ["motherduck", "neon"])
 def test_postgres_fence_rejects_stale_stage_and_uses_returning(
     pg_engine: Engine, kind: str
 ) -> None:
     suffix = uuid4().hex[:12]
     state_table = f"publication_state_{suffix}"
-    staged_table = f"publication_stage_{suffix}"
-    expired_table = f"publication_expired_{suffix}"
-    promoted_table = f"publication_bundle_{suffix}"
     fence = PostgresPublicationFence(
         pg_engine,
         destination_id=f"{kind}-test",
@@ -81,6 +219,18 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
         kind=cast("Literal['motherduck', 'neon']", kind),
     )
     fence.ensure_schema()
+    staged_table = fence.stage_table_name(
+        member="member", run_id="owner", fencing_token=1, snapshot_seq=1
+    )
+    expired_table = fence.stage_table_name(
+        member="member", run_id="owner", fencing_token=2, snapshot_seq=1
+    )
+    promoted_table = fence.stage_table_name(
+        member="member", run_id="owner", fencing_token=3, snapshot_seq=1
+    )
+    replay_table = fence.stage_table_name(
+        member="member", run_id="replay", fencing_token=4, snapshot_seq=1
+    )
     try:
         first = fence.acquire_lease(
             bundle_key="analysis", run_id="owner", lease_seconds=60
@@ -113,6 +263,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
                 text(f'CREATE TABLE "{staged_table}" (id BIGINT)')
             )
             return RemoteBundleManifest(
+                source_families=("application",),
                 members=(
                     RemoteBundleMember(
                         member="member",
@@ -121,7 +272,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
                         row_count=0,
                         checksum=_EMPTY_CHECKSUM,
                     ),
-                )
+                ),
             )
 
         stale = fence.promote(
@@ -132,6 +283,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
             bundle_id="stale",
             cursors={"member": 1},
             source_coordinates=(coordinate,),
+            source_families=("application",),
             stage=create_stale_stage,
         )
         assert stale.disposition == "STALE_PROMOTION"
@@ -139,7 +291,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
             exists = connection.execute(
                 text("SELECT to_regclass(:name)"), {"name": staged_table}
             ).scalar_one()
-        assert (exists is not None) == (kind == "motherduck")
+        assert exists is None
 
         def expire_during_stage(
             connection: Connection,
@@ -157,6 +309,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
                 {"destination": f"{kind}-test"},
             )
             return RemoteBundleManifest(
+                source_families=("application",),
                 members=(
                     RemoteBundleMember(
                         member="member",
@@ -165,7 +318,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
                         row_count=0,
                         checksum=_EMPTY_CHECKSUM,
                     ),
-                )
+                ),
             )
 
         expired = fence.promote(
@@ -176,6 +329,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
             bundle_id="expired-stage",
             cursors={"member": 1},
             source_coordinates=(coordinate,),
+            source_families=("application",),
             stage=expire_during_stage,
         )
         assert expired.disposition == "STALE_PROMOTION"
@@ -191,6 +345,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
                 text(f'CREATE TABLE "{promoted_table}" (id BIGINT)')
             )
             return RemoteBundleManifest(
+                source_families=("application",),
                 members=(
                     RemoteBundleMember(
                         member="member",
@@ -199,7 +354,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
                         row_count=0,
                         checksum=_EMPTY_CHECKSUM,
                     ),
-                )
+                ),
             )
 
         promoted = fence.promote(
@@ -210,6 +365,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
             bundle_id="bundle-one",
             cursors={"member": 1},
             source_coordinates=(coordinate,),
+            source_families=("application",),
             stage=create_promoted_stage,
         )
         assert promoted.disposition == "PROMOTED"
@@ -226,16 +382,9 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
             bundle_id="ignored-replay-stage",
             cursors={"member": 1},
             source_coordinates=(coordinate,),
-            stage=lambda _connection: RemoteBundleManifest(
-                members=(
-                    RemoteBundleMember(
-                        member="member",
-                        table_name=promoted_table,
-                        key_columns=("id",),
-                        row_count=0,
-                        checksum=_EMPTY_CHECKSUM,
-                    ),
-                )
+            source_families=("application",),
+            stage=lambda connection: _empty_candidate_manifest(
+                connection, replay_table
             ),
         )
         assert idempotent.disposition == "IDEMPOTENT"
@@ -272,6 +421,7 @@ def test_postgres_fence_rejects_stale_stage_and_uses_returning(
             connection.execute(
                 text(f'DROP TABLE IF EXISTS "{promoted_table}"')
             )
+            connection.execute(text(f'DROP TABLE IF EXISTS "{replay_table}"'))
             connection.execute(
                 text(f'DROP TABLE IF EXISTS "{state_table}_pins"')
             )

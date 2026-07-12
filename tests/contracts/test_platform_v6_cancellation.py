@@ -305,9 +305,11 @@ def test_cancellation_repairs_invalidated_call_started_claim(
     )
 
     with pg_engine.connect() as connection:
-        compensation = connection.execute(
-            select(schema.enqueue_compensations)
-        ).mappings().one()
+        compensation = (
+            connection.execute(select(schema.enqueue_compensations))
+            .mappings()
+            .one()
+        )
         attempt = (
             connection.execute(select(schema.item_attempts)).mappings().one()
         )
@@ -364,9 +366,12 @@ def test_absent_late_enqueue_hazard_blocks_new_reference(
     )
 
     with pg_engine.connect() as connection:
-        assert connection.scalar(
-            select(schema.enqueue_compensations.c.cancel_disposition)
-        ) == EnqueueCompensationDisposition.PENDING.value
+        assert (
+            connection.scalar(
+                select(schema.enqueue_compensations.c.cancel_disposition)
+            )
+            == EnqueueCompensationDisposition.PENDING.value
+        )
     with pytest.raises(
         RegistrationConflictError,
         match="unresolved late-enqueue compensation",
@@ -443,8 +448,9 @@ def test_multiple_compensations_for_one_workflow_converge_without_recancel(
     with pg_engine.connect() as connection:
         dispositions = list(
             connection.scalars(
-                select(schema.enqueue_compensations.c.cancel_disposition)
-                .order_by(schema.enqueue_compensations.c.claim_id)
+                select(
+                    schema.enqueue_compensations.c.cancel_disposition
+                ).order_by(schema.enqueue_compensations.c.claim_id)
             )
         )
     assert dispositions == ["cancelled", "cancelled"]
@@ -606,6 +612,66 @@ def test_terminal_observation_wins_cancellation_race(
             connection.execute(select(schema.item_attempts)).mappings().one()
         )
     assert attempt.execution_state == terminal
+
+
+@pytest.mark.parametrize("terminal", ["succeeded", "error"])
+def test_local_terminal_cancellation_is_observed_without_row_mutation(
+    pg_engine: Engine,
+    terminal: str,
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    schema = PlatformSchema()
+    _register_operation(
+        pg_engine,
+        schema,
+        operation_key="local-terminal",
+        item_keys=(terminal,),
+    )
+    _mark_enqueued(pg_engine, schema)
+    with pg_engine.begin() as connection:
+        connection.execute(
+            update(schema.item_attempts).values(
+                execution_state=terminal,
+                terminal_at=func.clock_timestamp(),
+                failure=(
+                    {
+                        "failure_class": "permanent",
+                        "error_type": "x",
+                        "message": "x",
+                    }
+                    if terminal == "error"
+                    else None
+                ),
+                retry_disposition=(
+                    "permanent" if terminal == "error" else None
+                ),
+            )
+        )
+    with pg_engine.connect() as connection:
+        before = dict(
+            connection.execute(select(schema.item_attempts)).mappings().one()
+        )
+
+    result = cancel_operation(
+        CancellationRequest(
+            operation_key="local-terminal",
+            request_id=f"local-{terminal}",
+            requested_by="operator",
+        ),
+        engine=pg_engine,
+        schema=schema,
+        canceller=_Canceller(),
+    )
+
+    assert (
+        result.results[0].disposition
+        is CancellationDisposition.OBSERVED_TERMINAL
+    )
+    with pg_engine.connect() as connection:
+        after = dict(
+            connection.execute(select(schema.item_attempts)).mappings().one()
+        )
+    assert after == before
 
 
 def test_topology_drift_fails_closed_without_recursive_cancel(

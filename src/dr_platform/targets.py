@@ -311,9 +311,7 @@ class TargetRegistry:
                 )
             return existing
 
-        existing_workflow_ref = workflow_refs.get(
-            target.managed_workflow_name
-        )
+        existing_workflow_ref = workflow_refs.get(target.managed_workflow_name)
         if existing_workflow_ref is not None and existing_workflow_ref != (
             target.ref
         ):

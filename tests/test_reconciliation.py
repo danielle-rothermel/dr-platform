@@ -206,8 +206,7 @@ def test_retryable_execution_error_allocates_one_new_attempt(
     workflow_locks = [
         cast("Mapping[str, object]", parameters).get("id")
         for statement, parameters in observed_statements
-        if "hashtextextended" in statement
-        and isinstance(parameters, Mapping)
+        if "hashtextextended" in statement and isinstance(parameters, Mapping)
     ]
     assert "workflow:item-0:1" in workflow_locks
     operation_lock_index = next(
@@ -294,6 +293,7 @@ def test_repeated_identical_active_observation_is_exact_noop(
         disposition=ReconciliationObservationDisposition.ACTIVE,
         dbos_status=DbosWorkflowStatus.PENDING,
     )
+
     def apply_active() -> ReconciliationPersistenceResult:
         return apply_reconciliation_observations(
             pg_engine,
@@ -564,9 +564,7 @@ def test_terminal_missing_candidate_is_loaded_but_not_rewritten(
     )
     with pg_engine.connect() as connection:
         marker_before_uncertain = dict(
-            connection.execute(
-                select(schema.missing_reobservations)
-            )
+            connection.execute(select(schema.missing_reobservations))
             .mappings()
             .one()
         )
@@ -589,9 +587,7 @@ def test_terminal_missing_candidate_is_loaded_but_not_rewritten(
     )
     with pg_engine.connect() as connection:
         marker_after_uncertain = dict(
-            connection.execute(
-                select(schema.missing_reobservations)
-            )
+            connection.execute(select(schema.missing_reobservations))
             .mappings()
             .one()
         )
@@ -719,9 +715,7 @@ def test_terminal_missing_reobservation_rotates_oldest_marker_first(
     assert next_candidate.item.item_id == observed_item_ids[0]
     with pg_engine.connect() as connection:
         states = tuple(
-            connection.scalars(
-                select(schema.item_attempts.c.execution_state)
-            )
+            connection.scalars(select(schema.item_attempts.c.execution_state))
         )
         marker_count = connection.scalar(
             select(func.count()).select_from(schema.missing_reobservations)
@@ -842,11 +836,14 @@ def test_only_retryable_unexhausted_enqueue_error_is_actionable(
             )
         )
 
-    assert load_reconciliation_page(
-        pg_engine,
-        page_size=1,
-        schema=schema,
-    ) == ()
+    assert (
+        load_reconciliation_page(
+            pg_engine,
+            page_size=1,
+            schema=schema,
+        )
+        == ()
+    )
 
 
 def test_enqueue_error_reset_recomputes_current_operation_aggregates(

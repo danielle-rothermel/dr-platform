@@ -146,7 +146,14 @@ def cancel_operation(
     repair_late_enqueue_compensations(
         engine=engine, canceller=canceller, schema=selected_schema
     )
-    return _load_result(engine, request=request, schema=selected_schema)
+    return _load_result(
+        engine,
+        request=request,
+        schema=selected_schema,
+        observed_terminal_rows=[
+            row for row in planned if row.get("_observed_terminal") is True
+        ],
+    )
 
 
 def repair_late_enqueue_compensations(
@@ -293,6 +300,7 @@ def _persist_intent(
         if exact_replay:
             return _request_rows(connection, schema=schema, request=request)
         now = _database_now(connection)
+        observed_terminal_rows: list[dict[str, Any]] = []
         if operation["status"] not in {
             OperationStatus.SUCCEEDED.value,
             OperationStatus.PARTIAL.value,
@@ -317,18 +325,24 @@ def _persist_intent(
         for row in attempts:
             state = AttemptExecutionState(row["execution_state"])
             if state in TERMINAL_EXECUTION_STATES:
-                _set_intent(
-                    connection,
-                    schema=schema,
-                    row=row,
-                    request=request,
-                    now=now,
-                    disposition=(
-                        CancellationDisposition.ALREADY_CANCELLED
-                        if state is AttemptExecutionState.CANCELLED
-                        else CancellationDisposition.OBSERVED_TERMINAL
-                    ),
-                )
+                # Terminal Attempts are immutable.  A pre-existing cancelled
+                # request is handled by exact replay above; other terminal
+                # rows are returned as observations without recording intent.
+                if state is not AttemptExecutionState.CANCELLED:
+                    row["cancellation_disposition"] = (
+                        CancellationDisposition.OBSERVED_TERMINAL.value
+                    )
+                    row["_observed_terminal"] = True
+                    observed_terminal_rows.append(row)
+                else:
+                    _set_intent(
+                        connection,
+                        schema=schema,
+                        row=row,
+                        request=request,
+                        now=now,
+                        disposition=CancellationDisposition.ALREADY_CANCELLED,
+                    )
                 continue
             _set_intent(
                 connection,
@@ -362,7 +376,10 @@ def _persist_intent(
             operation_key=request.operation_key,
             now=now,
         )
-        return _request_rows(connection, schema=schema, request=request)
+        return [
+            *_request_rows(connection, schema=schema, request=request),
+            *observed_terminal_rows,
+        ]
 
 
 def _cancel_one(
@@ -648,24 +665,38 @@ def _request_rows(
 
 
 def _load_result(
-    engine: Engine, *, request: CancellationRequest, schema: PlatformSchema
+    engine: Engine,
+    *,
+    request: CancellationRequest,
+    schema: PlatformSchema,
+    observed_terminal_rows: Sequence[Mapping[str, Any]] = (),
 ) -> CancellationResult:
     with engine.connect() as connection:
         rows = _request_rows(connection, schema=schema, request=request)
+    observed = [
+        CancellationAttemptResult(
+            item_id=row["item_id"],
+            attempt=row["attempt"],
+            workflow_id=row["workflow_id"],
+            disposition=CancellationDisposition.OBSERVED_TERMINAL,
+        )
+        for row in observed_terminal_rows
+    ]
+    persisted = [
+        CancellationAttemptResult(
+            item_id=row["item_id"],
+            attempt=row["attempt"],
+            workflow_id=row["workflow_id"],
+            disposition=CancellationDisposition(
+                row["cancellation_disposition"]
+                or CancellationDisposition.FAILED.value
+            ),
+        )
+        for row in rows
+    ]
     return CancellationResult(
         request=request,
-        results=tuple(
-            CancellationAttemptResult(
-                item_id=row["item_id"],
-                attempt=row["attempt"],
-                workflow_id=row["workflow_id"],
-                disposition=CancellationDisposition(
-                    row["cancellation_disposition"]
-                    or CancellationDisposition.FAILED.value
-                ),
-            )
-            for row in rows
-        ),
+        results=tuple(observed + persisted),
     )
 
 

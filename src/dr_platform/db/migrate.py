@@ -10,7 +10,7 @@ from alembic.config import Config
 from dr_platform.db.schema import DEFAULT_PREFIX
 
 PLATFORM_BASELINE_REVISION = "0001_platform_baseline"
-PLATFORM_HEAD_REVISION = "head"
+PLATFORM_HEAD_REVISION = PLATFORM_BASELINE_REVISION
 
 _ALEMBIC_DIR = Path(__file__).resolve().parent / "alembic"
 

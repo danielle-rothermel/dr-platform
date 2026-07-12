@@ -140,9 +140,7 @@ def test_missing_target_fails_with_typed_unavailable_error() -> None:
     with pytest.raises(TargetUnavailableError) as caught:
         TargetRegistry().resolve(target_ref)
 
-    assert caught.value.code is (
-        TargetResolutionErrorCode.TARGET_UNAVAILABLE
-    )
+    assert caught.value.code is (TargetResolutionErrorCode.TARGET_UNAVAILABLE)
     assert caught.value.target_ref == target_ref
 
 

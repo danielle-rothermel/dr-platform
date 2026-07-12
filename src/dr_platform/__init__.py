@@ -1,5 +1,21 @@
 """Durable execution kernel contracts built on DBOS."""
 
+from dr_platform.backoff import (
+    RETRYABLE_BACKOFF_FAILURES,
+    ThrottleBackoffState,
+    clear_throttle_backoff,
+    clear_throttle_hold,
+    delay_until_unblocked_seconds,
+    hold_throttle_delay,
+    list_throttle_states,
+    load_throttle_backoff_state,
+    next_backoff_delay_seconds,
+    record_throttle_failure,
+    set_throttle_hold,
+    set_throttle_tags,
+    should_backoff_failure,
+    throttle_delay_seconds,
+)
 from dr_platform.cancellation import (
     CancellationAttemptResult,
     CancellationConflictError,
@@ -11,6 +27,13 @@ from dr_platform.cancellation import (
     cancel_operation,
     repair_late_enqueue_compensations,
 )
+from dr_platform.cut import (
+    OperationCutComparison,
+    OperationCutMismatch,
+    OperationCutMismatchDisposition,
+    PlatformOperationCut,
+    compare_operation_cuts,
+)
 from dr_platform.db import PlatformSchema, upgrade_platform_schema
 from dr_platform.dbos_config import (
     PlatformDbosConfig,
@@ -18,9 +41,13 @@ from dr_platform.dbos_config import (
     build_platform_dbos_config,
 )
 from dr_platform.export import (
+    DestinationResult,
     ExportOptions,
     ExportResult,
+    LocalDestinationResult,
+    PostgresDestinationResult,
     ProjectionSpec,
+    capture_dbos_publication_telemetry,
     export,
 )
 from dr_platform.inspection import (
@@ -111,6 +138,7 @@ from dr_platform.targets import (
 )
 
 __all__ = [
+    "RETRYABLE_BACKOFF_FAILURES",
     "AttemptEnqueueState",
     "AttemptExecutionState",
     "AttemptInspection",
@@ -122,6 +150,7 @@ __all__ = [
     "CancellationInspectionDisposition",
     "CancellationRequest",
     "CancellationResult",
+    "DestinationResult",
     "EligibilityReference",
     "EnqueueClaimRecord",
     "EnqueueCompensationRecord",
@@ -138,12 +167,16 @@ __all__ = [
     "ItemInsertStatus",
     "ItemInspection",
     "ItemRecord",
+    "LocalDestinationResult",
     "ManifestPage",
     "ManifestSource",
     "NextAttemptDisposition",
     "NextAttemptReason",
     "NextAttemptRequest",
     "NextAttemptResult",
+    "OperationCutComparison",
+    "OperationCutMismatch",
+    "OperationCutMismatchDisposition",
     "OperationInspection",
     "OperationManifest",
     "OperationRecord",
@@ -154,7 +187,9 @@ __all__ = [
     "PinnedBundle",
     "PinnedBundleGoneError",
     "PlatformDbosConfig",
+    "PlatformOperationCut",
     "PlatformSchema",
+    "PostgresDestinationResult",
     "PostgresPublicationFence",
     "ProjectionSpec",
     "RegistrationHook",
@@ -173,6 +208,7 @@ __all__ = [
     "SubmittableItem",
     "TargetRegistry",
     "TargetResolver",
+    "ThrottleBackoffState",
     "ThrottleState",
     "WorkflowCanceller",
     "WorkflowTopology",
@@ -180,23 +216,37 @@ __all__ = [
     "build_dbos_config",
     "build_platform_dbos_config",
     "cancel_operation",
+    "capture_dbos_publication_telemetry",
     "capture_source_coordinate",
     "check_snapshot_compatibility",
     "cleanup_local_bundles",
+    "clear_throttle_backoff",
+    "clear_throttle_hold",
+    "compare_operation_cuts",
+    "delay_until_unblocked_seconds",
     "export",
     "health_report",
+    "hold_throttle_delay",
     "inspect_operation",
     "list_attempts",
     "list_items",
     "list_operations",
+    "list_throttle_states",
+    "load_throttle_backoff_state",
+    "next_backoff_delay_seconds",
     "pin_local_bundle",
     "reconcile",
+    "record_throttle_failure",
     "repair_late_enqueue_compensations",
     "request_next_attempt",
     "require_compatible_snapshot",
     "resolve_local_pin",
+    "set_throttle_hold",
+    "set_throttle_tags",
+    "should_backoff_failure",
     "submit",
     "submit_jsonl",
+    "throttle_delay_seconds",
     "upgrade_platform_schema",
     "wait_operation",
 ]

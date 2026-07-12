@@ -50,6 +50,8 @@ P7 verification on 2026-07-12:
   measured p99 skew `0.297 ms`, median query quantum `0.188 ms`, and retained
   the pinned `100 ms` bound. `DBOS_SYSTEM_DATABASE_URL` was absent, so the
   specified application-endpoint fallback was exercised.
-- `NEON_DATABASE_URL` was absent. The same row-lock-free conditional fence was
-  exercised against local Postgres in the deterministic suite; the live Neon
-  rerun remains a credential gate and does not block unrelated implementation.
+- Neon project hash `3bb33d910255`: the production fence promoted a physically
+  present row-count/checksum-validated bundle with a database-server source
+  coordinate and resolved an active pin. The endpoint was supplied through
+  encrypted `DR_LLM_POSTGRES_SYNC_ADMIN_URL`; no URL value was printed or
+  persisted. This closes the live Neon credential gate.
