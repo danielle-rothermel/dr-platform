@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, runtime_checkable
 
 from dr_serialize import sha256_json_digest
 from pydantic import (
@@ -15,6 +15,9 @@ from pydantic import (
 )
 
 from dr_platform.status import WorkflowTopology
+
+if TYPE_CHECKING:
+    from dr_platform.items import SubmittableItem
 
 MANIFEST_FORMAT_VERSION = 3
 EXECUTION_RECIPE_FORMAT_VERSION = 1
@@ -120,3 +123,25 @@ class OperationManifest(BaseModel):
     def expected_manifest_digest(self) -> str:
         payload = self.model_dump(mode="json", exclude={"manifest_digest"})
         return sha256_json_digest(payload)
+
+
+@runtime_checkable
+class ManifestSource(Protocol):
+    """Re-readable source for the exact ordered Items in a Manifest."""
+
+    @property
+    def item_count(self) -> int: ...
+
+    def read_items(
+        self,
+        *,
+        start_index: int,
+        end_index: int,
+    ) -> tuple[SubmittableItem, ...]: ...
+
+
+@runtime_checkable
+class ManifestSourceCutValidator(Protocol):
+    """Optional strong validation for a complete external source cut."""
+
+    def validate_source_cut(self) -> None: ...
