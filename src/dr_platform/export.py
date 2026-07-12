@@ -3,7 +3,7 @@
 Only the platform kernel is owned here.  Application projections, DBOS data,
 and remote destinations deliberately remain outside this module.
 """
-# ruff: noqa: BLE001, E501, FBT001, PLR0913, S608, TC003, TRY300
+# ruff: noqa: BLE001, E501, FBT001, PLR0911, PLR0912, PLR0913, PLR0915, S608, TC003, TRY300
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Annotated, Any, Literal
 
 import duckdb
@@ -28,8 +29,10 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StrictStr,
+    field_serializer,
 )
 from sqlalchemy import Engine, Table, text
+from sqlalchemy.sql import sqltypes
 
 from dr_platform.db import PlatformSchema
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
@@ -86,14 +89,37 @@ class ExportResult(BaseModel):
     source_database: NonEmptyStr
     source_captured_at: datetime
     snapshot_seq: NonNegativeInt
-    member_counts: dict[StrictStr, NonNegativeInt]
-    member_checksums: dict[StrictStr, NonEmptyStr]
+    member_counts: Mapping[StrictStr, NonNegativeInt]
+    member_checksums: Mapping[StrictStr, NonEmptyStr]
     destinations: tuple[DestinationResult, ...]
+
+    def model_post_init(self, __context: Any) -> None:
+        """Deep-freeze the mapping-shaped source facts."""
+
+        object.__setattr__(
+            self, "member_counts", MappingProxyType(dict(self.member_counts))
+        )
+        object.__setattr__(
+            self,
+            "member_checksums",
+            MappingProxyType(dict(self.member_checksums)),
+        )
+
+    @field_serializer("member_counts", "member_checksums")
+    def serialize_member_facts(
+        self, value: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return dict(value)
 
 
 _IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 _STATE_TABLE = "__dr_platform_export_state"
 _MEMBER_TABLE = "__dr_platform_export_members"
+_SENSITIVE_KERNEL_COLUMNS = {
+    "operations": frozenset({"spec", "metadata"}),
+    "items": frozenset({"spec"}),
+    "throttle_state": frozenset({"last_message", "metadata"}),
+}
 
 
 def export(
@@ -195,7 +221,13 @@ def _kernel_specs(
         )
     result: list[tuple[ProjectionSpec, Table]] = []
     for table in tables:
-        columns = tuple(column.name for column in table.columns)
+        suffix = table.name.removeprefix(f"{schema.prefix}_")
+        excluded = _SENSITIVE_KERNEL_COLUMNS.get(suffix, frozenset())
+        columns = tuple(
+            column.name
+            for column in table.columns
+            if column.name not in excluded
+        )
         key = tuple(column.name for column in table.primary_key.columns)
         default = ProjectionSpec(
             member=table.name, columns=columns, unique_key=key
@@ -260,8 +292,12 @@ def _capture_source(
                 )
                 output: dict[str, list[dict[str, Any]]] = {}
                 for spec, table in members:
-                    statement = table.select().where(
-                        table.c.change_seq <= high_water
+                    statement = (
+                        table.select()
+                        .with_only_columns(
+                            *(table.c[column] for column in spec.columns)
+                        )
+                        .where(table.c.change_seq <= high_water)
                     )
                     if not full_rebuild:
                         statement = statement.where(
@@ -421,14 +457,25 @@ def _stage_and_promote(
             return "STALE_PROMOTION", None, {}, {}
         bundle_id = f"kernel_{snapshot_seq}_{token}_{options.run_id}"
         candidate_tables: dict[str, str] = {}
-        for spec, _ in members:
+        for spec, source_table in members:
+            if not _renew_lease(connection, options, token):
+                connection.execute("ROLLBACK")
+                return "STALE_PROMOTION", None, {}, {}
             stage = _quoted(f"__dr_platform_stage_{token}_{spec.member}")
             target = _quoted(f"__dr_platform_bundle_{bundle_id}_{spec.member}")
             connection.execute(
-                f"CREATE TABLE {stage} ({', '.join(f'{_quoted(column)} VARCHAR' for column in spec.columns)})"
+                f"CREATE TABLE {stage} ("
+                + ", ".join(
+                    f"{_quoted(column)} {_duckdb_type(source_table.c[column].type)}"
+                    for column in spec.columns
+                )
+                + ")"
             )
             values = [
-                tuple(_storage_value(row[column]) for column in spec.columns)
+                tuple(
+                    _storage_value(row[column], source_table.c[column].type)
+                    for column in spec.columns
+                )
                 for row in rows[spec.member]
             ]
             if values:
@@ -472,7 +519,7 @@ def _stage_and_promote(
             candidate_rows = [
                 dict(zip(spec.columns, row, strict=True))
                 for row in connection.execute(
-                    f"SELECT {', '.join(_quoted(column) for column in spec.columns)} "
+                    f"SELECT {', '.join(f'CAST({_quoted(column)} AS VARCHAR)' for column in spec.columns)} "
                     f"FROM {target} ORDER BY {', '.join(_quoted(key) for key in spec.unique_key)}"
                 ).fetchall()
             ]
@@ -482,18 +529,36 @@ def _stage_and_promote(
             ).hexdigest()
 
         if state[2] is not None and snapshot_seq == committed:
-            connection.execute("ROLLBACK")
             if old_checksums != candidate_checksums:
+                connection.execute("ROLLBACK")
                 return (
                     "STALE_PROMOTION",
                     None,
                     candidate_counts,
                     candidate_checksums,
                 )
+            if not _renew_lease(connection, options, token):
+                connection.execute("ROLLBACK")
+                return (
+                    "STALE_PROMOTION",
+                    None,
+                    candidate_counts,
+                    candidate_checksums,
+                )
+            connection.execute("ROLLBACK")
             _release_lease(connection, options, token)
             return (
                 "IDEMPOTENT",
                 str(state[2]),
+                candidate_counts,
+                candidate_checksums,
+            )
+
+        if not _renew_lease(connection, options, token):
+            connection.execute("ROLLBACK")
+            return (
+                "STALE_PROMOTION",
+                None,
                 candidate_counts,
                 candidate_checksums,
             )
@@ -509,10 +574,11 @@ def _stage_and_promote(
                 ],
             )
         cursors = {spec.member: snapshot_seq for spec, _ in members}
-        connection.execute(
+        promoted = connection.execute(
             f"UPDATE {_STATE_TABLE} SET committed_snapshot_seq = ?, cursors_json = ?, checksums_json = ?, bundle_id = ?, "
             "owner = NULL, lease_expires_at = NULL, updated_at = epoch_ms(now()) "
-            "WHERE destination_id = ? AND bundle_key = ? AND owner = ? AND fencing_token = ?",
+            "WHERE destination_id = ? AND bundle_key = ? AND owner = ? AND fencing_token = ? "
+            "AND lease_expires_at > epoch_ms(now()) RETURNING fencing_token",
             [
                 snapshot_seq,
                 _canonical(cursors),
@@ -523,7 +589,15 @@ def _stage_and_promote(
                 options.run_id,
                 token,
             ],
-        )
+        ).fetchone()
+        if promoted is None:
+            connection.execute("ROLLBACK")
+            return (
+                "STALE_PROMOTION",
+                None,
+                candidate_counts,
+                candidate_checksums,
+            )
         connection.execute("COMMIT")
         return "PROMOTED", bundle_id, candidate_counts, candidate_checksums
     except Exception:
@@ -569,6 +643,28 @@ def _release_lease(
     )
 
 
+def _renew_lease(
+    connection: duckdb.DuckDBPyConnection,
+    options: ExportOptions,
+    token: int,
+) -> bool:
+    renewed = connection.execute(
+        f"UPDATE {_STATE_TABLE} SET lease_expires_at = epoch_ms(now()) + ?, "
+        "updated_at = epoch_ms(now()) "
+        "WHERE destination_id = ? AND bundle_key = ? AND owner = ? "
+        "AND fencing_token = ? AND lease_expires_at > epoch_ms(now()) "
+        "RETURNING fencing_token",
+        [
+            options.lease_seconds * 1000,
+            options.destination_id,
+            options.bundle_key,
+            options.run_id,
+            token,
+        ],
+    ).fetchone()
+    return renewed == (token,)
+
+
 def _empty_result(
     schema: PlatformSchema,
     options: ExportOptions,
@@ -611,12 +707,36 @@ def _pg_identifier(identifier: str) -> str:
     return _quoted(identifier)
 
 
-def _storage_value(value: Any) -> str | None:
+def _duckdb_type(source_type: sqltypes.TypeEngine[Any]) -> str:
+    if isinstance(source_type, sqltypes.DateTime):
+        return "TIMESTAMPTZ" if source_type.timezone else "TIMESTAMP"
+    if isinstance(source_type, sqltypes.Boolean):
+        return "BOOLEAN"
+    if isinstance(source_type, sqltypes.Integer):
+        return "BIGINT"
+    if isinstance(source_type, sqltypes.Float):
+        return "DOUBLE"
+    if isinstance(source_type, sqltypes.Numeric):
+        return "DECIMAL"
+    return "VARCHAR"
+
+
+def _storage_value(value: Any, source_type: sqltypes.TypeEngine[Any]) -> Any:
     if value is None:
         return None
     if isinstance(value, Enum):
         return str(value.value)
-    return _canonical(value)
+    if isinstance(source_type, sqltypes.JSON):
+        return _canonical(value)
+    if isinstance(source_type, sqltypes.DateTime) and isinstance(
+        value, datetime
+    ):
+        # Bind an ISO value so DuckDB performs the typed cast without its
+        # optional pytz conversion dependency.
+        return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    return value
 
 
 def _duckdb_scalar(connection: duckdb.DuckDBPyConnection, query: str) -> Any:
