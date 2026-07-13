@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterator
@@ -25,13 +26,17 @@ def signed_integrity_test_material() -> tuple[
 ]:
     """Ephemeral OpenSSL key material used by signed-publication tests."""
 
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("openssl unavailable; install it and add it to PATH")
+
     private = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)  # noqa: SIM115
     private.close()
     public = tempfile.NamedTemporaryFile(suffix=".der", delete=False)  # noqa: SIM115
     public.close()
     subprocess.run(
         [
-            "/opt/homebrew/bin/openssl",
+            openssl,
             "genpkey",
             "-algorithm",
             "ED25519",
@@ -43,7 +48,7 @@ def signed_integrity_test_material() -> tuple[
     )
     subprocess.run(
         [
-            "/opt/homebrew/bin/openssl",
+            openssl,
             "pkey",
             "-in",
             private.name,
