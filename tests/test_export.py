@@ -320,6 +320,7 @@ def test_application_bundle_promotes_and_resolves_remote_fence(
         pg_engine,
         destination_id="remote-fixture",
         table_name="remote_fixture_state",
+        operation_cleanup_enabled=True,
         signer=signed_integrity_test_material()[0],
         public_key_ring=signed_integrity_test_material()[1],
     )

@@ -294,6 +294,7 @@ CleanupDisposition = Literal[
     "NOT_FOUND",
     "BLOCKED_EXTERNAL_PIN",
     "BLOCKED_SUCCESSOR",
+    "BLOCKED_LEASE_HELD",
     "AUTHORITY_MISMATCH",
     "RETRYABLE_CONFLICT",
 ]
@@ -313,6 +314,7 @@ class PublicationObservation(BaseModel):
         "STAGING",
         "STAGED",
         "PROMOTED",
+        "SUPERSEDED",
         "CLEANING",
         "CLEANED",
     ]
@@ -335,6 +337,7 @@ class CleanupEligibility(BaseModel):
         "NOT_FOUND",
         "BLOCKED_EXTERNAL_PIN",
         "BLOCKED_SUCCESSOR",
+        "BLOCKED_LEASE_HELD",
         "AUTHORITY_MISMATCH",
         "UNSUPPORTED",
     ]
@@ -353,9 +356,15 @@ class CleanupResult(BaseModel):
 class RemotePromotionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    disposition: Literal["PROMOTED", "IDEMPOTENT", "STALE_PROMOTION"]
+    disposition: Literal[
+        "PROMOTED", "IDEMPOTENT", "SUPERSEDED", "STALE_PROMOTION"
+    ]
     bundle_id: StrictStr | None = None
     snapshot_seq: NonNegativeInt | None = None
+    # SUPERSEDED never carries a receipt: the current pointer belongs to a
+    # different operation, and this operation's own recovery coordinate is
+    # its stage plan digest.
+    stage_plan_digest: StrictStr | None = None
     receipt: PublicationReceipt | None = None
 
 
@@ -594,6 +603,10 @@ class PostgresPublicationFence:
     destination_id: str
     table_name: str = "dr_platform_publication_state"
     kind: Literal["motherduck", "neon"] = "neon"
+    # Destructive operation cleanup is an explicit positive capability, not a
+    # backend-label inference: only Neon construction sites that opt in may
+    # execute it, so an omitted or mistyped label stays fail-closed.
+    operation_cleanup_enabled: bool = False
     signer: BundleIntegritySigner | None = None
     # Readers receive a replaceable public-only ring. Rotation is an atomic
     # caller-side replacement: keep old IDs during overlap, remove revoked IDs
@@ -607,6 +620,8 @@ class PostgresPublicationFence:
     def __post_init__(self) -> None:
         if not self.destination_id:
             raise ValueError("destination_id must not be empty")
+        if self.kind not in ("motherduck", "neon"):
+            raise ValueError("kind must be 'motherduck' or 'neon'")
         if _IDENTIFIER.fullmatch(self.table_name) is None:
             raise ValueError("table_name must be a safe SQL identifier")
         for key_id, encoded in self.public_key_ring.items():
@@ -637,14 +652,16 @@ class PostgresPublicationFence:
 
     @property
     def capabilities(self) -> PublicationCapabilities:
-        enabled = self.kind == "neon"
+        enabled = self.kind == "neon" and self.operation_cleanup_enabled
+        if enabled:
+            reason = None
+        elif self.kind == "neon":
+            reason = "operation cleanup requires explicit operation_cleanup_enabled=True"
+        else:
+            reason = "MotherDuck operation cleanup requires endpoint capability proof"
         return PublicationCapabilities(
             operation_cleanup=enabled,
-            reason=(
-                None
-                if enabled
-                else "MotherDuck operation cleanup requires endpoint capability proof"
-            ),
+            reason=reason,
         )
 
     @property
@@ -732,6 +749,12 @@ class PostgresPublicationFence:
                     f"updated_at TIMESTAMPTZ NOT NULL DEFAULT {self._now}, "
                     "PRIMARY KEY(destination_id, bundle_key, operation_id), "
                     "UNIQUE(destination_id, operation_id))"
+                )
+            )
+            connection.execute(
+                text(
+                    f"ALTER TABLE {self._operations_table} "
+                    "ADD COLUMN IF NOT EXISTS plan_key_id TEXT"
                 )
             )
             connection.execute(
@@ -990,6 +1013,7 @@ class PostgresPublicationFence:
             "plan": plan_json,
             "digest": plan_digest,
             "signature": signature,
+            "key_id": self.signer.key_id,
         }
         with self.engine.begin() as connection:
             self._require_current_lease(
@@ -997,7 +1021,7 @@ class PostgresPublicationFence:
             )
             existing = connection.execute(
                 text(
-                    f"SELECT attempt_id, fencing_token, snapshot_seq, bundle_id, plan_digest, plan_signature "
+                    f"SELECT attempt_id, fencing_token, snapshot_seq, bundle_id, plan_digest, plan_signature, plan_key_id "
                     f"FROM {self._operations_table} WHERE destination_id = CAST(:destination AS TEXT) "
                     "AND bundle_key = CAST(:bundle AS TEXT) AND operation_id = CAST(:operation AS TEXT)"
                 ),
@@ -1007,11 +1031,11 @@ class PostgresPublicationFence:
                 connection.execute(
                     text(
                         f"INSERT INTO {self._operations_table} (destination_id, bundle_key, operation_id, "
-                        "attempt_id, fencing_token, snapshot_seq, bundle_id, state, plan_json, plan_digest, plan_signature) "
+                        "attempt_id, fencing_token, snapshot_seq, bundle_id, state, plan_json, plan_digest, plan_signature, plan_key_id) "
                         "VALUES (CAST(:destination AS TEXT), CAST(:bundle AS TEXT), CAST(:operation AS TEXT), "
                         "CAST(:attempt AS TEXT), CAST(:token AS BIGINT), CAST(:snapshot AS BIGINT), "
                         "CAST(:bundle_id AS TEXT), 'PLANNED', CAST(:plan AS TEXT), CAST(:digest AS TEXT), "
-                        "CAST(:signature AS TEXT))"
+                        "CAST(:signature AS TEXT), CAST(:key_id AS TEXT))"
                     ),
                     values,
                 )
@@ -1030,25 +1054,35 @@ class PostgresPublicationFence:
                             "table_name": member.table_name,
                         },
                     )
-            elif tuple(existing) != (
-                identity.attempt_id,
-                fencing_token,
-                snapshot_seq,
-                bundle_id,
-                plan_digest,
-                signature,
-            ):
-                raise ValueError(
-                    "operation identity already has a different stage plan"
-                )
-            connection.execute(
+            else:
+                if tuple(existing[:6]) != (
+                    identity.attempt_id,
+                    fencing_token,
+                    snapshot_seq,
+                    bundle_id,
+                    plan_digest,
+                    signature,
+                ):
+                    raise ValueError(
+                        "operation identity already has a different stage plan"
+                    )
+                if not self._plan_signature_valid(
+                    plan_json, signature, existing[6]
+                ):
+                    raise ValueError(
+                        "stored stage plan failed signed-plan verification"
+                    )
+            gate = connection.execute(
                 text(
                     f"UPDATE {self._table} SET mutation_epoch = mutation_epoch + 1, updated_at = {self._now} "
                     "WHERE destination_id = CAST(:destination AS TEXT) AND bundle_key = CAST(:bundle AS TEXT) "
-                    "AND owner = CAST(:attempt AS TEXT) AND fencing_token = CAST(:token AS BIGINT)"
+                    "AND owner = CAST(:attempt AS TEXT) AND fencing_token = CAST(:token AS BIGINT) "
+                    "RETURNING mutation_epoch"
                 ),
                 values,
-            )
+            ).one_or_none()
+            if gate is None:
+                raise _StalePromotionError
         prepared = PreparedStage(
             identity=identity,
             destination_id=self.destination_id,
@@ -1097,7 +1131,7 @@ class PostgresPublicationFence:
                     "operation": identity.operation_id,
                 },
             ).one_or_none()
-            if row is None or row[0] != "PROMOTED":
+            if row is None or row[0] not in ("PROMOTED", "SUPERSEDED"):
                 return None
             observation = self._observe_operation(
                 connection, identity.operation_id
@@ -1111,6 +1145,27 @@ class PostgresPublicationFence:
                 )
             ):
                 return None
+            if row[0] == "SUPERSEDED":
+                connection.execute(
+                    text(
+                        f"UPDATE {self._table} SET owner = NULL, lease_expires_at = NULL, "
+                        f"mutation_epoch = mutation_epoch + 1, updated_at = {self._now} "
+                        "WHERE destination_id = CAST(:destination AS TEXT) AND bundle_key = CAST(:bundle AS TEXT) "
+                        "AND owner = CAST(:attempt AS TEXT) AND fencing_token = CAST(:token AS BIGINT)"
+                    ),
+                    {
+                        "destination": self.destination_id,
+                        "bundle": bundle_key,
+                        "attempt": identity.attempt_id,
+                        "token": fencing_token,
+                    },
+                )
+                return RemotePromotionResult(
+                    disposition="SUPERSEDED",
+                    bundle_id=str(row[1]),
+                    snapshot_seq=int(row[2]),
+                    stage_plan_digest=str(row[3]),
+                )
             pins = tuple(
                 str(pin_id)
                 for (pin_id,) in connection.execute(
@@ -1154,6 +1209,7 @@ class PostgresPublicationFence:
                 disposition="IDEMPOTENT",
                 bundle_id=receipt.bundle_id,
                 snapshot_seq=receipt.snapshot_seq,
+                stage_plan_digest=receipt.stage_plan_digest,
                 receipt=receipt,
             )
 
@@ -1202,7 +1258,7 @@ class PostgresPublicationFence:
                     self._require_current_lease(
                         connection, bundle_key, run_id, fencing_token
                     )
-                    connection.execute(
+                    staging = connection.execute(
                         text(
                             f"UPDATE {self._operations_table} SET state = 'STAGING', updated_at = {self._now} "
                             "WHERE destination_id = CAST(:destination AS TEXT) AND bundle_key = CAST(:bundle AS TEXT) "
@@ -1214,7 +1270,47 @@ class PostgresPublicationFence:
                             "operation": operation_identity.operation_id,
                         },
                     )
+                    if staging.rowcount != 1:
+                        raise _StalePromotionError
                 with self.engine.begin() as stage_connection:
+                    # The compare-and-set below is the stage transaction's
+                    # first statement: physical DDL may only commit inside a
+                    # transaction that re-acquired the shared mutation gate
+                    # under a live lease. A cleanup that won after lease
+                    # expiry cleared the owner, so this CAS returns zero rows
+                    # and every pending stage effect rolls back with it.
+                    self.fault_hook("before_stage_gate")
+                    gate = stage_connection.execute(
+                        text(
+                            f"UPDATE {self._table} SET mutation_epoch = mutation_epoch + 1, updated_at = {self._now} "
+                            "WHERE destination_id = CAST(:destination AS TEXT) AND bundle_key = CAST(:bundle AS TEXT) "
+                            "AND owner = CAST(:run AS TEXT) AND fencing_token = CAST(:token AS BIGINT) "
+                            f"AND lease_expires_at > {self._now} "
+                            "RETURNING mutation_epoch"
+                        ),
+                        {
+                            "destination": self.destination_id,
+                            "bundle": bundle_key,
+                            "run": run_id,
+                            "token": fencing_token,
+                        },
+                    ).one_or_none()
+                    if gate is None:
+                        raise _StalePromotionError
+                    lifecycle = stage_connection.execute(
+                        text(
+                            f"SELECT 1 FROM {self._operations_table} "
+                            "WHERE destination_id = CAST(:destination AS TEXT) AND bundle_key = CAST(:bundle AS TEXT) "
+                            "AND operation_id = CAST(:operation AS TEXT) AND state = 'STAGING'"
+                        ),
+                        {
+                            "destination": self.destination_id,
+                            "bundle": bundle_key,
+                            "operation": operation_identity.operation_id,
+                        },
+                    ).one_or_none()
+                    if lifecycle is None:
+                        raise _StalePromotionError
                     manifest = stage(stage_connection, prepared)
                     self._validate_remote_manifest(
                         stage_connection,
@@ -1255,17 +1351,56 @@ class PostgresPublicationFence:
                         manifest=signed_manifest,
                         operation_id=operation_identity.operation_id,
                     )
-                    if result.disposition != "PROMOTED":
+                    if result.disposition == "IDEMPOTENT":
+                        # The snapshot is already current under another
+                        # operation's bundle. Commit a truthful terminal
+                        # disposition for this operation instead of rolling
+                        # back into a stuck STAGING row or minting a receipt
+                        # for foreign metadata. The candidate bundle stays
+                        # STAGED and cleanable by this operation alone.
+                        published = connection.execute(
+                            text(
+                                f"SELECT published_operation_id FROM {self._table} "
+                                "WHERE destination_id = CAST(:destination AS TEXT) "
+                                "AND bundle_key = CAST(:bundle AS TEXT)"
+                            ),
+                            {
+                                "destination": self.destination_id,
+                                "bundle": bundle_key,
+                            },
+                        ).scalar_one_or_none()
+                        if published == operation_identity.operation_id:
+                            raise _StalePromotionError
+                        superseded = connection.execute(
+                            text(
+                                f"UPDATE {self._operations_table} SET state = 'SUPERSEDED', updated_at = {self._now} "
+                                "WHERE destination_id = CAST(:destination AS TEXT) AND bundle_key = CAST(:bundle AS TEXT) "
+                                "AND operation_id = CAST(:operation AS TEXT) AND state = 'STAGED'"
+                            ),
+                            {
+                                "destination": self.destination_id,
+                                "bundle": bundle_key,
+                                "operation": operation_identity.operation_id,
+                            },
+                        )
+                        if superseded.rowcount != 1:
+                            raise _StalePromotionError
+                        result = RemotePromotionResult(
+                            disposition="SUPERSEDED",
+                            bundle_id=bundle_id,
+                            snapshot_seq=snapshot_seq,
+                            stage_plan_digest=prepared.plan_digest,
+                        )
+                    elif result.disposition != "PROMOTED":
                         raise _StalePromotionError
                 self.fault_hook("after_promotion_commit")
-                if (
-                    result.bundle_id is None
-                    or result.snapshot_seq is None
-                    or result.disposition == "STALE_PROMOTION"
-                ):
+                if result.disposition == "SUPERSEDED":
+                    return result
+                if result.bundle_id is None or result.snapshot_seq is None:
                     raise _StalePromotionError
                 return result.model_copy(
                     update={
+                        "stage_plan_digest": prepared.plan_digest,
                         "receipt": PublicationReceipt(
                             operation_id=operation_identity.operation_id,
                             destination_id=self.destination_id,
@@ -1278,7 +1413,7 @@ class PostgresPublicationFence:
                                 "Literal['PROMOTED', 'IDEMPOTENT']",
                                 result.disposition,
                             ),
-                        )
+                        ),
                     }
                 )
             except _StalePromotionError:
@@ -2094,133 +2229,182 @@ class PostgresPublicationFence:
     ) -> tuple[str, ...]:
         if retain_latest < 1:
             raise ValueError("retain_latest must be at least one")
-        deleted: list[str] = []
-        with self.engine.begin() as connection:
-            state = connection.execute(
-                text(
-                    f"SELECT bundle_id FROM {self._table} "
-                    "WHERE destination_id = CAST(:destination AS TEXT) "
-                    "AND bundle_key = CAST(:bundle AS TEXT) "
-                    "AND owner = CAST(:run AS TEXT) "
-                    "AND fencing_token = CAST(:token AS BIGINT) "
-                    f"AND lease_expires_at > {self._now}"
-                ),
-                {
-                    "destination": self.destination_id,
-                    "bundle": bundle_key,
-                    "run": run_id,
-                    "token": fencing_token,
-                },
-            ).one_or_none()
-            if state is None:
-                raise _StalePromotionError
-            connection.execute(
-                text(
-                    f"UPDATE {self._table} SET mutation_epoch = mutation_epoch + 1, updated_at = {self._now} "
-                    "WHERE destination_id = CAST(:destination AS TEXT) AND bundle_key = CAST(:bundle AS TEXT) "
-                    "AND owner = CAST(:run AS TEXT) AND fencing_token = CAST(:token AS BIGINT)"
-                ),
-                {
-                    "destination": self.destination_id,
-                    "bundle": bundle_key,
-                    "run": run_id,
-                    "token": fencing_token,
-                },
-            )
-            connection.execute(
-                text(
-                    f"DELETE FROM {self._pins_table} WHERE destination_id = CAST(:destination AS TEXT) "
-                    "AND bundle_key = CAST(:bundle AS TEXT) "
-                    f"AND expires_at <= {self._now}"
-                ),
-                {"destination": self.destination_id, "bundle": bundle_key},
-            )
-            pinned = {
-                row[0]
-                for row in connection.execute(
-                    text(
-                        f"SELECT bundle_id FROM {self._pins_table} "
-                        "WHERE destination_id = CAST(:destination AS TEXT) "
-                        "AND bundle_key = CAST(:bundle AS TEXT) "
-                        f"AND expires_at > {self._now}"
-                    ),
-                    {"destination": self.destination_id, "bundle": bundle_key},
-                ).fetchall()
-            }
-            rows = connection.execute(
-                text(
-                    f"SELECT bundle_id, manifest_json, status, fencing_token, operation_id "
-                    f"FROM {self._bundles_table} "
-                    "WHERE destination_id = CAST(:destination AS TEXT) "
-                    "AND bundle_key = CAST(:bundle AS TEXT) "
-                    "ORDER BY snapshot_seq DESC, created_at DESC"
-                ),
-                {"destination": self.destination_id, "bundle": bundle_key},
-            ).fetchall()
-            latest_promoted = [row[0] for row in rows if row[2] == "PROMOTED"][
-                :retain_latest
-            ]
-            protected = set(latest_promoted) | pinned
-            if state[0] is not None:
-                protected.add(state[0])
-            protected_tables: set[tuple[str, str]] = set()
-            for (
-                candidate,
-                manifest_json,
-                _status,
-                _candidate_token,
-                operation_id,
-            ) in rows:
-                if candidate not in protected and operation_id is None:
-                    continue
-                protected_manifest = RemoteBundleManifest.model_validate_json(
-                    manifest_json
+        for attempt in range(self.cleanup_retry_limit):
+            try:
+                return self._cleanup_bundles_once(
+                    bundle_key=bundle_key,
+                    run_id=run_id,
+                    fencing_token=fencing_token,
+                    retain_latest=retain_latest,
                 )
-                protected_tables.update(
-                    (member.schema_name, member.table_name)
-                    for member in protected_manifest.members
-                )
-            for (
-                candidate,
-                manifest_json,
-                status,
-                candidate_token,
-                operation_id,
-            ) in rows:
+            except DBAPIError as exc:
                 if (
-                    operation_id is not None
-                    or candidate in protected
-                    or (
-                        status == "STAGED"
-                        and int(candidate_token) >= fencing_token
-                    )
+                    not self._retryable_database_error(exc)
+                    or attempt + 1 == self.cleanup_retry_limit
                 ):
-                    continue
-                manifest = RemoteBundleManifest.model_validate_json(
-                    manifest_json
-                )
-                for member in manifest.members:
-                    if (
-                        member.schema_name,
-                        member.table_name,
-                    ) in protected_tables:
-                        continue
-                    table = f'"{member.schema_name}"."{member.table_name}"'
-                    connection.execute(text(f"DROP TABLE IF EXISTS {table}"))
-                connection.execute(
+                    raise
+        raise AssertionError("bounded retention retry loop exhausted")
+
+    def _cleanup_bundles_once(
+        self,
+        *,
+        bundle_key: str,
+        run_id: str,
+        fencing_token: int,
+        retain_latest: int,
+    ) -> tuple[str, ...]:
+        deleted: list[str] = []
+        connection = self.engine.connect()
+        if self.kind == "neon":
+            # MotherDuck's endpoint does not prove SERIALIZABLE support; the
+            # gate compare-and-set below is the isolation-independent fence.
+            connection = connection.execution_options(
+                isolation_level="SERIALIZABLE"
+            )
+        try:
+            with connection.begin():
+                state = connection.execute(
                     text(
-                        f"DELETE FROM {self._bundles_table} "
+                        f"SELECT bundle_id FROM {self._table} "
                         "WHERE destination_id = CAST(:destination AS TEXT) "
                         "AND bundle_key = CAST(:bundle AS TEXT) "
-                        "AND bundle_id = CAST(:bundle_id AS TEXT)"
+                        "AND owner = CAST(:run AS TEXT) "
+                        "AND fencing_token = CAST(:token AS BIGINT) "
+                        f"AND lease_expires_at > {self._now}"
                     ),
                     {
                         "destination": self.destination_id,
                         "bundle": bundle_key,
-                        "bundle_id": candidate,
+                        "run": run_id,
+                        "token": fencing_token,
+                    },
+                ).one_or_none()
+                if state is None:
+                    raise _StalePromotionError
+                self.fault_hook("before_retention_gate")
+                gate = connection.execute(
+                    text(
+                        f"UPDATE {self._table} SET mutation_epoch = mutation_epoch + 1, updated_at = {self._now} "
+                        "WHERE destination_id = CAST(:destination AS TEXT) AND bundle_key = CAST(:bundle AS TEXT) "
+                        "AND owner = CAST(:run AS TEXT) AND fencing_token = CAST(:token AS BIGINT) "
+                        "RETURNING mutation_epoch"
+                    ),
+                    {
+                        "destination": self.destination_id,
+                        "bundle": bundle_key,
+                        "run": run_id,
+                        "token": fencing_token,
+                    },
+                ).one_or_none()
+                if gate is None:
+                    raise _StalePromotionError
+                connection.execute(
+                    text(
+                        f"DELETE FROM {self._pins_table} WHERE destination_id = CAST(:destination AS TEXT) "
+                        "AND bundle_key = CAST(:bundle AS TEXT) "
+                        f"AND expires_at <= {self._now}"
+                    ),
+                    {
+                        "destination": self.destination_id,
+                        "bundle": bundle_key,
                     },
                 )
-                deleted.append(str(candidate))
+                pinned = {
+                    row[0]
+                    for row in connection.execute(
+                        text(
+                            f"SELECT bundle_id FROM {self._pins_table} "
+                            "WHERE destination_id = CAST(:destination AS TEXT) "
+                            "AND bundle_key = CAST(:bundle AS TEXT) "
+                            f"AND expires_at > {self._now}"
+                        ),
+                        {
+                            "destination": self.destination_id,
+                            "bundle": bundle_key,
+                        },
+                    ).fetchall()
+                }
+                rows = connection.execute(
+                    text(
+                        f"SELECT bundle_id, manifest_json, status, fencing_token, operation_id "
+                        f"FROM {self._bundles_table} "
+                        "WHERE destination_id = CAST(:destination AS TEXT) "
+                        "AND bundle_key = CAST(:bundle AS TEXT) "
+                        "ORDER BY snapshot_seq DESC, created_at DESC"
+                    ),
+                    {
+                        "destination": self.destination_id,
+                        "bundle": bundle_key,
+                    },
+                ).fetchall()
+                latest_promoted = [
+                    row[0] for row in rows if row[2] == "PROMOTED"
+                ][:retain_latest]
+                protected = set(latest_promoted) | pinned
+                if state[0] is not None:
+                    protected.add(state[0])
+                protected_tables: set[tuple[str, str]] = set()
+                for (
+                    candidate,
+                    manifest_json,
+                    _status,
+                    _candidate_token,
+                    operation_id,
+                ) in rows:
+                    if candidate not in protected and operation_id is None:
+                        continue
+                    protected_manifest = (
+                        RemoteBundleManifest.model_validate_json(manifest_json)
+                    )
+                    protected_tables.update(
+                        (member.schema_name, member.table_name)
+                        for member in protected_manifest.members
+                    )
+                for (
+                    candidate,
+                    manifest_json,
+                    status,
+                    candidate_token,
+                    operation_id,
+                ) in rows:
+                    if (
+                        operation_id is not None
+                        or candidate in protected
+                        or (
+                            status == "STAGED"
+                            and int(candidate_token) >= fencing_token
+                        )
+                    ):
+                        continue
+                    manifest = RemoteBundleManifest.model_validate_json(
+                        manifest_json
+                    )
+                    for member in manifest.members:
+                        if (
+                            member.schema_name,
+                            member.table_name,
+                        ) in protected_tables:
+                            continue
+                        table = f'"{member.schema_name}"."{member.table_name}"'
+                        connection.execute(
+                            text(f"DROP TABLE IF EXISTS {table}")
+                        )
+                    connection.execute(
+                        text(
+                            f"DELETE FROM {self._bundles_table} "
+                            "WHERE destination_id = CAST(:destination AS TEXT) "
+                            "AND bundle_key = CAST(:bundle AS TEXT) "
+                            "AND bundle_id = CAST(:bundle_id AS TEXT)"
+                        ),
+                        {
+                            "destination": self.destination_id,
+                            "bundle": bundle_key,
+                            "bundle_id": candidate,
+                        },
+                    )
+                    deleted.append(str(candidate))
+        finally:
+            connection.close()
         return tuple(deleted)
 
     def _observe_operation(
@@ -2333,7 +2517,7 @@ class PostgresPublicationFence:
             destination_id=self.destination_id,
             bundle_key=str(bundle_key),
             state=cast(
-                "Literal['PLANNED', 'STAGING', 'STAGED', 'PROMOTED', 'CLEANING', 'CLEANED']",
+                "Literal['PLANNED', 'STAGING', 'STAGED', 'PROMOTED', 'SUPERSEDED', 'CLEANING', 'CLEANED']",
                 str(state),
             ),
             bundle_id=str(bundle_id),
@@ -2352,6 +2536,28 @@ class PostgresPublicationFence:
         with self.engine.connect() as connection:
             return self._observe_operation(connection, operation_id)
 
+    def _plan_signature_valid(
+        self,
+        plan_json: str,
+        plan_signature: str,
+        plan_key_id: object,
+    ) -> bool:
+        """Verify the canonical signed recovery plan against the key ring."""
+
+        if not isinstance(plan_key_id, str) or not plan_key_id:
+            return False
+        encoded_key = self.public_key_ring.get(plan_key_id)
+        if encoded_key is None:
+            return False
+        try:
+            return _verify_spki_ed25519(
+                base64.b64decode(encoded_key, validate=True),
+                b"dr-platform.recovery-plan.v1\0" + plan_json.encode(),
+                base64.b64decode(plan_signature, validate=True),
+            )
+        except (binascii.Error, ValueError):
+            return False
+
     def _plan_inventory_matches(
         self,
         connection: Connection,
@@ -2360,18 +2566,21 @@ class PostgresPublicationFence:
     ) -> bool:
         row = connection.execute(
             text(
-                f"SELECT bundle_key, plan_json, plan_digest FROM {self._operations_table} "
+                f"SELECT bundle_key, plan_json, plan_digest, plan_signature, plan_key_id FROM {self._operations_table} "
                 "WHERE destination_id = CAST(:destination AS TEXT) AND operation_id = CAST(:operation AS TEXT)"
             ),
             {"destination": self.destination_id, "operation": operation_id},
         ).one_or_none()
         if row is None:
             return False
-        bundle_key, plan_json, stored_digest = row
+        bundle_key, plan_json, stored_digest, plan_signature, plan_key_id = row
         if (
             stored_digest != expected_plan_digest
             or hashlib.sha256(str(plan_json).encode()).hexdigest()
             != stored_digest
+            or not self._plan_signature_valid(
+                str(plan_json), str(plan_signature), plan_key_id
+            )
         ):
             return False
         persisted = tuple(
@@ -2404,27 +2613,60 @@ class PostgresPublicationFence:
             return False
         return planned == persisted
 
+    def _operation_lease_live(
+        self, connection: Connection, operation_id: str
+    ) -> bool:
+        """Report whether the operation's own attempt still holds the gate."""
+
+        return (
+            connection.execute(
+                text(
+                    f"SELECT 1 FROM {self._operations_table} o "
+                    f"JOIN {self._table} s ON s.destination_id = o.destination_id "
+                    "AND s.bundle_key = o.bundle_key "
+                    "WHERE o.destination_id = CAST(:destination AS TEXT) "
+                    "AND o.operation_id = CAST(:operation AS TEXT) "
+                    "AND s.owner = o.attempt_id AND s.fencing_token = o.fencing_token "
+                    f"AND s.lease_expires_at > {self._now}"
+                ),
+                {
+                    "destination": self.destination_id,
+                    "operation": operation_id,
+                },
+            ).one_or_none()
+            is not None
+        )
+
     def preflight_cleanup(
         self, operation_id: str, expected_plan_digest: str
     ) -> CleanupEligibility:
-        observation = self.observe_operation(operation_id)
-        authority_matches = False
-        if observation.state != "ABSENT":
-            with self.engine.connect() as connection:
+        with self.engine.connect() as connection:
+            observation = self._observe_operation(connection, operation_id)
+            authority_matches = False
+            lease_live = False
+            if observation.state != "ABSENT":
                 authority_matches = self._plan_inventory_matches(
                     connection, operation_id, expected_plan_digest
+                )
+                lease_live = self._operation_lease_live(
+                    connection, operation_id
                 )
         if not self.capabilities.operation_cleanup:
             disposition = "UNSUPPORTED"
         elif observation.state == "ABSENT":
             disposition = "NOT_FOUND"
         elif not authority_matches or (
-            observation.state in {"STAGED", "PROMOTED"}
+            observation.state in {"STAGED", "PROMOTED", "SUPERSEDED"}
             and observation.owned_bundle_count != 1
         ):
             disposition = "AUTHORITY_MISMATCH"
         elif observation.state == "CLEANED":
             disposition = "ALREADY_CLEANED"
+        elif (
+            observation.state in {"PLANNED", "STAGING", "STAGED"}
+            and lease_live
+        ):
+            disposition = "BLOCKED_LEASE_HELD"
         elif observation.active_external_pin_ids:
             disposition = "BLOCKED_EXTERNAL_PIN"
         elif observation.current_pointer_relation == "SUCCESSOR":
@@ -2483,6 +2725,55 @@ class PostgresPublicationFence:
                     )
         raise AssertionError("bounded cleanup retry loop exhausted")
 
+    def _repair_cleaned_residual(
+        self,
+        connection: Connection,
+        *,
+        bundle_key: str,
+        operation_id: str,
+        plan_json: str,
+        plan_signature: str,
+        plan_key_id: object,
+        present_members: tuple[str, ...],
+    ) -> Literal["AUTHORITY_MISMATCH", "RETRYABLE_CONFLICT"] | None:
+        """Drop post-tombstone residual planned members under the gate CAS."""
+
+        if not self._plan_signature_valid(
+            plan_json, plan_signature, plan_key_id
+        ):
+            return "AUTHORITY_MISMATCH"
+        gate = connection.execute(
+            text(
+                f"UPDATE {self._table} SET mutation_epoch = mutation_epoch + 1, updated_at = {self._now} "
+                "WHERE destination_id = CAST(:destination AS TEXT) AND bundle_key = CAST(:bundle AS TEXT) "
+                "RETURNING mutation_epoch"
+            ),
+            {"destination": self.destination_id, "bundle": bundle_key},
+        ).one_or_none()
+        if gate is None:
+            return "RETRYABLE_CONFLICT"
+        residual = connection.execute(
+            text(
+                f"SELECT member, schema_name, table_name FROM {self._operation_members_table} "
+                "WHERE destination_id = CAST(:destination AS TEXT) AND bundle_key = CAST(:bundle AS TEXT) "
+                "AND operation_id = CAST(:operation AS TEXT) ORDER BY member"
+            ),
+            {
+                "destination": self.destination_id,
+                "bundle": bundle_key,
+                "operation": operation_id,
+            },
+        ).all()
+        for member, schema_name, table_name in reversed(residual):
+            if str(member) not in present_members:
+                continue
+            connection.execute(
+                text(
+                    f"DROP TABLE IF EXISTS {_quote_identifier(str(schema_name))}.{_quote_identifier(str(table_name))}"
+                )
+            )
+        return None
+
     def _cleanup_operation_once(  # noqa: PLR0911 -- typed terminal outcomes
         self,
         operation_id: str,
@@ -2497,7 +2788,7 @@ class PostgresPublicationFence:
                 operation = connection.execute(
                     text(
                         f"SELECT bundle_key, bundle_id, attempt_id, fencing_token, state, plan_json, plan_digest, cleanup_request_id, "
-                        f"cleanup_result_json FROM {self._operations_table} "
+                        f"cleanup_result_json, plan_signature, plan_key_id FROM {self._operations_table} "
                         "WHERE destination_id = CAST(:destination AS TEXT) AND operation_id = CAST(:operation AS TEXT)"
                     ),
                     {
@@ -2525,13 +2816,41 @@ class PostgresPublicationFence:
                     stored_digest,
                     stored_request,
                     stored_result,
+                    plan_signature,
+                    plan_key_id,
                 ) = operation
                 if state == "CLEANED":
-                    if stored_request == cleanup_request_id and stored_result:
-                        return CleanupResult.model_validate_json(stored_result)
+                    # A durable tombstone replay re-observes the catalog: a
+                    # residual planned member is reported and repaired under
+                    # the same-transaction gate, never echoed away by the
+                    # stored zero result.
                     observation = self._observe_operation(
                         connection, operation_id
                     )
+                    if observation.present_members:
+                        repaired = self._repair_cleaned_residual(
+                            connection,
+                            bundle_key=str(bundle_key),
+                            operation_id=operation_id,
+                            plan_json=str(plan_json),
+                            plan_signature=str(plan_signature),
+                            plan_key_id=plan_key_id,
+                            present_members=observation.present_members,
+                        )
+                        if repaired is not None:
+                            return CleanupResult(
+                                disposition=repaired,
+                                operation_id=operation_id,
+                                cleanup_request_id=cleanup_request_id,
+                                observation=observation,
+                            )
+                        observation = self._observe_operation(
+                            connection, operation_id
+                        )
+                    if stored_request == cleanup_request_id and stored_result:
+                        return CleanupResult.model_validate_json(
+                            stored_result
+                        ).model_copy(update={"observation": observation})
                     return CleanupResult(
                         disposition="ALREADY_CLEANED",
                         operation_id=operation_id,
@@ -2545,6 +2864,9 @@ class PostgresPublicationFence:
                 if (
                     stored_digest != expected_plan_digest
                     or stored_digest != canonical_digest
+                    or not self._plan_signature_valid(
+                        str(plan_json), str(plan_signature), plan_key_id
+                    )
                 ):
                     return CleanupResult(
                         disposition="AUTHORITY_MISMATCH",
@@ -2587,11 +2909,26 @@ class PostgresPublicationFence:
                         cleanup_request_id=cleanup_request_id,
                         observation=observation,
                     )
-                if observation.state in {"STAGED", "PROMOTED"} and (
-                    observation.owned_bundle_count != 1
-                ):
+                if observation.state in {
+                    "STAGED",
+                    "PROMOTED",
+                    "SUPERSEDED",
+                } and (observation.owned_bundle_count != 1):
                     return CleanupResult(
                         disposition="AUTHORITY_MISMATCH",
+                        operation_id=operation_id,
+                        cleanup_request_id=cleanup_request_id,
+                        observation=observation,
+                    )
+                if observation.state in {
+                    "PLANNED",
+                    "STAGING",
+                    "STAGED",
+                } and self._operation_lease_live(connection, operation_id):
+                    # A live attempt lease means the publisher may still
+                    # commit staged effects; cleanup must wait for expiry.
+                    return CleanupResult(
+                        disposition="BLOCKED_LEASE_HELD",
                         operation_id=operation_id,
                         cleanup_request_id=cleanup_request_id,
                         observation=observation,
@@ -2714,18 +3051,22 @@ class PostgresPublicationFence:
                         "operation": operation_id,
                     },
                 )
-                cleanup_observation = self._observe_operation(
-                    connection, operation_id
+                connection.execute(
+                    text(
+                        f"UPDATE {self._operations_table} SET state = 'CLEANED', updated_at = {self._now} "
+                        "WHERE destination_id = CAST(:destination AS TEXT) "
+                        "AND bundle_key = CAST(:bundle AS TEXT) AND operation_id = CAST(:operation AS TEXT)"
+                    ),
+                    {
+                        "destination": self.destination_id,
+                        "bundle": bundle_key,
+                        "operation": operation_id,
+                    },
                 )
-                cleaned_observation = cleanup_observation.model_copy(
-                    update={
-                        "state": "CLEANED",
-                        "current_pointer_relation": "NONE",
-                        "present_members": (),
-                        "owned_pin_ids": (),
-                        "active_external_pin_ids": (),
-                        "owned_bundle_count": 0,
-                    }
+                # The persisted tombstone embeds the actual in-transaction
+                # re-observation after the drops, never a hardcoded zero.
+                cleaned_observation = self._observe_operation(
+                    connection, operation_id
                 )
                 result = CleanupResult(
                     disposition="CLEANED",
@@ -2735,7 +3076,7 @@ class PostgresPublicationFence:
                 )
                 connection.execute(
                     text(
-                        f"UPDATE {self._operations_table} SET state = 'CLEANED', cleanup_result_json = CAST(:result AS TEXT), "
+                        f"UPDATE {self._operations_table} SET cleanup_result_json = CAST(:result AS TEXT), "
                         f"updated_at = {self._now} WHERE destination_id = CAST(:destination AS TEXT) "
                         "AND bundle_key = CAST(:bundle AS TEXT) AND operation_id = CAST(:operation AS TEXT)"
                     ),

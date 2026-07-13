@@ -199,7 +199,12 @@ class DestinationResult(BaseModel):
 
     destination_id: NonEmptyStr
     status: Literal[
-        "PROMOTED", "IDEMPOTENT", "LEASE_HELD", "STALE_PROMOTION", "FAILED"
+        "PROMOTED",
+        "IDEMPOTENT",
+        "SUPERSEDED",
+        "LEASE_HELD",
+        "STALE_PROMOTION",
+        "FAILED",
     ]
     bundle_id: StrictStr | None = None
     fencing_token: NonNegativeInt | None = None

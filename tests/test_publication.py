@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event
@@ -29,6 +29,7 @@ from dr_platform import (
     PublicationReceipt,
     RemoteBundleManifest,
     RemoteBundleMember,
+    RemotePromotionResult,
     SourceCoordinate,
     backfill_local_protected_integrity,
     capture_source_coordinate,
@@ -93,6 +94,7 @@ def _promoted_operation_fixture(
         pg_engine,
         destination_id=f"race-{suffix}",
         table_name=f"race_state_{suffix}",
+        operation_cleanup_enabled=True,
         signer=signer,
         public_key_ring=key_ring,
     )
@@ -209,6 +211,315 @@ def test_cleanup_retries_a_real_serialization_conflict(
     assert result.disposition == "BLOCKED_EXTERNAL_PIN"
 
 
+def _paused_stage_publisher(
+    pg_engine: Engine, suffix: str
+) -> tuple[
+    PostgresPublicationFence,
+    PublicationOperationIdentity,
+    str,
+    Event,
+    Event,
+    Callable[[], str],
+]:
+    """A publisher whose stage transaction pauses before the gate CAS."""
+
+    signer, key_ring = signed_integrity_test_material()
+    before_stage = Event()
+    stage_may_proceed = Event()
+
+    def fault(boundary: str) -> None:
+        if boundary == "before_stage_gate":
+            before_stage.set()
+            assert stage_may_proceed.wait(timeout=10)
+
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"stage-cleanup-{suffix}",
+        table_name=f"stage_cleanup_state_{suffix}",
+        operation_cleanup_enabled=True,
+        signer=signer,
+        public_key_ring=key_ring,
+        fault_hook=fault,
+    )
+    fence.ensure_schema()
+    identity = PublicationOperationIdentity(
+        operation_id=f"stage-cleanup-{suffix}", attempt_id="attempt"
+    )
+    lease = fence.acquire_lease(
+        bundle_key="analysis", run_id="attempt", lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    token = lease.fencing_token
+    table_name = fence.stage_table_name(
+        member="member",
+        run_id="attempt",
+        fencing_token=token,
+        snapshot_seq=1,
+    )
+    plan = RemoteBundleManifest(
+        source_families=("application",),
+        members=(
+            RemoteBundleMember(
+                member="member",
+                table_name=table_name,
+                key_columns=("id",),
+                row_count=0,
+                checksum=_EMPTY_CHECKSUM,
+            ),
+        ),
+    )
+
+    def publish() -> str:
+        return fence.promote(
+            bundle_key="analysis",
+            run_id="attempt",
+            fencing_token=token,
+            snapshot_seq=1,
+            bundle_id=f"bundle-{suffix}",
+            cursors={"member": 1},
+            source_coordinates=(
+                capture_source_coordinate(
+                    pg_engine, source_id="application", snapshot_seq=1
+                ),
+            ),
+            source_families=("application",),
+            stage=lambda connection, _prepared: _empty_candidate_manifest(
+                connection, table_name
+            ),
+            operation_identity=identity,
+            stage_plan=plan,
+        ).disposition
+
+    return fence, identity, table_name, before_stage, stage_may_proceed, publish
+
+
+def test_live_stage_lease_blocks_concurrent_cleanup(
+    pg_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    fence, identity, _table_name, before_stage, stage_may_proceed, publish = (
+        _paused_stage_publisher(pg_engine, suffix)
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        publish_future = executor.submit(publish)
+        assert before_stage.wait(timeout=5)
+        observation = fence.observe_operation(identity.operation_id)
+        assert observation.state == "STAGING"
+        blocked = fence.cleanup_operation(
+            identity.operation_id,
+            "cleanup",
+            str(observation.stage_plan_digest),
+        )
+        assert blocked.disposition == "BLOCKED_LEASE_HELD"
+        assert fence.observe_operation(identity.operation_id).state == (
+            "STAGING"
+        )
+        stage_may_proceed.set()
+        assert publish_future.result(timeout=10) == "PROMOTED"
+    final = fence.observe_operation(identity.operation_id)
+    assert final.state == "PROMOTED"
+    assert final.present_members == ("member",)
+
+
+def test_expired_stage_lease_cannot_resurrect_after_cleanup(
+    pg_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    fence, identity, table_name, before_stage, stage_may_proceed, publish = (
+        _paused_stage_publisher(pg_engine, suffix)
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        publish_future = executor.submit(publish)
+        assert before_stage.wait(timeout=5)
+        with pg_engine.begin() as connection:
+            connection.execute(
+                text(
+                    f'UPDATE "{fence.table_name}" SET lease_expires_at = '
+                    "clock_timestamp() - INTERVAL '1 second' "
+                    "WHERE bundle_key = 'analysis'"
+                )
+            )
+        observation = fence.observe_operation(identity.operation_id)
+        cleaned = fence.cleanup_operation(
+            identity.operation_id,
+            "cleanup",
+            str(observation.stage_plan_digest),
+        )
+        assert cleaned.disposition == "CLEANED"
+        assert cleaned.observation.present_members == ()
+        stage_may_proceed.set()
+        # The publisher's same-transaction gate CAS finds no live lease, so
+        # its pending CREATE TABLE rolls back with the stage transaction.
+        assert publish_future.result(timeout=10) == "STALE_PROMOTION"
+    with pg_engine.connect() as connection:
+        assert (
+            connection.scalar(
+                text("SELECT to_regclass(:name)"), {"name": table_name}
+            )
+            is None
+        )
+    replay = fence.cleanup_operation(
+        identity.operation_id,
+        "cleanup",
+        str(observation.stage_plan_digest),
+    )
+    assert replay.disposition == "CLEANED"
+    assert replay.observation.present_members == ()
+
+
+def test_retention_aborts_when_same_owner_reacquires_before_gate(
+    pg_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"retention-race-{suffix}",
+        table_name=f"retention_race_state_{suffix}",
+        signer=signed_integrity_test_material()[0],
+    )
+    fence.ensure_schema()
+    first = fence.acquire_lease(
+        bundle_key="analysis", run_id="retention", lease_seconds=60
+    )
+    assert first.fencing_token is not None
+    first_token = first.fencing_token
+    before_gate = Event()
+    reacquired = Event()
+
+    def fault(boundary: str) -> None:
+        if boundary == "before_retention_gate":
+            before_gate.set()
+            assert reacquired.wait(timeout=10)
+
+    object.__setattr__(fence, "fault_hook", fault)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        cleanup_future = executor.submit(
+            fence.cleanup_bundles,
+            bundle_key="analysis",
+            run_id="retention",
+            fencing_token=first_token,
+        )
+        assert before_gate.wait(timeout=5)
+        second = fence.acquire_lease(
+            bundle_key="analysis", run_id="retention", lease_seconds=60
+        )
+        assert second.fencing_token == first_token + 1
+        reacquired.set()
+        # The stale token's gate update matches zero rows (or hits a
+        # serialization conflict whose retry re-reads the lost lease), so
+        # retention aborts before any destructive statement.
+        with pytest.raises(_StalePromotionError):
+            cleanup_future.result(timeout=10)
+
+
+def test_equal_snapshot_new_operation_commits_superseded_disposition(
+    pg_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    fence, first_identity, receipt = _promoted_operation_fixture(
+        pg_engine, suffix
+    )
+    second_identity = PublicationOperationIdentity(
+        operation_id=f"superseded-{uuid4().hex}", attempt_id="attempt-b"
+    )
+    lease = fence.acquire_lease(
+        bundle_key="analysis", run_id="attempt-b", lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    token = lease.fencing_token
+    table_name = fence.stage_table_name(
+        member="member",
+        run_id="attempt-b",
+        fencing_token=token,
+        snapshot_seq=1,
+    )
+    plan = RemoteBundleManifest(
+        source_families=("application",),
+        members=(
+            RemoteBundleMember(
+                member="member",
+                table_name=table_name,
+                key_columns=("id",),
+                row_count=0,
+                checksum=_EMPTY_CHECKSUM,
+            ),
+        ),
+    )
+
+    def publish() -> RemotePromotionResult:
+        return fence.promote(
+            bundle_key="analysis",
+            run_id="attempt-b",
+            fencing_token=token,
+            snapshot_seq=1,
+            bundle_id=f"superseded-bundle-{suffix}",
+            cursors={"member": 1},
+            source_coordinates=(
+                capture_source_coordinate(
+                    pg_engine, source_id="application", snapshot_seq=1
+                ),
+            ),
+            source_families=("application",),
+            stage=lambda connection, _prepared: _empty_candidate_manifest(
+                connection, table_name
+            ),
+            operation_identity=second_identity,
+            stage_plan=plan,
+        )
+
+    superseded = publish()
+    assert superseded.disposition == "SUPERSEDED"
+    assert superseded.receipt is None
+    assert superseded.bundle_id == f"superseded-bundle-{suffix}"
+    assert superseded.stage_plan_digest is not None
+    assert superseded.stage_plan_digest != receipt.stage_plan_digest
+
+    observation = fence.observe_operation(second_identity.operation_id)
+    assert observation.state == "SUPERSEDED"
+    assert observation.owned_bundle_count == 1
+    assert observation.present_members == ("member",)
+    with pg_engine.connect() as connection:
+        pointer_bundle, published_operation = connection.execute(
+            text(
+                f'SELECT bundle_id, published_operation_id FROM "{fence.table_name}" '
+                "WHERE bundle_key = 'analysis'"
+            )
+        ).one()
+    assert pointer_bundle == receipt.bundle_id
+    assert published_operation == first_identity.operation_id
+
+    replay = publish()
+    assert replay.disposition == "SUPERSEDED"
+    assert replay.receipt is None
+    assert replay.stage_plan_digest == superseded.stage_plan_digest
+
+    cleaned = fence.cleanup_operation(
+        second_identity.operation_id,
+        "superseded-cleanup",
+        str(superseded.stage_plan_digest),
+    )
+    assert cleaned.disposition == "CLEANED"
+    with pg_engine.connect() as connection:
+        assert (
+            connection.scalar(
+                text("SELECT to_regclass(:name)"), {"name": table_name}
+            )
+            is None
+        )
+        pointer_bundle, published_operation = connection.execute(
+            text(
+                f'SELECT bundle_id, published_operation_id FROM "{fence.table_name}" '
+                "WHERE bundle_key = 'analysis'"
+            )
+        ).one()
+    assert pointer_bundle == receipt.bundle_id
+    assert published_operation == first_identity.operation_id
+    survivor = fence.observe_operation(first_identity.operation_id)
+    assert survivor.state == "PROMOTED"
+    assert survivor.current_pointer_relation == "CURRENT"
+    assert survivor.present_members == ("member",)
+
+
 def test_two_connection_successor_cleanup_race_preserves_winner(
     pg_engine: Engine,
 ) -> None:
@@ -274,6 +585,7 @@ def test_publication_operation_persists_receipt_and_cleans_exact_inventory(
         pg_engine,
         destination_id=f"operation-{suffix}",
         table_name=f"operation_state_{suffix}",
+        operation_cleanup_enabled=True,
         signer=signer,
         public_key_ring=key_ring,
     )
@@ -446,11 +758,14 @@ def test_publication_operation_crash_boundaries_replay_without_orphan(
             armed = False
             raise RuntimeError(boundary)
 
+    signer, key_ring = signed_integrity_test_material()
     fence = PostgresPublicationFence(
         pg_engine,
         destination_id=f"crash-{suffix}",
         table_name=f"crash_state_{suffix}",
-        signer=signed_integrity_test_material()[0],
+        operation_cleanup_enabled=True,
+        signer=signer,
+        public_key_ring=key_ring,
         fault_hook=fault,
     )
     fence.ensure_schema()
@@ -507,6 +822,23 @@ def test_publication_operation_crash_boundaries_replay_without_orphan(
         )
     observation = fence.observe_operation(identity.operation_id)
     assert observation.state == expected_state
+    if expected_state != "PROMOTED":
+        # The crashed attempt's lease is still live, so recovery cleanup is
+        # blocked until the lease expires.
+        blocked = fence.cleanup_operation(
+            identity.operation_id,
+            "cleanup",
+            str(observation.stage_plan_digest),
+        )
+        assert blocked.disposition == "BLOCKED_LEASE_HELD"
+        with pg_engine.begin() as connection:
+            connection.execute(
+                text(
+                    f'UPDATE "{fence.table_name}" SET lease_expires_at = '
+                    "clock_timestamp() - INTERVAL '1 second' "
+                    "WHERE bundle_key = 'analysis'"
+                )
+            )
     cleaned = fence.cleanup_operation(
         identity.operation_id, "cleanup", str(observation.stage_plan_digest)
     )
@@ -534,11 +866,14 @@ def test_cleanup_commit_fault_replays_durable_tombstone(
             cleanup_fault = False
             raise RuntimeError(boundary)
 
+    signer, key_ring = signed_integrity_test_material()
     fence = PostgresPublicationFence(
         pg_engine,
         destination_id=f"cleanup-crash-{suffix}",
         table_name=f"cleanup_crash_state_{suffix}",
-        signer=signed_integrity_test_material()[0],
+        operation_cleanup_enabled=True,
+        signer=signer,
+        public_key_ring=key_ring,
         fault_hook=fault,
     )
     fence.ensure_schema()
@@ -598,29 +933,74 @@ def test_cleanup_commit_fault_replays_durable_tombstone(
     assert replay.observation.state == "CLEANED"
 
 
-def test_motherduck_operation_cleanup_is_explicitly_capability_disabled(
+def test_operation_cleanup_capability_is_fail_closed(
     pg_engine: Engine,
 ) -> None:
-    fence = PostgresPublicationFence(
+    suffix = uuid4().hex[:12]
+    # A MotherDuck endpoint can never opt in, even explicitly.
+    motherduck = PostgresPublicationFence(
         pg_engine,
         destination_id="motherduck-disabled",
-        table_name=f"motherduck_disabled_{uuid4().hex[:12]}",
+        table_name=f"motherduck_disabled_{suffix}",
         kind="motherduck",
+        operation_cleanup_enabled=True,
     )
-    assert not fence.capabilities.operation_cleanup
+    assert not motherduck.capabilities.operation_cleanup
     with pytest.raises(RuntimeError, match="capability proof"):
-        fence.cleanup_operation("operation", "request", "digest")
+        motherduck.cleanup_operation("operation", "request", "digest")
+    # An omitted enablement flag leaves even a Neon endpoint fail-closed, so
+    # a missed or mistyped backend label cannot route destructive cleanup.
+    default_neon = PostgresPublicationFence(
+        pg_engine,
+        destination_id="neon-default-disabled",
+        table_name=f"neon_default_disabled_{suffix}",
+    )
+    assert not default_neon.capabilities.operation_cleanup
+    with pytest.raises(RuntimeError, match="operation_cleanup_enabled"):
+        default_neon.cleanup_operation("operation", "request", "digest")
+
+
+def test_cleanup_rejects_a_plan_signed_by_an_unknown_key(
+    pg_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    fence, identity, receipt = _promoted_operation_fixture(pg_engine, suffix)
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                f'UPDATE "{fence.table_name}_operations" '
+                "SET plan_key_id = 'unknown-key' "
+                "WHERE operation_id = :operation"
+            ),
+            {"operation": identity.operation_id},
+        )
+    assert (
+        fence.preflight_cleanup(
+            identity.operation_id, receipt.stage_plan_digest
+        ).disposition
+        == "AUTHORITY_MISMATCH"
+    )
+    result = fence.cleanup_operation(
+        identity.operation_id, "cleanup", receipt.stage_plan_digest
+    )
+    assert result.disposition == "AUTHORITY_MISMATCH"
+    assert fence.observe_operation(identity.operation_id).present_members == (
+        "member",
+    )
 
 
 def test_operation_cleanup_blocks_a_newer_current_pointer(
     pg_engine: Engine,
 ) -> None:
     suffix = uuid4().hex[:12]
+    signer, key_ring = signed_integrity_test_material()
     fence = PostgresPublicationFence(
         pg_engine,
         destination_id=f"successor-{suffix}",
         table_name=f"successor_state_{suffix}",
-        signer=signed_integrity_test_material()[0],
+        operation_cleanup_enabled=True,
+        signer=signer,
+        public_key_ring=key_ring,
     )
     fence.ensure_schema()
     identity = PublicationOperationIdentity(
@@ -731,7 +1111,10 @@ def test_ensure_schema_additively_migrates_legacy_rows_fail_closed(
             {"destination": destination},
         )
     fence = PostgresPublicationFence(
-        pg_engine, destination_id=destination, table_name=table_name
+        pg_engine,
+        destination_id=destination,
+        table_name=table_name,
+        operation_cleanup_enabled=True,
     )
     fence.ensure_schema()
     with pg_engine.connect() as connection:

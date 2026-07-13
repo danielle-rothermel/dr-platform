@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 
+from sqlalchemy import create_engine
+
 import dr_platform
 from dr_platform import (
     CleanupEligibility,
@@ -99,9 +101,61 @@ def test_fault_boundaries_are_named_in_platform_protocol() -> None:
     source = inspect.getsource(PostgresPublicationFence)
     for boundary in (
         "after_plan_commit",
+        "before_stage_gate",
         "after_each_stage_member",
         "after_stage_commit",
         "after_promotion_commit",
+        "before_cleanup_gate",
         "after_cleanup_commit",
+        "before_retention_gate",
     ):
         assert boundary in source
+
+
+def test_operation_cleanup_capability_defaults_fail_closed() -> None:
+    engine = create_engine("postgresql+psycopg:///contract_never_connected")
+    default_fence = PostgresPublicationFence(
+        engine, destination_id="contract"
+    )
+    assert default_fence.capabilities.operation_cleanup is False
+    assert default_fence.capabilities.reason is not None
+    enabled_neon = PostgresPublicationFence(
+        engine,
+        destination_id="contract",
+        kind="neon",
+        operation_cleanup_enabled=True,
+    )
+    assert enabled_neon.capabilities.operation_cleanup is True
+    motherduck = PostgresPublicationFence(
+        engine,
+        destination_id="contract",
+        kind="motherduck",
+        operation_cleanup_enabled=True,
+    )
+    assert motherduck.capabilities.operation_cleanup is False
+    assert motherduck.capabilities.reason is not None
+
+
+def test_recovery_boundaries_verify_the_signed_plan_with_key_identity() -> (
+    None
+):
+    ensure_schema_source = inspect.getsource(
+        PostgresPublicationFence.ensure_schema
+    )
+    assert "plan_key_id" in ensure_schema_source
+    for boundary in (
+        PostgresPublicationFence.prepare_stage,
+        PostgresPublicationFence._plan_inventory_matches,
+        PostgresPublicationFence._cleanup_operation_once,
+        PostgresPublicationFence._repair_cleaned_residual,
+    ):
+        assert "_plan_signature_valid" in inspect.getsource(boundary)
+
+
+def test_effect_transactions_open_with_a_gate_compare_and_set() -> None:
+    promote_source = inspect.getsource(PostgresPublicationFence.promote)
+    retention_source = inspect.getsource(
+        PostgresPublicationFence._cleanup_bundles_once
+    )
+    for source in (promote_source, retention_source):
+        assert "RETURNING mutation_epoch" in source
