@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-from typing import Literal
 
 from sqlalchemy import create_engine
 
@@ -132,21 +131,26 @@ def test_fault_boundaries_are_named_in_platform_protocol() -> None:
 
 def test_operation_cleanup_capability_defaults_fail_closed() -> None:
     engine = create_engine("postgresql+psycopg:///contract_never_connected")
-    kinds: tuple[Literal["motherduck", "neon"], ...] = ("neon", "motherduck")
-    for kind in kinds:
-        default_fence = PostgresPublicationFence(
-            engine, destination_id="contract", kind=kind
-        )
-        assert default_fence.capabilities.operation_cleanup is False
-        assert default_fence.capabilities.reason is not None
-        enabled = PostgresPublicationFence(
-            engine,
-            destination_id="contract",
-            kind=kind,
-            operation_cleanup_enabled=True,
-        )
-        assert enabled.capabilities.operation_cleanup is True
-        assert enabled.capabilities.reason is None
+    default_fence = PostgresPublicationFence(
+        engine, destination_id="contract"
+    )
+    assert default_fence.capabilities.operation_cleanup is False
+    assert default_fence.capabilities.reason is not None
+    enabled_neon = PostgresPublicationFence(
+        engine,
+        destination_id="contract",
+        kind="neon",
+        operation_cleanup_enabled=True,
+    )
+    assert enabled_neon.capabilities.operation_cleanup is True
+    motherduck = PostgresPublicationFence(
+        engine,
+        destination_id="contract",
+        kind="motherduck",
+        operation_cleanup_enabled=True,
+    )
+    assert motherduck.capabilities.operation_cleanup is False
+    assert motherduck.capabilities.reason is not None
 
 
 def test_recovery_boundaries_verify_the_signed_plan_with_key_identity() -> (

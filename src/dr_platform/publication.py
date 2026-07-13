@@ -604,9 +604,8 @@ class PostgresPublicationFence:
     table_name: str = "dr_platform_publication_state"
     kind: Literal["motherduck", "neon"] = "neon"
     # Destructive operation cleanup is an explicit positive capability, not a
-    # backend-label inference: only construction sites that opt in may execute
-    # it, so an omitted flag stays fail-closed and a mistyped label fails at
-    # construction. Both backends carry a live fault-matrix cleanup proof.
+    # backend-label inference: only Neon construction sites that opt in may
+    # execute it, so an omitted or mistyped label stays fail-closed.
     operation_cleanup_enabled: bool = False
     signer: BundleIntegritySigner | None = None
     # Readers receive a replaceable public-only ring. Rotation is an atomic
@@ -653,12 +652,16 @@ class PostgresPublicationFence:
 
     @property
     def capabilities(self) -> PublicationCapabilities:
-        enabled = self.operation_cleanup_enabled
+        enabled = self.kind == "neon" and self.operation_cleanup_enabled
+        if enabled:
+            reason = None
+        elif self.kind == "neon":
+            reason = "operation cleanup requires explicit operation_cleanup_enabled=True"
+        else:
+            reason = "MotherDuck operation cleanup requires endpoint capability proof"
         return PublicationCapabilities(
             operation_cleanup=enabled,
-            reason=None
-            if enabled
-            else "operation cleanup requires explicit operation_cleanup_enabled=True",
+            reason=reason,
         )
 
     @property

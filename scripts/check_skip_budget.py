@@ -1,8 +1,8 @@
 """Enforce the hosted-CI pytest skip budget from a junit XML report.
 
-Hosted CI must exercise the real PostgreSQL behavior suite; the only tests
-allowed to skip are the explicitly credential-gated MotherDuck capability
-tests. Any other skip means the run silently lost its evidence.
+Hosted CI must exercise the real PostgreSQL behavior suite; the only test
+allowed to skip is the explicitly credential-gated MotherDuck capability
+test. Any other skip means the run silently lost its evidence.
 """
 # The XML being parsed is pytest's own junit report, not untrusted input.
 # ruff: noqa: ICN001, S314, TC003
@@ -17,11 +17,7 @@ from xml.etree import ElementTree
 import typer
 
 ALLOWED_SKIPS = frozenset(
-    {
-        "test_motherduck_fence_rejects_stale_stage_and_uses_returning",
-        "test_motherduck_operation_cleanup_proves_analysis_lifecycle",
-        "test_motherduck_operation_cleanup_recovers_every_fault_boundary",
-    }
+    {"test_motherduck_fence_rejects_stale_stage_and_uses_returning"}
 )
 
 app = typer.Typer(add_completion=False)
