@@ -53,6 +53,17 @@ DEFAULT_MISSING_REQUIRED_OBSERVATIONS = 3
 MAX_EXACT_WORKFLOW_MATCHES = 2
 
 
+def _system_database_url(engine: Engine) -> str:
+    """Return the DBOS URL without leaking it through diagnostics."""
+    configured = os.environ.get(DBOS_SYSTEM_DATABASE_URL_ENV)
+    if configured:
+        return configured
+    # `str(URL)` deliberately masks credentials for display. DBOS consumes this
+    # value as a connection URL, so use SQLAlchemy's explicit runtime rendering
+    # only at this non-logging boundary.
+    return engine.url.render_as_string(hide_password=False)
+
+
 class ReconciliationObservationDisposition(StrEnum):
     ACTIVE = "active"
     SUCCEEDED = "succeeded"
@@ -379,9 +390,7 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
     selected = options or ReconcileOptions()
     if reader is None or queue_lookup is None:
         owned_client: DBOSClient | None = DBOSClient(
-            system_database_url=(
-                os.environ.get(DBOS_SYSTEM_DATABASE_URL_ENV) or str(engine.url)
-            )
+            system_database_url=_system_database_url(engine)
         )
     else:
         owned_client = None

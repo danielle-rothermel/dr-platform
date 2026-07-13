@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from dbos import DBOSClient
-from sqlalchemy import Engine
+from sqlalchemy import Engine, create_engine
 
 from dr_platform.dbos_config import DbosWorkflowStatus
 from dr_platform.reconciliation import ReconciliationPersistenceResult
@@ -20,6 +20,7 @@ from dr_platform.reconciliation_runtime import (
     ReconciliationObservation,
     ReconciliationObservationDisposition,
     WorkflowMetadataDisposition,
+    _system_database_url,
     reconcile,
 )
 from dr_platform.records import FailureSnapshot
@@ -78,6 +79,18 @@ def test_reconcile_options_match_frozen_missing_defaults() -> None:
 
     assert options.missing_grace_seconds == 60
     assert options.missing_required_observations == 3
+
+
+def test_system_database_url_preserves_password_for_dbos_without_logging_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("DBOS_SYSTEM_DATABASE_URL", raising=False)
+    engine = create_engine("postgresql+psycopg://dbos_user:dbos_password@db.example/dbos")
+
+    assert _system_database_url(engine) == (
+        "postgresql+psycopg://dbos_user:dbos_password@db.example/dbos"
+    )
+    assert "dbos_password" not in caplog.text
 
 
 @pytest.mark.parametrize(
