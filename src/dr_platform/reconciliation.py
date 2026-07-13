@@ -395,6 +395,7 @@ def load_reconciliation_page(
     *,
     page_size: int,
     schema: PlatformSchema | None = None,
+    operation_key: str | None = None,
 ) -> tuple[ReconciliationCandidate, ...]:
     """Load one scheduling-ordered page of actionable current Attempts."""
     return _load_reconciliation_candidates(
@@ -402,6 +403,7 @@ def load_reconciliation_page(
         page_size=page_size,
         schema=schema,
         missing_only=False,
+        operation_key=operation_key,
     )
 
 
@@ -410,6 +412,7 @@ def load_missing_reobservation_page(
     *,
     page_size: int,
     schema: PlatformSchema | None = None,
+    operation_key: str | None = None,
 ) -> tuple[ReconciliationCandidate, ...]:
     """Load lower-priority terminal MISSING candidates for A2 rechecks."""
     return _load_reconciliation_candidates(
@@ -417,6 +420,7 @@ def load_missing_reobservation_page(
         page_size=page_size,
         schema=schema,
         missing_only=True,
+        operation_key=operation_key,
     )
 
 
@@ -426,6 +430,7 @@ def _load_reconciliation_candidates(
     page_size: int,
     schema: PlatformSchema | None,
     missing_only: bool,
+    operation_key: str | None,
 ) -> tuple[ReconciliationCandidate, ...]:
     if page_size <= 0:
         raise ValueError("page_size must be positive")
@@ -503,6 +508,10 @@ def _load_reconciliation_candidates(
             )
         )
     )
+    if operation_key is not None:
+        statement = statement.where(
+            selected_schema.items.c.operation_key == operation_key
+        )
     if missing_only:
         statement = statement.outerjoin(
             selected_schema.missing_reobservations,

@@ -137,6 +137,7 @@ class ReconcileOptions(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     page_size: PositiveInt = DEFAULT_RECONCILIATION_PAGE_SIZE
+    operation_key: NonEmptyStr | None = None
     claim_lease_seconds: PositiveInt = DEFAULT_CLAIM_LEASE_SECONDS
     missing_grace_seconds: PositiveInt = DEFAULT_MISSING_GRACE_SECONDS
     missing_required_observations: PositiveInt = (
@@ -174,6 +175,7 @@ class LifecycleObservationReader(Protocol):
         self,
         *,
         workflow_id: str,
+        limit: PositiveInt = 100,
     ) -> tuple[DbosStepObservation, ...]: ...
 
 
@@ -248,6 +250,7 @@ class DbosLifecycleReader:
         self,
         *,
         workflow_id: str,
+        limit: PositiveInt = 100,
     ) -> tuple[DbosStepObservation, ...]:
         steps = SystemSchema.operation_outputs
         columns = (
@@ -262,6 +265,7 @@ class DbosLifecycleReader:
             select(*columns)
             .where(steps.c.workflow_uuid == workflow_id)
             .order_by(steps.c.function_id)
+            .limit(limit)
         )
         with self._client._sys_db.engine.connect() as connection:
             rows = connection.execute(statement).mappings()
@@ -294,6 +298,7 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
     from dr_platform.claims import ClaimPageOptions  # noqa: PLC0415
     from dr_platform.enqueue_runtime import (  # noqa: PLC0415
         DbosWorkflowObserver,
+        EnqueuePageResult,
         enqueue_pending_page,
         enqueue_replacement_page,
         recover_call_started_page,
@@ -337,17 +342,21 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
                 schema=schema,
                 limit=selected.page_size,
             )
-        recovery = recover_call_started_page(
-            engine,
-            resolver=resolver,
-            queue_lookup=selected_queue_lookup,
-            options=ClaimPageOptions(
-                page_size=selected.page_size,
-                lease_seconds=selected.claim_lease_seconds,
-            ),
-            schema=schema,
-            adapter=enqueue_adapter,
-            observer=recovery_observer or DbosWorkflowObserver(),
+        recovery = (
+            EnqueuePageResult(items=())
+            if selected.operation_key is not None
+            else recover_call_started_page(
+                engine,
+                resolver=resolver,
+                queue_lookup=selected_queue_lookup,
+                options=ClaimPageOptions(
+                    page_size=selected.page_size,
+                    lease_seconds=selected.claim_lease_seconds,
+                ),
+                schema=schema,
+                adapter=enqueue_adapter,
+                observer=recovery_observer or DbosWorkflowObserver(),
+            )
         )
         remaining = selected.page_size - len(recovery.items)
         actionable = (
@@ -355,6 +364,7 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
                 engine,
                 page_size=remaining,
                 schema=schema,
+                operation_key=selected.operation_key,
             )
             if remaining > 0
             else ()
@@ -365,6 +375,7 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
                 engine,
                 page_size=remaining,
                 schema=schema,
+                operation_key=selected.operation_key,
             )
             if remaining > 0
             else ()
@@ -386,7 +397,7 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
         remaining -= len(missing)
         replacement_count = 0
         pending_count = 0
-        if remaining > 0:
+        if remaining > 0 and selected.operation_key is None:
             common = {
                 "resolver": resolver,
                 "queue_lookup": selected_queue_lookup,
