@@ -15,41 +15,39 @@ import dr_platform
 EXPECTED_ENUM_VALUES: dict[str, frozenset[str]] = {
     "OperationStatus": frozenset(
         {
-        "registering",
-        "enqueuing",
-        "running",
-        "cancelling",
-        "succeeded",
-        "partial",
-        "failed",
-        "cancelled",
+            "registering",
+            "enqueuing",
+            "running",
+            "cancelling",
+            "succeeded",
+            "partial",
+            "failed",
+            "cancelled",
         }
     ),
     "ItemInsertStatus": frozenset({"inserted", "already_present"}),
     "AttemptEnqueueState": frozenset(
         {
-        "pending",
-        "claiming",
-        "enqueued",
-        "workflow_already_present",
-        "enqueue_error",
+            "pending",
+            "claiming",
+            "enqueued",
+            "workflow_already_present",
+            "enqueue_error",
         }
     ),
     "AttemptExecutionState": frozenset(
         {
-        "not_started",
-        "active",
-        "succeeded",
-        "error",
-        "recovery_exhausted",
-        "cancel_requested",
-        "cancelled",
-        "missing",
+            "not_started",
+            "active",
+            "succeeded",
+            "error",
+            "recovery_exhausted",
+            "cancel_requested",
+            "cancelled",
+            "missing",
         }
     ),
-    "RetryDisposition": frozenset(
-        {"retryable", "permanent", "exhausted"}
-    ),
+    "RetryDisposition": frozenset({"retryable", "permanent", "exhausted"}),
     "ServiceClass": frozenset({"urgent", "standard", "backfill"}),
 }
 
@@ -136,6 +134,17 @@ PERSISTED_RECORD_FIELDS: dict[str, frozenset[str]] = {
             "claim_id",
             "workflow_id",
             "reason",
+            "cancel_disposition",
+            "change_seq",
+        }
+    ),
+    "EnqueueCompensationHazardRecord": frozenset(
+        {
+            "item_id",
+            "attempt",
+            "claim_id",
+            "hazard_seq",
+            "workflow_id",
             "cancel_disposition",
             "change_seq",
         }

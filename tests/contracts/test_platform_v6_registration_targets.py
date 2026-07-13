@@ -43,6 +43,7 @@ from dr_platform.submission import (
     RegistrationItem,
     RegistrationItemResult,
     RegistrationLeaseHeldError,
+    RegistrationPageContext,
     RegistrationResult,
     SubmitOptions,
     SubmitResult,
@@ -252,6 +253,7 @@ def _successful_hook(
     *,
     operation_key: str,
     items: tuple[RegistrationItem, ...],
+    page: RegistrationPageContext,
 ) -> RegistrationResult:
     del connection, operation_key
     return RegistrationResult(
@@ -614,6 +616,7 @@ def test_new_registration_and_exact_replay_apply_each_hook_page_once(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         del connection, operation_key
         hook_pages.append(tuple(item.item_key for item in items))
@@ -643,6 +646,66 @@ def test_new_registration_and_exact_replay_apply_each_hook_page_once(
     assert first.registration_cursor == 2
     assert first.status is OperationStatus.ENQUEUEING
     assert hook_pages == [("item-1", "item-2"), ("item-3",)]
+
+
+def test_final_page_hook_context_commits_with_completion_cas(
+    pg_engine: Engine,
+) -> None:
+    schema = _upgrade_scratch_schema(pg_engine)
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE accepted_manifest_relationship "
+                "(operation_key TEXT PRIMARY KEY, "
+                "manifest_digest TEXT NOT NULL)"
+            )
+        )
+
+    def relationship_hook(
+        connection: Connection,
+        *,
+        operation_key: str,
+        items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
+    ) -> RegistrationResult:
+        if page.is_final_page:
+            connection.execute(
+                text(
+                    "INSERT INTO accepted_manifest_relationship "
+                    "(operation_key, manifest_digest) VALUES "
+                    "(:operation_key, :manifest_digest)"
+                ),
+                {
+                    "operation_key": operation_key,
+                    "manifest_digest": page.manifest_digest,
+                },
+            )
+        return _successful_hook_result(items)
+
+    target = _registration_target(registration_hook=relationship_hook)
+    source = _source("item-1", "item-2", "item-3")
+    manifest = _prepare_registration(source=source, target=target)
+    submit(
+        manifest,
+        source,
+        engine=pg_engine,
+        resolver=_registry(target),
+        schema=schema,
+    )
+
+    with pg_engine.connect() as connection:
+        operation = (
+            connection.execute(select(schema.operations)).mappings().one()
+        )
+        relationship = connection.execute(
+            text(
+                "SELECT operation_key, manifest_digest "
+                "FROM accepted_manifest_relationship"
+            )
+        ).one()
+    assert operation["registration_completed_at"] is not None
+    assert operation["registration_cursor"] == len(manifest.pages)
+    assert relationship == (manifest.operation_key, manifest.manifest_digest)
     with pg_engine.connect() as connection:
         assert (
             connection.scalar(select(func.count()).select_from(schema.items))
@@ -700,6 +763,7 @@ def test_changed_replay_conflicts_before_hook(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         nonlocal hook_calls
         del connection, operation_key
@@ -743,6 +807,7 @@ def test_empty_manifest_is_failed_without_invoking_hook(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         del connection, operation_key, items
         raise AssertionError("empty registration must not invoke its hook")
@@ -780,6 +845,7 @@ def test_hook_accounting_conflict_rolls_back_the_complete_page(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         del connection, operation_key
         return RegistrationResult(
@@ -831,6 +897,7 @@ def test_hook_already_present_accounting_commits_idempotently(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         del connection, operation_key
         return RegistrationResult(
@@ -870,6 +937,7 @@ def test_registration_cursor_cas_rejects_authority_lost_during_hook(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         # A legitimate hook cannot mutate Platform rows. This adversarial
         # mutation models authority changing between the row check and CAS
@@ -926,6 +994,7 @@ def test_live_lease_blocks_competing_submit_and_abandonment(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         del connection, operation_key, items
         raise RuntimeError("simulated registrar crash")
@@ -973,6 +1042,7 @@ def test_expired_lease_resumes_after_a_committed_page(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         nonlocal hook_call_count
         del connection, operation_key
@@ -1006,6 +1076,7 @@ def test_expired_lease_resumes_after_a_committed_page(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         del connection, operation_key
         resumed_pages.append(tuple(item.item_key for item in items))
@@ -1046,6 +1117,7 @@ def test_abandonment_after_expiry_is_sticky_and_preserves_committed_rows(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         nonlocal hook_call_count
         del connection, operation_key
@@ -1368,6 +1440,7 @@ def test_hook_nested_input_mutation_rolls_back_domain_and_kernel_rows(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         del operation_key
         connection.execute(
@@ -1615,6 +1688,7 @@ def test_hook_expired_lease_fails_fresh_clock_cas_and_rolls_back(
         *,
         operation_key: str,
         items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
     ) -> RegistrationResult:
         connection.execute(
             text(

@@ -331,6 +331,7 @@ def test_reconcile_runs_recovery_then_one_bounded_observation_page(
         del args
         events.append("recover")
         assert cast("Any", kwargs["options"]).page_size == 7
+        assert kwargs["operation_key"] == "operation"
         return cast(
             "EnqueuePageResult",
             SimpleNamespace(items=(object(), object())),
@@ -340,12 +341,14 @@ def test_reconcile_runs_recovery_then_one_bounded_observation_page(
         del args
         events.append("load")
         assert kwargs["page_size"] == 5
+        assert kwargs["operation_key"] == "operation"
         return (object(), object())
 
     def load_missing(*args: object, **kwargs: object) -> Any:
         del args
         events.append("load-missing")
         assert kwargs["page_size"] == 3
+        assert kwargs["operation_key"] == "operation"
         return (object(),)
 
     def observe(*args: object, **kwargs: object) -> dict[str, object]:
@@ -378,6 +381,7 @@ def test_reconcile_runs_recovery_then_one_bounded_observation_page(
         del args
         events.append("replace")
         assert cast("Any", kwargs["options"]).page_size == 2
+        assert kwargs["operation_key"] == "operation"
         return cast(
             "EnqueuePageResult",
             SimpleNamespace(items=(object(),)),
@@ -387,6 +391,7 @@ def test_reconcile_runs_recovery_then_one_bounded_observation_page(
         del args
         events.append("enqueue")
         assert cast("Any", kwargs["options"]).page_size == 1
+        assert kwargs["operation_key"] == "operation"
         return cast("EnqueuePageResult", SimpleNamespace(items=(object(),)))
 
     monkeypatch.setattr(enqueue_module, "recover_call_started_page", recover)
@@ -411,6 +416,7 @@ def test_reconcile_runs_recovery_then_one_bounded_observation_page(
         queue_lookup=cast("QueueLookup", object()),
         options=ReconcileOptions(
             page_size=7,
+            operation_key="operation",
             missing_grace_seconds=11,
             missing_required_observations=4,
         ),

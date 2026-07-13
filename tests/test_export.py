@@ -11,6 +11,7 @@ import duckdb
 import pytest
 from sqlalchemy import (
     Column,
+    Connection,
     Engine,
     Integer,
     MetaData,
@@ -27,11 +28,17 @@ from dr_platform import (
     upgrade_platform_schema,
 )
 from dr_platform.export import (
+    ApplicationSnapshot,
     ProjectionSpec,
     _acquire_lease,
     _create_destination_tables,
     _release_lease,
     _stage_and_promote,
+    capture_dbos_publication_telemetry,
+)
+from dr_platform.publication import (
+    PostgresPublicationFence,
+    RemotePromotionResult,
 )
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
 from tests.contracts.test_platform_v6_cancellation import _register_operation
@@ -56,7 +63,9 @@ def test_empty_kernel_export_promotes_and_replays(
         "platform_enqueue_claims",
         "platform_next_attempt_requests",
         "platform_enqueue_compensations",
+        "platform_enqueue_compensation_hazards",
         "platform_throttle_state",
+        "platform_missing_reobservations",
     }
 
     replay = export(
@@ -70,6 +79,256 @@ def test_empty_kernel_export_promotes_and_replays(
             "SELECT committed_snapshot_seq FROM __dr_platform_export_state"
         ).fetchone()
     assert pointer == (replay.snapshot_seq,)
+
+
+def test_projection_full_rebuild_contract_and_dbos_telemetry_are_frozen() -> (
+    None
+):
+    def rebuild(
+        connection: Connection, snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, str], ...]:
+        del connection, snapshot
+        return ()
+
+    spec = ProjectionSpec(
+        member="projection",
+        columns=("id",),
+        unique_key=("id",),
+        full_rebuild_builder=rebuild,
+    )
+    assert spec.full_rebuild_builder is rebuild
+    captured: list[dict[str, str | int | float | bool]] = []
+    capture_dbos_publication_telemetry(
+        lambda attributes: captured.append(dict(attributes)),
+        destination_id="postgres-reporting",
+        disposition="PROMOTED",
+        snapshot_seq=7,
+    )
+    assert captured == [
+        {
+            "platform.publication.destination_id": "postgres-reporting",
+            "platform.publication.disposition": "PROMOTED",
+            "platform.publication.snapshot_seq": 7,
+        }
+    ]
+
+
+def test_application_projection_bundle_builds_one_snapshot(
+    pg_engine: Engine, tmp_path
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE application_roots (id TEXT PRIMARY KEY)")
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE application_children "
+                "(id TEXT PRIMARY KEY, root_id TEXT NOT NULL)"
+            )
+        )
+        connection.execute(
+            text("INSERT INTO application_roots VALUES ('root')")
+        )
+        connection.execute(
+            text("INSERT INTO application_children VALUES ('child', 'root')")
+        )
+
+    snapshots: list[int] = []
+
+    def roots(
+        connection: Connection, snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, str], ...]:
+        snapshots.append(snapshot.snapshot_seq)
+        return tuple(
+            {"id": row["id"]}
+            for row in connection.execute(
+                text("SELECT id FROM application_roots")
+            ).mappings()
+        )
+
+    def children(
+        connection: Connection, snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, str], ...]:
+        snapshots.append(snapshot.snapshot_seq)
+        return tuple(
+            {"id": row["id"], "root_id": row["root_id"]}
+            for row in connection.execute(
+                text("SELECT id, root_id FROM application_children")
+            ).mappings()
+        )
+
+    database = tmp_path / "application.duckdb"
+    result = export(
+        pg_engine,
+        ExportOptions(
+            destination_path=str(database),
+            bundle_key="application-fixture",
+            full_rebuild=True,
+            projections=(
+                ProjectionSpec(
+                    member="roots",
+                    columns=("id",),
+                    unique_key=("id",),
+                    full_rebuild_builder=roots,
+                ),
+                ProjectionSpec(
+                    member="children",
+                    columns=("id", "root_id"),
+                    unique_key=("id",),
+                    references=(("root_id", "roots", "id"),),
+                    full_rebuild_builder=children,
+                ),
+            ),
+        ),
+    )
+
+    assert result.destinations[0].status == "PROMOTED", result
+    assert snapshots == [result.snapshot_seq, result.snapshot_seq]
+    assert dict(result.member_counts) == {"roots": 1, "children": 1}
+    with duckdb.connect(str(database), read_only=True) as destination:
+        members = destination.execute(
+            "SELECT member FROM __dr_platform_export_members "
+            "WHERE bundle_key = 'application-fixture' ORDER BY member"
+        ).fetchall()
+    assert members == [("children",), ("roots",)]
+
+
+def test_application_bundle_promotes_and_resolves_remote_fence(
+    pg_engine: Engine, tmp_path
+) -> None:
+    """One public export captures once and independently promotes Postgres."""
+
+    upgrade_platform_schema(str(pg_engine.url))
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE remote_application (id TEXT PRIMARY KEY)")
+        )
+        connection.execute(
+            text("INSERT INTO remote_application VALUES ('root')")
+        )
+
+    def roots(
+        connection: Connection, snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, str], ...]:
+        del snapshot
+        return tuple(
+            {"id": row["id"]}
+            for row in connection.execute(
+                text("SELECT id FROM remote_application")
+            ).mappings()
+        )
+
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id="remote-fixture",
+        table_name="remote_fixture_state",
+    )
+    result = export(
+        pg_engine,
+        ExportOptions(
+            destination_path=str(tmp_path / "remote-local.duckdb"),
+            bundle_key="remote-application",
+            full_rebuild=True,
+            projections=(
+                ProjectionSpec(
+                    member="roots",
+                    columns=("id",),
+                    unique_key=("id",),
+                    full_rebuild_builder=roots,
+                ),
+            ),
+        ),
+        remote_destinations=(fence,),
+    )
+
+    assert [destination.status for destination in result.destinations] == [
+        "PROMOTED",
+        "PROMOTED",
+    ]
+    pin = fence.pin_bundle(bundle_key="remote-application", pin_id="fixture")
+    resolved = fence.resolve_pin(pin)
+    assert resolved.snapshot_seq == result.snapshot_seq
+    assert set(resolved.members) == {"roots"}
+
+
+def test_application_bundle_records_motherduck_main_schema(
+    pg_engine: Engine, tmp_path
+) -> None:
+    """MotherDuck unqualified stages live in `main`, not Postgres `public`."""
+
+    upgrade_platform_schema(str(pg_engine.url))
+
+    def roots(
+        _connection: Connection, _snapshot: ApplicationSnapshot
+    ) -> tuple[dict[str, str], ...]:
+        return ({"id": "root"},)
+
+    class CapturingFence(PostgresPublicationFence):
+        def promote(self, *, stage, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            with self.engine.connect() as connection:
+                transaction = connection.begin()
+                try:
+                    manifest = stage(connection)
+                    assert {
+                        member.schema_name for member in manifest.members
+                    } == {"main"}
+                finally:
+                    transaction.rollback()
+            return RemotePromotionResult(
+                disposition="PROMOTED",
+                bundle_id="fixture",
+                snapshot_seq=1,
+            )
+
+    fence = CapturingFence(
+        pg_engine,
+        destination_id="motherduck-schema-fixture",
+        table_name="motherduck_schema_fixture_state",
+        kind="motherduck",
+    )
+
+    result = export(
+        pg_engine,
+        ExportOptions(
+            destination_path=str(tmp_path / "motherduck-schema.duckdb"),
+            bundle_key="motherduck-schema",
+            full_rebuild=True,
+            projections=(
+                ProjectionSpec(
+                    member="roots",
+                    columns=("id",),
+                    unique_key=("id",),
+                    full_rebuild_builder=roots,
+                ),
+            ),
+        ),
+        remote_destinations=(fence,),
+    )
+
+    assert [destination.status for destination in result.destinations] == [
+        "PROMOTED",
+        "PROMOTED",
+    ]
+
+
+def test_application_projection_rejects_missing_builder_and_invalid_closure(
+    pg_engine: Engine, tmp_path
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    options = ExportOptions(
+        destination_path=str(tmp_path / "invalid.duckdb"),
+        bundle_key="application-invalid",
+        full_rebuild=True,
+        projections=(
+            ProjectionSpec(
+                member="roots", columns=("id",), unique_key=("id",)
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="unknown kernel projection members"):
+        export(pg_engine, options)
 
 
 def test_local_lease_fence_and_fault_preserve_pointer(tmp_path) -> None:
@@ -195,8 +454,9 @@ def test_nonempty_export_preserves_types_and_excludes_opaque_payloads(
     assert dict(rebuilt.member_counts) == dict(advanced.member_counts)
     assert dict(rebuilt.member_checksums) == dict(advanced.member_checksums)
 
+    mutable_counts = cast("dict[str, int]", result.member_counts)
     with pytest.raises(TypeError):
-        result.member_counts[schema.operations.name] = 2  # ty: ignore[invalid-assignment]
+        mutable_counts[schema.operations.name] = 2
 
 
 def test_equal_snapshot_is_idempotent_and_expired_renewal_cannot_promote(

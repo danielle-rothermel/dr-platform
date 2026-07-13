@@ -20,6 +20,7 @@ FINAL_TABLE_SUFFIXES = frozenset(
         "next_attempt_requests",
         "enqueue_claims",
         "enqueue_compensations",
+        "enqueue_compensation_hazards",
         "missing_reobservations",
         "throttle_state",
     }
@@ -124,6 +125,22 @@ EXPECTED_COLUMN_SUBSETS: dict[str, frozenset[str]] = {
             "claim_id",
             "workflow_id",
             "reason",
+            "cancel_disposition",
+            "created_at",
+            "resolved_at",
+            "first_absent_at",
+            "last_absent_at",
+            "absence_observation_count",
+            "change_seq",
+        }
+    ),
+    "enqueue_compensation_hazards": frozenset(
+        {
+            "item_id",
+            "attempt",
+            "claim_id",
+            "hazard_seq",
+            "workflow_id",
             "cancel_disposition",
             "created_at",
             "resolved_at",
@@ -329,6 +346,11 @@ def test_schema_enum_checks_use_the_closed_values() -> None:
             "cancel_disposition",
             status.EnqueueCompensationDisposition,
         ),
+        (
+            "enqueue_compensation_hazards",
+            "cancel_disposition",
+            status.EnqueueCompensationDisposition,
+        ),
     )
 
     for suffix, column_name, enum_type in enum_columns:
@@ -354,7 +376,7 @@ def test_every_change_tracked_table_has_change_sequence_first_index() -> None:
         ), suffix
 
 
-def test_migration_lineage_has_fresh_baseline_and_p3_provenance() -> None:
+def test_migration_lineage_has_only_the_final_baseline() -> None:
     from dr_platform.db import migrate
 
     versions_dir = (
@@ -368,9 +390,6 @@ def test_migration_lineage_has_fresh_baseline_and_p3_provenance() -> None:
 
     assert versions == [
         "0001_platform_baseline.py",
-        "0002_claim_workflow_provenance.py",
-        "0003_attempt_retry_reason.py",
-        "0004_missing_reobservation_schedule.py",
     ]
     assert not hasattr(migrate, "stamp_platform_schema")
     assert not hasattr(dr_platform, "stamp_platform_schema")

@@ -33,3 +33,32 @@ semantics. Whetstone-specific Analysis and Detail builders remain W7-owned.
 Deterministic local tests are blocking. MotherDuck, Neon, and live DBOS source
 checks are reported separately when credentials or endpoints are unavailable;
 no secret or DSN enters export models, logs, or bundle metadata.
+
+P7 verification on 2026-07-12:
+
+- MotherDuck application-publication project hash `c248c2555063`: one
+  non-empty Whetstone Analysis bundle (six members) and Detail bundle (seven
+  members) were independently visible after their STAGED commits and final
+  pointer CAS operations. A fresh connection resolved the Analysis pin;
+  renewal, replacement-token, stale-renewal, and stale-promotion checks passed.
+  MotherDuck application manifests must name its `main` schema; the generic
+  Postgres `public` default fails before STAGED metadata commits.
+- MotherDuck project hash `493872f2ab39`: the production fence acquired and
+  renewed a Lease, promoted a physically present row-count/checksum-validated
+  bundle with persisted source coordinates through conditional
+  `UPDATE ... RETURNING`, resolved an active pin, and rejected a stale token.
+  MotherDuck staging commits before the final short fence transaction so its
+  transaction-stable timestamp cannot authorize a writer past Lease expiry.
+  The adapter uses `CURRENT_TIMESTAMP` because the
+  MotherDuck endpoint does not implement PostgreSQL `clock_timestamp()`, and
+  its SQLAlchemy engine must set `use_native_hstore=False` because the endpoint
+  does not implement savepoints used by hstore discovery.
+- Application/DBOS topology project hash `56f797833dee`: 100 fresh samples
+  measured p99 skew `0.297 ms`, median query quantum `0.188 ms`, and retained
+  the pinned `100 ms` bound. `DBOS_SYSTEM_DATABASE_URL` was absent, so the
+  specified application-endpoint fallback was exercised.
+- Neon project hash `3bb33d910255`: the production fence promoted a physically
+  present row-count/checksum-validated bundle with a database-server source
+  coordinate and resolved an active pin. The endpoint was supplied through
+  encrypted `DR_LLM_POSTGRES_SYNC_ADMIN_URL`; no URL value was printed or
+  persisted. This closes the live Neon credential gate.

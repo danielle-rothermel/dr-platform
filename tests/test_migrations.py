@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from importlib import import_module
+from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine, inspect, text
 
-from dr_platform.db.migrate import upgrade_platform_schema
+from dr_platform.db import migrate
+from dr_platform.db.migrate import (
+    PLATFORM_BASELINE_REVISION,
+    PLATFORM_HEAD_REVISION,
+    upgrade_platform_schema,
+)
 from dr_platform.db.schema import (
     MAX_PREFIX_BYTES,
     POSTGRES_IDENTIFIER_MAX_BYTES,
@@ -22,6 +29,7 @@ KERNEL_TABLE_SUFFIXES = {
     "next_attempt_requests",
     "enqueue_claims",
     "enqueue_compensations",
+    "enqueue_compensation_hazards",
     "missing_reobservations",
     "throttle_state",
     "platform_alembic_version",
@@ -40,6 +48,10 @@ LEDGER_CHANGE_SEQ_QUERIES = {
     ),
     "enqueue_compensations": (
         "SELECT change_seq FROM platform_enqueue_compensations "
+        "WHERE claim_id = 'claim'"
+    ),
+    "enqueue_compensation_hazards": (
+        "SELECT change_seq FROM platform_enqueue_compensation_hazards "
         "WHERE claim_id = 'claim'"
     ),
     "next_attempt_requests": (
@@ -149,84 +161,45 @@ def test_prefix_is_the_only_physical_naming_option(pg_engine: Engine) -> None:
     }
 
 
-def test_claim_workflow_provenance_upgrades_existing_baseline(
-    pg_engine: Engine,
-) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
-    with pg_engine.begin() as connection:
-        connection.execute(
-            text(
-                """
-                ALTER TABLE platform_enqueue_compensations
-                  DROP CONSTRAINT platform_fk_compensations_claim;
-                ALTER TABLE platform_enqueue_claims
-                  DROP CONSTRAINT platform_uq_claims_workflow_provenance;
-                ALTER TABLE platform_enqueue_compensations
-                  ADD CONSTRAINT platform_fk_compensations_claim
-                  FOREIGN KEY (item_id, attempt, claim_id)
-                  REFERENCES platform_enqueue_claims
-                    (item_id, attempt, claim_id)
-                  ON DELETE RESTRICT;
-                UPDATE platform_platform_alembic_version
-                  SET version_num = '0001_platform_baseline';
-                """
-            )
-        )
-
-    upgrade_platform_schema(str(pg_engine.url))
-
-    database_inspector = inspect(pg_engine)
-    assert any(
-        constraint["column_names"]
-        == ["item_id", "attempt", "claim_id", "workflow_id"]
-        for constraint in database_inspector.get_unique_constraints(
-            "platform_enqueue_claims"
-        )
+def test_final_baseline_is_the_only_head_revision() -> None:
+    versions_dir = Path(migrate.__file__).parent / "alembic" / "versions"
+    revisions = sorted(path.name for path in versions_dir.glob("*.py"))
+    script = ScriptDirectory.from_config(
+        migrate._alembic_config("postgresql://unused", "platform")
     )
 
+    assert PLATFORM_HEAD_REVISION == PLATFORM_BASELINE_REVISION
+    assert revisions == ["0001_platform_baseline.py"]
+    assert script.get_heads() == [PLATFORM_BASELINE_REVISION]
+    revision = script.get_revision(PLATFORM_BASELINE_REVISION)
+    assert revision is not None
+    assert revision.down_revision is None
 
-def test_missing_reobservation_schedule_upgrades_existing_schema(
-    pg_engine: Engine,
-) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
-    with pg_engine.begin() as connection:
-        connection.execute(text("DROP TABLE platform_missing_reobservations"))
-        connection.execute(
-            text(
-                "UPDATE platform_platform_alembic_version "
-                "SET version_num = '0003_attempt_retry_reason'"
-            )
-        )
 
-    upgrade_platform_schema(str(pg_engine.url))
-
-    database_inspector = inspect(pg_engine)
-    assert "platform_missing_reobservations" in set(
-        database_inspector.get_table_names()
+def test_baseline_upgrade_and_downgrade_are_exact(pg_engine: Engine) -> None:
+    upgrade_platform_schema(
+        str(pg_engine.url), revision=PLATFORM_BASELINE_REVISION
     )
-    index_columns = {
-        tuple(index["column_names"])
-        for index in database_inspector.get_indexes(
-            "platform_missing_reobservations"
-        )
+    assert set(inspect(pg_engine).get_table_names()) == {
+        f"platform_{suffix}" for suffix in KERNEL_TABLE_SUFFIXES
     }
-    assert ("last_reobserved_at", "item_id", "attempt") in index_columns
-    assert any(
-        foreign_key["constrained_columns"]
-        == ["item_id", "attempt", "claim_id", "workflow_id"]
-        for foreign_key in database_inspector.get_foreign_keys(
-            "platform_enqueue_compensations"
+    with pg_engine.connect() as connection:
+        assert (
+            connection.execute(
+                text(
+                    "SELECT version_num FROM platform_platform_alembic_version"
+                )
+            ).scalar_one()
+            == PLATFORM_BASELINE_REVISION
         )
+
+    command.downgrade(
+        migrate._alembic_config(str(pg_engine.url), "platform"), "base"
     )
 
-
-def test_attempt_retry_reason_downgrade_is_explicitly_irreversible() -> None:
-    migration = import_module(
-        "dr_platform.db.alembic.versions.0003_attempt_retry_reason"
-    )
-
-    with pytest.raises(RuntimeError, match="fresh schema"):
-        migration.downgrade()
+    assert set(inspect(pg_engine).get_table_names()) == {
+        "platform_platform_alembic_version"
+    }
 
 
 def test_prefix_rejects_generated_identifiers_over_postgres_limit(
@@ -655,6 +628,18 @@ def _insert_update_guard_fixtures(connection: Connection) -> None:
             """
         )
     )
+    connection.execute(
+        text(
+            """
+            INSERT INTO platform_enqueue_compensation_hazards (
+                item_id, attempt, claim_id, hazard_seq, workflow_id,
+                cancel_disposition, created_at
+            ) VALUES (
+                'item', 0, 'claim', 1, 'workflow', 'pending', now()
+            )
+            """
+        )
+    )
 
 
 def _ledger_change_seqs(connection: Connection) -> dict[str, int]:
@@ -690,6 +675,12 @@ def test_lifecycle_ledger_guards_allow_noops_and_valid_transitions(
             "enqueue_compensations": connection.execute(
                 text(
                     "UPDATE platform_enqueue_compensations "
+                    "SET workflow_id = workflow_id"
+                )
+            ).rowcount,
+            "enqueue_compensation_hazards": connection.execute(
+                text(
+                    "UPDATE platform_enqueue_compensation_hazards "
                     "SET workflow_id = workflow_id"
                 )
             ).rowcount,

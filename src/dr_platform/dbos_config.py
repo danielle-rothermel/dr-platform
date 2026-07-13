@@ -146,9 +146,7 @@ def build_dbos_config(
         "otel_attribute_format": config.otel_attribute_format,
     }
     if config.otlp_traces_endpoints:
-        result["otlp_traces_endpoints"] = list(
-            config.otlp_traces_endpoints
-        )
+        result["otlp_traces_endpoints"] = list(config.otlp_traces_endpoints)
     return result
 
 

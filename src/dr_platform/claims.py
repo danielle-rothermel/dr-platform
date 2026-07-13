@@ -123,13 +123,14 @@ class _PhysicalOutcomeDisposition(StrEnum):
     UNCERTAIN = "uncertain"
 
 
-def claim_pending_attempts(
+def claim_pending_attempts(  # noqa: PLR0913 -- operation-scoped facade
     engine: Engine,
     *,
     admit_targets: ClaimTargetAdmission,
     options: ClaimPageOptions | None = None,
     schema: PlatformSchema | None = None,
     claim_id_factory: ClaimIdFactory | None = None,
+    operation_key: str | None = None,
 ) -> ClaimPage:
     """Claim one scheduling-ordered bounded page of pending Attempts."""
     selected_schema = schema or PlatformSchema()
@@ -142,6 +143,7 @@ def claim_pending_attempts(
             connection=connection,
             schema=selected_schema,
             limit=selected_options.page_size,
+            operation_key=operation_key,
         )
         if not candidates:
             return ClaimPage(claims=())
@@ -240,13 +242,14 @@ def claim_pending_attempts(
         return ClaimPage(claims=tuple(claimed))
 
 
-def replace_expired_unstarted_claims(
+def replace_expired_unstarted_claims(  # noqa: PLR0913 -- operation-scoped facade
     engine: Engine,
     *,
     admit_targets: ClaimTargetAdmission,
     options: ClaimPageOptions | None = None,
     schema: PlatformSchema | None = None,
     claim_id_factory: ClaimIdFactory | None = None,
+    operation_key: str | None = None,
 ) -> ClaimPage:
     """Replace expired Claims that provably never crossed the DBOS call."""
     selected_schema = schema or PlatformSchema()
@@ -259,6 +262,7 @@ def replace_expired_unstarted_claims(
             connection=connection,
             schema=selected_schema,
             limit=selected_options.page_size,
+            operation_key=operation_key,
         )
         if not candidates:
             return ClaimPage(claims=())
@@ -385,6 +389,7 @@ def load_call_started_recovery_page(
     *,
     options: ClaimPageOptions | None = None,
     schema: PlatformSchema | None = None,
+    operation_key: str | None = None,
 ) -> ClaimPage:
     """Load a bounded page requiring authoritative DBOS observation."""
     selected_schema = schema or PlatformSchema()
@@ -394,6 +399,7 @@ def load_call_started_recovery_page(
             connection=connection,
             schema=selected_schema,
             limit=selected_options.page_size,
+            operation_key=operation_key,
         )
         return ClaimPage(
             claims=tuple(
@@ -983,65 +989,80 @@ class _LockedHierarchy(BaseModel):
 
 
 def _pending_candidates(
-    *, connection: Connection, schema: PlatformSchema, limit: int
+    *,
+    connection: Connection,
+    schema: PlatformSchema,
+    limit: int,
+    operation_key: str | None = None,
 ) -> list[dict[str, Any]]:
+    statement = _candidate_select(schema).where(
+        and_(
+            schema.item_attempts.c.enqueue_state
+            == AttemptEnqueueState.PENDING.value,
+            schema.item_attempts.c.current_claim_id.is_(None),
+        )
+    )
+    if operation_key is not None:
+        statement = statement.where(
+            schema.operations.c.operation_key == operation_key
+        )
     return [
         dict(row)
         for row in connection.execute(
-            _candidate_select(schema)
-            .where(
-                and_(
-                    schema.item_attempts.c.enqueue_state
-                    == AttemptEnqueueState.PENDING.value,
-                    schema.item_attempts.c.current_claim_id.is_(None),
-                )
-            )
-            .order_by(
+            statement.order_by(
                 schema.items.c.service_priority,
                 schema.items.c.shuffle_rank,
                 schema.items.c.item_id,
-            )
-            .limit(limit)
+            ).limit(limit)
         ).mappings()
     ]
 
 
 def _expired_unstarted_candidates(
-    *, connection: Connection, schema: PlatformSchema, limit: int
+    *,
+    connection: Connection,
+    schema: PlatformSchema,
+    limit: int,
+    operation_key: str | None = None,
 ) -> list[dict[str, Any]]:
     now = _database_now(connection)
+    statement = (
+        _candidate_select(schema)
+        .join(
+            schema.enqueue_claims,
+            and_(
+                schema.enqueue_claims.c.item_id
+                == schema.item_attempts.c.item_id,
+                schema.enqueue_claims.c.attempt
+                == schema.item_attempts.c.attempt,
+                schema.enqueue_claims.c.claim_id
+                == schema.item_attempts.c.current_claim_id,
+            ),
+        )
+        .add_columns(schema.enqueue_claims.c.claim_id)
+        .where(
+            and_(
+                schema.item_attempts.c.enqueue_state
+                == AttemptEnqueueState.CLAIMING.value,
+                schema.enqueue_claims.c.disposition
+                == EnqueueClaimDisposition.CLAIMED.value,
+                schema.enqueue_claims.c.enqueue_call_started_at.is_(None),
+                schema.enqueue_claims.c.lease_expires_at <= now,
+            )
+        )
+    )
+    if operation_key is not None:
+        statement = statement.where(
+            schema.operations.c.operation_key == operation_key
+        )
     return [
         dict(row)
         for row in connection.execute(
-            _candidate_select(schema)
-            .join(
-                schema.enqueue_claims,
-                and_(
-                    schema.enqueue_claims.c.item_id
-                    == schema.item_attempts.c.item_id,
-                    schema.enqueue_claims.c.attempt
-                    == schema.item_attempts.c.attempt,
-                    schema.enqueue_claims.c.claim_id
-                    == schema.item_attempts.c.current_claim_id,
-                ),
-            )
-            .add_columns(schema.enqueue_claims.c.claim_id)
-            .where(
-                and_(
-                    schema.item_attempts.c.enqueue_state
-                    == AttemptEnqueueState.CLAIMING.value,
-                    schema.enqueue_claims.c.disposition
-                    == EnqueueClaimDisposition.CLAIMED.value,
-                    schema.enqueue_claims.c.enqueue_call_started_at.is_(None),
-                    schema.enqueue_claims.c.lease_expires_at <= now,
-                )
-            )
-            .order_by(
+            statement.order_by(
                 schema.items.c.service_priority,
                 schema.items.c.shuffle_rank,
                 schema.items.c.item_id,
-            )
-            .limit(limit)
+            ).limit(limit)
         ).mappings()
     ]
 
@@ -1051,39 +1072,45 @@ def _call_started_recovery_candidates(
     connection: Connection,
     schema: PlatformSchema,
     limit: int,
+    operation_key: str | None = None,
 ) -> list[dict[str, Any]]:
     now = _database_now(connection)
+    statement = (
+        _candidate_select(schema)
+        .join(
+            schema.enqueue_claims,
+            and_(
+                schema.enqueue_claims.c.item_id
+                == schema.item_attempts.c.item_id,
+                schema.enqueue_claims.c.attempt
+                == schema.item_attempts.c.attempt,
+                schema.enqueue_claims.c.claim_id
+                == schema.item_attempts.c.current_claim_id,
+            ),
+        )
+        .add_columns(schema.enqueue_claims.c.claim_id)
+        .where(
+            and_(
+                schema.item_attempts.c.enqueue_state
+                == AttemptEnqueueState.CLAIMING.value,
+                schema.enqueue_claims.c.disposition
+                == EnqueueClaimDisposition.CALL_STARTED.value,
+                schema.enqueue_claims.c.lease_expires_at <= now,
+            )
+        )
+    )
+    if operation_key is not None:
+        statement = statement.where(
+            schema.operations.c.operation_key == operation_key
+        )
     return [
         dict(row)
         for row in connection.execute(
-            _candidate_select(schema)
-            .join(
-                schema.enqueue_claims,
-                and_(
-                    schema.enqueue_claims.c.item_id
-                    == schema.item_attempts.c.item_id,
-                    schema.enqueue_claims.c.attempt
-                    == schema.item_attempts.c.attempt,
-                    schema.enqueue_claims.c.claim_id
-                    == schema.item_attempts.c.current_claim_id,
-                ),
-            )
-            .add_columns(schema.enqueue_claims.c.claim_id)
-            .where(
-                and_(
-                    schema.item_attempts.c.enqueue_state
-                    == AttemptEnqueueState.CLAIMING.value,
-                    schema.enqueue_claims.c.disposition
-                    == EnqueueClaimDisposition.CALL_STARTED.value,
-                    schema.enqueue_claims.c.lease_expires_at <= now,
-                )
-            )
-            .order_by(
+            statement.order_by(
                 schema.items.c.service_priority,
                 schema.items.c.shuffle_rank,
                 schema.items.c.item_id,
-            )
-            .limit(limit)
+            ).limit(limit)
         ).mappings()
     ]
 

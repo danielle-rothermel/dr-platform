@@ -59,9 +59,7 @@ def test_dbos_config_uses_semconv_and_optional_trace_endpoints() -> None:
         "system_database_url": "postgresql+psycopg://system",
         "enable_otlp": True,
         "otel_attribute_format": "semconv",
-        "otlp_traces_endpoints": [
-            "https://collector.example/v1/traces"
-        ],
+        "otlp_traces_endpoints": ["https://collector.example/v1/traces"],
     }
 
 

@@ -25,6 +25,7 @@ from dr_platform.reconciliation_runtime import (
 from dr_platform.records import (
     AttemptRecord,
     EnqueueClaimRecord,
+    EnqueueCompensationHazardRecord,
     EnqueueCompensationRecord,
     ItemRecord,
     OperationRecord,
@@ -71,6 +72,7 @@ class AttemptInspection(BaseModel):
     attempt: AttemptRecord
     claims: tuple[EnqueueClaimRecord, ...]
     compensations: tuple[EnqueueCompensationRecord, ...]
+    compensation_hazards: tuple[EnqueueCompensationHazardRecord, ...]
     dbos_steps: tuple[DbosStepObservation, ...] = ()
 
 
@@ -510,6 +512,14 @@ def health_report(  # noqa: PLR0913
             .select_from(compensations)
             .where(compensations.c.resolved_at.is_(None)),
         )
+        incomplete_compensation += _count(
+            connection,
+            select(func.count())
+            .select_from(selected.enqueue_compensation_hazards)
+            .where(
+                selected.enqueue_compensation_hazards.c.resolved_at.is_(None)
+            ),
+        )
     queued_age = _age_seconds(now, queued_start)
     active_age = _age_seconds(now, active_start)
     breaches = _health_breaches(
@@ -699,6 +709,24 @@ def _attempt_inspection(
             )
         ).mappings()
     )
+    compensation_hazards = tuple(
+        EnqueueCompensationHazardRecord.model_validate(dict(value))
+        for value in connection.execute(
+            select(schema.enqueue_compensation_hazards)
+            .where(
+                and_(
+                    schema.enqueue_compensation_hazards.c.item_id
+                    == attempt.item_id,
+                    schema.enqueue_compensation_hazards.c.attempt
+                    == attempt.attempt,
+                )
+            )
+            .order_by(
+                schema.enqueue_compensation_hazards.c.created_at,
+                schema.enqueue_compensation_hazards.c.claim_id,
+            )
+        ).mappings()
+    )
     steps = (
         ()
         if reader is None
@@ -711,6 +739,7 @@ def _attempt_inspection(
         attempt=attempt,
         claims=claims,
         compensations=compensations,
+        compensation_hazards=compensation_hazards,
         dbos_steps=steps,
     )
 

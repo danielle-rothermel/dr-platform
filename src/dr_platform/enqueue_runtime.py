@@ -403,6 +403,7 @@ def enqueue_pending_page(  # noqa: PLR0913 -- explicit kernel facade
     options: ClaimPageOptions | None = None,
     schema: PlatformSchema | None = None,
     adapter: PhysicalEnqueueAdapter | None = None,
+    operation_key: str | None = None,
 ) -> EnqueuePageResult:
     """Validate every target queue, then claim and enqueue one bounded page."""
     from dr_platform.claims import (  # noqa: PLC0415 -- avoids module cycle
@@ -418,6 +419,7 @@ def enqueue_pending_page(  # noqa: PLR0913 -- explicit kernel facade
         ),
         options=options,
         schema=schema,
+        operation_key=operation_key,
     )
     store = PostgresClaimTransitionStore(engine, schema=schema)
     return _execute_claim_page(
@@ -436,6 +438,7 @@ def enqueue_replacement_page(  # noqa: PLR0913 -- explicit kernel facade
     options: ClaimPageOptions | None = None,
     schema: PlatformSchema | None = None,
     adapter: PhysicalEnqueueAdapter | None = None,
+    operation_key: str | None = None,
 ) -> EnqueuePageResult:
     """Replace never-started expired Claims only after queue admission."""
     from dr_platform.claims import (  # noqa: PLC0415 -- avoids module cycle
@@ -451,6 +454,7 @@ def enqueue_replacement_page(  # noqa: PLR0913 -- explicit kernel facade
         ),
         options=options,
         schema=schema,
+        operation_key=operation_key,
     )
     store = PostgresClaimTransitionStore(engine, schema=schema)
     return _execute_claim_page(
@@ -470,6 +474,7 @@ def recover_call_started_page(  # noqa: PLR0913 -- explicit kernel facade
     schema: PlatformSchema | None = None,
     adapter: PhysicalEnqueueAdapter | None = None,
     observer: WorkflowObserver | None = None,
+    operation_key: str | None = None,
 ) -> EnqueuePageResult:
     """Observe expired CALL_STARTED Claims before any replacement enqueue."""
     from dr_platform.claims import (  # noqa: PLC0415 -- avoids module cycle
@@ -481,6 +486,7 @@ def recover_call_started_page(  # noqa: PLR0913 -- explicit kernel facade
         engine,
         options=options,
         schema=schema,
+        operation_key=operation_key,
     )
     admission = _target_admission(
         resolver=resolver,

@@ -821,6 +821,14 @@ class PlatformSchema:
             Column("reason", Text, nullable=False),
             Column("cancel_disposition", Text, nullable=False),
             Column("failure", JSONB),
+            Column("first_absent_at", DateTime(timezone=True)),
+            Column("last_absent_at", DateTime(timezone=True)),
+            Column(
+                "absence_observation_count",
+                Integer,
+                nullable=False,
+                server_default="0",
+            ),
             Column("created_at", DateTime(timezone=True), nullable=False),
             Column("resolved_at", DateTime(timezone=True)),
             Column("change_seq", BigInteger, nullable=False),
@@ -853,6 +861,69 @@ class PlatformSchema:
             CheckConstraint(
                 "(cancel_disposition = 'failed') = (failure IS NOT NULL)",
                 name=name("ck_compensations_failure"),
+            ),
+            CheckConstraint(
+                "(absence_observation_count = 0) = "
+                "(first_absent_at IS NULL AND last_absent_at IS NULL) "
+                "AND (first_absent_at IS NULL OR "
+                "last_absent_at >= first_absent_at)",
+                name=name("ck_compensations_absence_observations"),
+            ),
+            UniqueConstraint(
+                "item_id",
+                "attempt",
+                "claim_id",
+                "workflow_id",
+                name=name("uq_compensations_workflow"),
+            ),
+        )
+
+        self.enqueue_compensation_hazards = Table(
+            name("enqueue_compensation_hazards"),
+            self.metadata,
+            Column("item_id", Text, primary_key=True),
+            Column("attempt", Integer, primary_key=True),
+            Column("claim_id", Text, primary_key=True),
+            Column("hazard_seq", Integer, primary_key=True),
+            Column("workflow_id", Text, nullable=False),
+            Column("cancel_disposition", Text, nullable=False),
+            Column("failure", JSONB),
+            Column("created_at", DateTime(timezone=True), nullable=False),
+            Column("resolved_at", DateTime(timezone=True)),
+            Column("change_seq", BigInteger, nullable=False),
+            ForeignKeyConstraint(
+                ["item_id", "attempt", "claim_id", "workflow_id"],
+                [
+                    f"{self.enqueue_compensations.name}.item_id",
+                    f"{self.enqueue_compensations.name}.attempt",
+                    f"{self.enqueue_compensations.name}.claim_id",
+                    f"{self.enqueue_compensations.name}.workflow_id",
+                ],
+                ondelete="RESTRICT",
+                name=name("fk_compensation_hazards_predecessor"),
+            ),
+            CheckConstraint(
+                "hazard_seq = 1",
+                name=name("ck_compensation_hazards_bounded"),
+            ),
+            CheckConstraint(
+                enum_check(
+                    "cancel_disposition", EnqueueCompensationDisposition
+                ),
+                name=name("ck_compensation_hazards_disposition"),
+            ),
+            CheckConstraint(
+                "cancel_disposition != 'no_workflow_found'",
+                name=name("ck_compensation_hazards_not_absent"),
+            ),
+            CheckConstraint(
+                "(cancel_disposition IN ('pending', 'failed')) "
+                "= (resolved_at IS NULL)",
+                name=name("ck_compensation_hazards_resolution"),
+            ),
+            CheckConstraint(
+                "(cancel_disposition = 'failed') = (failure IS NOT NULL)",
+                name=name("ck_compensation_hazards_failure"),
             ),
         )
 
@@ -1022,6 +1093,23 @@ class PlatformSchema:
         Index(
             f"ix_{prefix}_compensations_change_seq",
             self.enqueue_compensations.c.change_seq,
+        )
+        Index(
+            f"ix_{prefix}_compensation_hazards_workflow",
+            self.enqueue_compensation_hazards.c.workflow_id,
+        )
+        Index(
+            f"ix_{prefix}_compensation_hazards_unresolved",
+            self.enqueue_compensation_hazards.c.cancel_disposition,
+            postgresql_where=(
+                self.enqueue_compensation_hazards.c.cancel_disposition.in_(
+                    ["pending", "failed"]
+                )
+            ),
+        )
+        Index(
+            f"ix_{prefix}_compensation_hazards_change_seq",
+            self.enqueue_compensation_hazards.c.change_seq,
         )
         Index(
             f"ix_{prefix}_throttle_blocked_until",

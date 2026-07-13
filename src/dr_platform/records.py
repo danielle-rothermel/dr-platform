@@ -653,6 +653,9 @@ class EnqueueCompensationRecord(BaseModel):
     reason: EnqueueCompensationReason
     cancel_disposition: EnqueueCompensationDisposition
     failure: FailureSnapshot | None = None
+    first_absent_at: datetime | None = None
+    last_absent_at: datetime | None = None
+    absence_observation_count: NonNegativeInt = 0
     created_at: datetime
     resolved_at: datetime | None = None
     change_seq: PositiveChangeSeq
@@ -669,6 +672,60 @@ class EnqueueCompensationRecord(BaseModel):
                 raise ValueError("resolved compensation requires resolved_at")
         elif self.resolved_at is not None:
             raise ValueError("unresolved compensation cannot have resolved_at")
+        if self.absence_observation_count == 0:
+            if (
+                self.first_absent_at is not None
+                or self.last_absent_at is not None
+            ):
+                raise ValueError(
+                    "zero absence observations require no timestamps"
+                )
+        elif self.first_absent_at is None or self.last_absent_at is None:
+            raise ValueError("absence observations require both timestamps")
+        return self
+
+
+class EnqueueCompensationHazardRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    item_id: NonEmptyStr
+    attempt: NonNegativeInt
+    claim_id: NonEmptyStr
+    hazard_seq: PositiveInt
+    workflow_id: NonEmptyStr
+    cancel_disposition: EnqueueCompensationDisposition
+    failure: FailureSnapshot | None = None
+    created_at: datetime
+    resolved_at: datetime | None = None
+    change_seq: PositiveChangeSeq
+
+    @model_validator(mode="after")
+    def validate_hazard(self) -> EnqueueCompensationHazardRecord:
+        if self.hazard_seq != 1:
+            raise ValueError(
+                "successor compensation hazard sequence must be one"
+            )
+        if (
+            self.cancel_disposition
+            is EnqueueCompensationDisposition.NO_WORKFLOW_FOUND
+        ):
+            raise ValueError("successor hazard proves workflow appearance")
+        if self.cancel_disposition is EnqueueCompensationDisposition.FAILED:
+            if self.failure is None:
+                raise ValueError("failed compensation hazard requires failure")
+        elif self.failure is not None:
+            raise ValueError(
+                "only failed compensation hazard may carry failure"
+            )
+        if self.cancel_disposition in RESOLVED_COMPENSATION_DISPOSITIONS:
+            if self.resolved_at is None:
+                raise ValueError(
+                    "resolved compensation hazard requires resolved_at"
+                )
+        elif self.resolved_at is not None:
+            raise ValueError(
+                "unresolved compensation hazard cannot have resolved_at"
+            )
         return self
 
 
