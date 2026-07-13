@@ -29,7 +29,7 @@ from dr_platform.records import AttemptRecord, FailureSnapshot, ItemRecord
 from dr_platform.status import FailureClass
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
     from sqlalchemy import Engine
 
@@ -158,17 +158,12 @@ class ReconcileResult(BaseModel):
     pending_enqueue_count: NonNegativeInt
 
 
-class DbosObservedWorkflowError(RuntimeError):
-    """Safe classifier input that never includes a DBOS error payload."""
-
-
 @runtime_checkable
 class LifecycleObservationReader(Protocol):
     def observe(
         self,
         *,
         workflow_id: str,
-        classify_error: Callable[[BaseException], FailureSnapshot],
     ) -> ReconciliationObservation: ...
 
     def read_step_history(
@@ -177,6 +172,39 @@ class LifecycleObservationReader(Protocol):
         workflow_id: str,
         limit: PositiveInt = 100,
     ) -> tuple[DbosStepObservation, ...]: ...
+
+
+class WorkflowMetadataDisposition(StrEnum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    AMBIGUOUS = "ambiguous"
+
+
+class WorkflowMetadataObservation(BaseModel):
+    """Authoritative payload-free DBOS application-version metadata."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    workflow_id: NonEmptyStr
+    disposition: WorkflowMetadataDisposition
+    application_version: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def validate_metadata(self) -> WorkflowMetadataObservation:
+        if (self.disposition is WorkflowMetadataDisposition.AVAILABLE) != (
+            self.application_version is not None
+        ):
+            raise ValueError(
+                "only available workflow metadata has an application version"
+            )
+        return self
+
+
+@runtime_checkable
+class WorkflowMetadataReader(Protocol):
+    def read_workflow_metadata(
+        self, *, workflow_id: str
+    ) -> WorkflowMetadataObservation: ...
 
 
 class DbosLifecycleReader:
@@ -189,7 +217,6 @@ class DbosLifecycleReader:
         self,
         *,
         workflow_id: str,
-        classify_error: Callable[[BaseException], FailureSnapshot],
     ) -> ReconciliationObservation:
         try:
             matches = self._client.list_workflows(
@@ -243,7 +270,48 @@ class DbosLifecycleReader:
         return _normalized_observation(
             workflow_id=workflow_id,
             status=status,
-            classify_error=classify_error,
+        )
+
+    def read_workflow_metadata(
+        self, *, workflow_id: str
+    ) -> WorkflowMetadataObservation:
+        try:
+            matches = self._client.list_workflows(
+                workflow_ids=[workflow_id],
+                limit=MAX_EXACT_WORKFLOW_MATCHES,
+                load_input=False,
+                load_output=False,
+            )
+        except Exception:  # noqa: BLE001 -- external read boundary
+            return WorkflowMetadataObservation(
+                workflow_id=workflow_id,
+                disposition=WorkflowMetadataDisposition.UNAVAILABLE,
+            )
+        if len(matches) > 1:
+            return WorkflowMetadataObservation(
+                workflow_id=workflow_id,
+                disposition=WorkflowMetadataDisposition.AMBIGUOUS,
+            )
+        if not matches:
+            return WorkflowMetadataObservation(
+                workflow_id=workflow_id,
+                disposition=WorkflowMetadataDisposition.UNAVAILABLE,
+            )
+        status_row = matches[0]
+        application_version = getattr(status_row, "application_version", None)
+        if (
+            getattr(status_row, "workflow_id", None) != workflow_id
+            or not isinstance(application_version, str)
+            or not application_version
+        ):
+            return WorkflowMetadataObservation(
+                workflow_id=workflow_id,
+                disposition=WorkflowMetadataDisposition.UNAVAILABLE,
+            )
+        return WorkflowMetadataObservation(
+            workflow_id=workflow_id,
+            disposition=WorkflowMetadataDisposition.AVAILABLE,
+            application_version=application_version,
         )
 
     def read_step_history(
@@ -448,13 +516,12 @@ def _observe_candidates(
 ) -> Mapping[str, ReconciliationObservation]:
     observations: dict[str, ReconciliationObservation] = {}
     for candidate in candidates:
-        target = resolver.resolve(candidate.target_ref)
+        resolver.resolve(candidate.target_ref)
         workflow_id = candidate.attempt.workflow_id
         if workflow_id in observations:
             continue
         observations[workflow_id] = reader.observe(
             workflow_id=workflow_id,
-            classify_error=target.classify_error,
         )
     return observations
 
@@ -463,7 +530,6 @@ def _normalized_observation(
     *,
     workflow_id: str,
     status: DbosWorkflowStatus,
-    classify_error: Callable[[BaseException], FailureSnapshot],
 ) -> ReconciliationObservation:
     disposition_by_status = {
         DbosWorkflowStatus.PENDING: (
@@ -489,21 +555,18 @@ def _normalized_observation(
     disposition = disposition_by_status[status]
     failure = None
     if disposition is ReconciliationObservationDisposition.ERROR:
-        try:
-            failure = classify_error(
-                DbosObservedWorkflowError(
-                    "DBOS reported terminal ERROR without loading its payload"
-                )
-            )
-        except Exception as error:  # noqa: BLE001 -- classifier boundary
-            failure = FailureSnapshot(
-                failure_class=FailureClass.PERMANENT,
-                error_type="DbosWorkflowClassificationFailed",
-                message=(
-                    "DBOS terminal ERROR classification failed: "
-                    f"{type(error).__name__}"
-                ),
-            )
+        # DBOS's payload-free status API supplies no authoritative failure
+        # classification.  Never invent an exception to feed a classifier:
+        # an application-aware reader may return a typed ERROR observation,
+        # while this generic adapter must fail closed.
+        failure = FailureSnapshot(
+            failure_class=FailureClass.PERMANENT,
+            error_type="DbosWorkflowErrorUnclassifiable",
+            message=(
+                "authoritative DBOS workflow failure classification is "
+                "unavailable"
+            ),
+        )
     return ReconciliationObservation(
         workflow_id=workflow_id,
         disposition=disposition,

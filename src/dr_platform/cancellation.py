@@ -6,7 +6,14 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    model_validator,
+)
 from sqlalchemy import (
     Connection,
     Engine,
@@ -19,6 +26,9 @@ from sqlalchemy import (
     update,
 )
 
+from dr_platform.cancellation_truth import (
+    operation_has_unresolved_cancellation,
+)
 from dr_platform.claims import (
     _acquire_export_writer_lock,
     _acquire_workflow_reference_locks,
@@ -49,10 +59,71 @@ if TYPE_CHECKING:
 
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
+StrictNonEmptyStr = Annotated[StrictStr, Field(min_length=1)]
+StrictNonNegativeInt = Annotated[StrictInt, Field(ge=0)]
+StrictPositiveInt = Annotated[StrictInt, Field(gt=0)]
 
 
 class CancellationConflictError(RuntimeError):
     """A request ID was replayed with unequal immutable intent."""
+
+
+class CancellationAttemptCut(BaseModel):
+    """One immutable current-Attempt identity authorized for cancellation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    item_id: StrictNonEmptyStr
+    attempt: StrictNonNegativeInt
+    workflow_id: StrictNonEmptyStr
+    execution_key: StrictNonEmptyStr
+
+
+class CancellationExpectedCut(BaseModel):
+    """The exact Platform cut authorized by a cancellation preview."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    platform_cut_version: StrictPositiveInt
+    attempts: tuple[CancellationAttemptCut, ...]
+
+    @model_validator(mode="after")
+    def validate_attempt_order(self) -> CancellationExpectedCut:
+        identities = [
+            (
+                attempt.item_id,
+                attempt.attempt,
+                attempt.workflow_id,
+                attempt.execution_key,
+            )
+            for attempt in self.attempts
+        ]
+        if identities != sorted(identities) or len(identities) != len(
+            set(identities)
+        ):
+            raise ValueError(
+                "expected cancellation Attempts must be unique and sorted"
+            )
+        item_ids = [attempt.item_id for attempt in self.attempts]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError(
+                "expected cancellation cut must contain one Attempt per Item"
+            )
+        return self
+
+
+class CancellationCutDriftError(RuntimeError):
+    """The locked authoritative cut differs from the previewed cut."""
+
+    def __init__(
+        self,
+        *,
+        expected: CancellationExpectedCut,
+        actual: CancellationExpectedCut,
+    ) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__("cancellation preview cut drifted")
 
 
 class CancellationInspectionDisposition(StrEnum):
@@ -100,6 +171,9 @@ class CancellationRequest(BaseModel):
     operation_key: NonEmptyStr
     request_id: NonEmptyStr
     requested_by: NonEmptyStr
+    # Trusted programmatic callers may omit this. Preview-confirmation paths
+    # must pass the exact cut they displayed to obtain mutation-time CAS.
+    expected_cut: CancellationExpectedCut | None = None
 
 
 class CancellationAttemptResult(BaseModel):
@@ -116,6 +190,7 @@ class CancellationResult(BaseModel):
 
     request: CancellationRequest
     results: tuple[CancellationAttemptResult, ...]
+    complete: bool
 
 
 def cancel_operation(
@@ -131,6 +206,12 @@ def cancel_operation(
     if planned and all(
         row.get("_non_durable_already_cancelled") is True for row in planned
     ):
+        with engine.connect() as connection:
+            complete = not operation_has_unresolved_cancellation(
+                connection,
+                schema=selected_schema,
+                operation_key=request.operation_key,
+            )
         return CancellationResult(
             request=request,
             results=tuple(
@@ -142,6 +223,7 @@ def cancel_operation(
                 )
                 for row in planned
             ),
+            complete=complete,
         )
     for row in planned:
         if row["cancellation_disposition"] in {
@@ -379,6 +461,9 @@ def _persist_intent(
         exact_replay = _validate_replay(attempts, request=request)
         if exact_replay:
             return _request_rows(connection, schema=schema, request=request)
+        _validate_expected_cut(
+            operation=operation, attempts=attempts, request=request
+        )
         now = _database_now(connection)
         observed_terminal_rows: list[dict[str, Any]] = []
         if operation["status"] not in {
@@ -707,6 +792,31 @@ def _validate_replay(
     return bool(existing)
 
 
+def _validate_expected_cut(
+    *,
+    operation: Mapping[str, Any],
+    attempts: Sequence[Mapping[str, Any]],
+    request: CancellationRequest,
+) -> None:
+    expected = request.expected_cut
+    if expected is None:
+        return
+    actual = CancellationExpectedCut(
+        platform_cut_version=operation["platform_cut_version"],
+        attempts=tuple(
+            CancellationAttemptCut(
+                item_id=row["item_id"],
+                attempt=row["attempt"],
+                workflow_id=row["workflow_id"],
+                execution_key=row["execution_key"],
+            )
+            for row in attempts
+        ),
+    )
+    if actual != expected:
+        raise CancellationCutDriftError(expected=expected, actual=actual)
+
+
 def _is_non_durable_already_cancelled(
     rows: Sequence[Mapping[str, Any]], *, request: CancellationRequest
 ) -> bool:
@@ -777,6 +887,11 @@ def _load_result(
 ) -> CancellationResult:
     with engine.connect() as connection:
         rows = _request_rows(connection, schema=schema, request=request)
+        complete = not operation_has_unresolved_cancellation(
+            connection,
+            schema=schema,
+            operation_key=request.operation_key,
+        )
     observed = [
         CancellationAttemptResult(
             item_id=row["item_id"],
@@ -801,6 +916,7 @@ def _load_result(
     return CancellationResult(
         request=request,
         results=tuple(observed + persisted),
+        complete=complete,
     )
 
 
@@ -1292,6 +1408,12 @@ def _finalize_compensation_repair(
                 failure=failure,
                 successor=successor,
             )
+        _refresh_operation_lifecycle(
+            connection,
+            schema=schema,
+            operation_key=str(candidate["operation_key"]),
+            now=_database_now(connection),
+        )
 
 
 def _record_compensation_absence(

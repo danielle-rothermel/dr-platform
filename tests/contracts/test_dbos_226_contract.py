@@ -22,8 +22,6 @@ from dr_platform.reconciliation_runtime import (
     DbosLifecycleReader,
     ReconciliationObservationDisposition,
 )
-from dr_platform.records import FailureSnapshot
-from dr_platform.status import FailureClass
 
 DBOS_VERSION = "2.26.0"
 CONTRACT_SCHEMA_PREFIX = "dbos_contract_preflight"
@@ -667,11 +665,6 @@ def test_allowlisted_step_timeline_never_selects_or_deserializes_payloads(
         reader = DbosLifecycleReader(payload_rejecting_client)
         observation = reader.observe(
             workflow_id="contract-payload",
-            classify_error=lambda error: FailureSnapshot(
-                failure_class=FailureClass.UNKNOWN,
-                error_type=type(error).__name__,
-                message=str(error),
-            ),
         )
         timeline = reader.read_step_history(workflow_id="contract-payload")
 

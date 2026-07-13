@@ -28,6 +28,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from dr_platform.cancellation_truth import (
+    operation_has_unresolved_cancellation,
+    workflow_reference_conflict,
+)
 from dr_platform.claims import (
     _acquire_export_writer_lock,
     _acquire_workflow_reference_locks,
@@ -49,7 +53,6 @@ from dr_platform.status import (
     AttemptEnqueueState,
     AttemptExecutionState,
     AttemptRetryReason,
-    CancellationDisposition,
     CancellationOrigin,
     NextAttemptDisposition,
     NextAttemptReason,
@@ -235,6 +238,13 @@ def request_next_attempt(
         now = _database_now(connection)
         created_attempt: int | None = None
         if disposition is NextAttemptDisposition.CREATED:
+            conflict = workflow_reference_conflict(
+                connection,
+                schema=selected_schema,
+                workflow_ids=[execution.workflow_id],
+            )
+            if conflict is not None:
+                raise ReconciliationConflictError(conflict)
             created_attempt = next_attempt
             connection.execute(
                 insert(selected_schema.item_attempts).values(
@@ -799,7 +809,6 @@ def _apply_one_observation(  # noqa: PLR0911,PLR0912,PLR0913,PLR0915
             if (
                 attempt["execution_state"]
                 == AttemptExecutionState.MISSING.value
-                and observation.disposition.value != "uncertain"
             ):
                 _record_missing_reobservation(
                     connection,
@@ -1057,6 +1066,11 @@ def _insert_automatic_attempt(  # noqa: PLR0913
     next_attempt: int,
     now: datetime,
 ) -> None:
+    conflict = workflow_reference_conflict(
+        connection, schema=schema, workflow_ids=[execution.workflow_id]
+    )
+    if conflict is not None:
+        raise ReconciliationConflictError(conflict)
     connection.execute(
         insert(schema.item_attempts).values(
             item_id=candidate.item.item_id,
@@ -1145,7 +1159,9 @@ def _foreign_cancellation_provenance(
             "foreign cancellation provenance is ambiguous"
         )
     if not rows:
-        return {}
+        raise ReconciliationConflictError(
+            "foreign cancellation provenance is missing"
+        )
     source = dict(rows[0])
     return {
         "cancellation_request_id": source["cancellation_request_id"],
@@ -1382,11 +1398,8 @@ def _refresh_operation_lifecycle(
             execution_states, enqueue_states, strict=True
         )
     )
-    cancellation_incomplete = any(
-        row["cancellation_request_id"] is not None
-        and row["cancellation_disposition"]
-        in {None, CancellationDisposition.FAILED.value}
-        for row in rows
+    cancellation_incomplete = operation_has_unresolved_cancellation(
+        connection, schema=schema, operation_key=operation_key
     )
     if cancellation_incomplete:
         status = OperationStatus.CANCELLING

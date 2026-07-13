@@ -771,6 +771,7 @@ class PostgresClaimTransitionStore:
             claim_row = locked.claims.get(
                 (claim.item_id, claim.attempt, claim.claim_id)
             )
+            attempt_row = locked.attempts.get((claim.item_id, claim.attempt))
             if claim_row is None:
                 raise ClaimAuthorityError("unknown enqueue Claim")
             durable_workflow_id = claim_row["workflow_id"]
@@ -780,6 +781,36 @@ class PostgresClaimTransitionStore:
             ):
                 raise ClaimConflictError(
                     "compensation Claim workflow provenance changed"
+                )
+            if claim_row["disposition"] == (
+                EnqueueClaimDisposition.OUTCOME_RECORDED.value
+            ):
+                expected_enqueue_state = {
+                    _PhysicalOutcomeDisposition.ENQUEUED: (
+                        AttemptEnqueueState.ENQUEUED.value
+                    ),
+                    _PhysicalOutcomeDisposition.WORKFLOW_ALREADY_PRESENT: (
+                        AttemptEnqueueState.WORKFLOW_ALREADY_PRESENT.value
+                    ),
+                }[disposition]
+                if (
+                    attempt_row is None
+                    or attempt_row["workflow_id"] != durable_workflow_id
+                    or attempt_row["enqueue_state"] != expected_enqueue_state
+                ):
+                    raise ClaimConflictError(
+                        "recorded enqueue outcome conflicts with durable "
+                        "Attempt"
+                    )
+                return
+            if (
+                claim_row["disposition"]
+                != EnqueueClaimDisposition.INVALIDATED.value
+                or claim_row["enqueue_call_started_at"] is None
+            ):
+                raise ClaimAuthorityError(
+                    "lost enqueue outcome has no invalidated call-started "
+                    "Claim"
                 )
             existing = (
                 connection.execute(

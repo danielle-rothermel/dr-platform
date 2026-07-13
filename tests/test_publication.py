@@ -24,15 +24,27 @@ from dr_platform import (
     capture_source_coordinate,
     check_snapshot_compatibility,
     cleanup_local_bundles,
-    export,
     pin_local_bundle,
     require_compatible_snapshot,
     resolve_local_pin,
     upgrade_platform_schema,
 )
+from dr_platform import (
+    export as _export,
+)
 from tests.contracts.test_platform_v6_cancellation import _register_operation
+from tests.test_export import _reconciliation
 
 _EMPTY_CHECKSUM = hashlib.sha256(b"[]").hexdigest()
+
+
+def export(source: Engine, options: ExportOptions, **kwargs):  # type: ignore[no-untyped-def]
+    return _export(
+        source,
+        options,
+        reconciliation=_reconciliation(source),
+        **kwargs,
+    )
 
 
 def _empty_candidate_manifest(
@@ -150,6 +162,135 @@ def test_combined_remote_promotion_fails_before_staging(
             stage=stage,
         )
     assert missing.value.result.disposition == "MISSING_COORDINATE"
+    assert not staged
+
+
+def test_combined_remote_promotion_accepts_same_database_source_families(
+    pg_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"same-database-{suffix}",
+        table_name=f"same_database_state_{suffix}",
+    )
+    fence.ensure_schema()
+    captured = datetime.now(UTC) - timedelta(seconds=1)
+    coordinates = (
+        SourceCoordinate(
+            source_id="application:shared",
+            database_server="shared",
+            captured_at=captured,
+        ),
+        SourceCoordinate(
+            source_id="dbos:shared",
+            database_server="shared",
+            captured_at=captured + timedelta(milliseconds=1),
+        ),
+    )
+    lease = fence.acquire_lease(
+        bundle_key="combined", run_id="owner", lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    table_name = fence.stage_table_name(
+        member="member",
+        run_id="owner",
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+    )
+
+    def stage(connection: Connection) -> RemoteBundleManifest:
+        connection.execute(text(f'CREATE TABLE "{table_name}" (id BIGINT)'))
+        return RemoteBundleManifest(
+            source_families=("application", "dbos"),
+            members=(
+                RemoteBundleMember(
+                    member="member",
+                    table_name=table_name,
+                    key_columns=("id",),
+                    row_count=0,
+                    checksum=_EMPTY_CHECKSUM,
+                ),
+            ),
+        )
+
+    result = fence.promote(
+        bundle_key="combined",
+        run_id="owner",
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+        bundle_id="same-database",
+        cursors={},
+        source_coordinates=coordinates,
+        source_families=("application", "dbos"),
+        stage=stage,
+    )
+    assert result.disposition == "PROMOTED"
+
+
+@pytest.mark.parametrize(
+    "coordinates",
+    [
+        (
+            SourceCoordinate(
+                source_id="application:one",
+                database_server="shared",
+                captured_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            SourceCoordinate(
+                source_id="application:two",
+                database_server="shared",
+                captured_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+        ),
+        (
+            SourceCoordinate(
+                source_id="application:one",
+                database_server="shared",
+                captured_at=datetime.now(UTC) + timedelta(hours=1),
+            ),
+            SourceCoordinate(
+                source_id="dbos:one",
+                database_server="shared",
+                captured_at=datetime.now(UTC) + timedelta(hours=1),
+            ),
+        ),
+    ],
+    ids=("duplicate-family", "future-capture"),
+)
+def test_combined_remote_promotion_rejects_invalid_coordinates(
+    pg_engine: Engine, coordinates: tuple[SourceCoordinate, ...]
+) -> None:
+    suffix = uuid4().hex[:12]
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"invalid-family-{suffix}",
+        table_name=f"invalid_family_state_{suffix}",
+    )
+    fence.ensure_schema()
+    lease = fence.acquire_lease(
+        bundle_key="combined", run_id="owner", lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    staged = False
+
+    def stage(_connection: Connection) -> RemoteBundleManifest:
+        nonlocal staged
+        staged = True
+        raise AssertionError("coordinate validation must precede staging")
+
+    with pytest.raises(IncompatibleSnapshotError):
+        fence.promote(
+            bundle_key="combined",
+            run_id="owner",
+            fencing_token=lease.fencing_token,
+            snapshot_seq=1,
+            bundle_id="invalid",
+            cursors={},
+            source_coordinates=coordinates,
+            source_families=("application", "dbos"),
+            stage=stage,
+        )
     assert not staged
 
 

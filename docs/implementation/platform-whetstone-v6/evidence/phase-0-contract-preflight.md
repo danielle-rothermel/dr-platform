@@ -17,6 +17,9 @@ uv run python scripts/platform_v6_preflight.py postgres-fencing \
 uv run python scripts/platform_v6_preflight.py motherduck-fencing
 uv run python scripts/platform_v6_preflight.py motherduck-parity
 uv run python scripts/platform_v6_preflight.py capture-skew
+uv run python scripts/platform_v6_preflight.py verify-capture-skew \
+  --expected-application-project-hash 56f797833dee \
+  --expected-system-project-hash 56f797833dee
 ```
 
 The Postgres contract tests use `DR_PLATFORM_TEST_DATABASE_URL` when set and
@@ -74,20 +77,27 @@ WHERE datname = current_database();
 ```
 
 Transaction-scoped advisory lock contention and automatic release passed with
-two independent connections. The ctype-independent populated-only predicate
-uses `btrim(value, :unicode_whitespace) <> ''` with this exact closed 25-code
-point Unicode White_Space set in both SQL and Python:
+two independent connections. The populated-only preflight executes the frozen
+PostgreSQL predicate directly:
+
+```sql
+terminal_submission_text IS NOT NULL
+AND terminal_submission_text ~ '[^[:space:]]'
+```
+
+Against the recorded provisioned locale, U+0085 is populated even though it is
+in the Unicode White_Space set. The fixture asserts that observed pinned SQL
+semantics and does not substitute a Python trim operation or a hand-maintained
+SQL trim set. Its broader boundary corpus includes:
 
 ```text
 U+0009..U+000D, U+0020, U+0085, U+00A0, U+1680,
 U+2000..U+200A, U+2028, U+2029, U+202F, U+205F, U+3000
 ```
 
-Null, empty, every individual set member, the complete set in forward order,
-and the complete set in reverse order are unpopulated. Text containing any
-character outside the set is populated. Boundary fixtures include U+0008,
-U+180E, U+200B, and U+FEFF as populated non-members. No POSIX character class,
-database ctype, or unconstrained `str.strip()` decides membership.
+Null, empty, and POSIX-whitespace-only text are unpopulated. Boundary fixtures
+include U+0008, U+0085, U+180E, U+200B, and U+FEFF as populated values. The
+provisioned PostgreSQL POSIX character-class behavior is the authority.
 
 ## DuckDB process lock
 
@@ -103,14 +113,16 @@ Live probes were run with credentials supplied only through the existing
 environment:
 
 - `local-postgres`, project hash `56f797833dee`: advisory-lock
-  contention/release, Lease renewal CAS, stale-writer rejection, and atomic
-  bundle-plus-pointer transaction passed.
+  contention/release, Lease renewal CAS, current guarded promotion, stale
+  promotion rejection, and atomic bundle-plus-pointer transaction passed.
 - `neon-postgres`, project hash `3bb33d910255`: Lease renewal CAS,
-  stale-writer rejection, and atomic bundle-plus-pointer transaction passed.
+  current guarded promotion, stale promotion rejection, and atomic
+  bundle-plus-pointer transaction passed.
 - `motherduck-postgres`, non-secret endpoint label
   `aws-us-east-1/default-md`, project hash `493872f2ab39`: SSL connection,
-  temporary schema/table round-trip, Lease renewal CAS, stale-writer rejection,
-  and atomic bundle-plus-pointer transaction passed.
+  temporary schema/table round-trip, Lease renewal CAS, current guarded
+  promotion, stale promotion rejection, and atomic bundle-plus-pointer
+  transaction passed.
 - One physical MotherDuck table read through the DuckDB `md:` client and the
   official Postgres endpoint ran the same SQL and returned identical strict
   Pydantic view models for VARCHAR/DECIMAL/BIGINT values with
@@ -119,18 +131,21 @@ environment:
 
 The MotherDuck Postgres endpoint reports an unreliable affected-row count for
 an unmatched plain `UPDATE`. The reusable probe therefore uses `UPDATE ...
-RETURNING fencing_token`: a matching renewal returns the token and a stale
-writer returns no rows. This is the checked CAS detection mechanism.
+RETURNING` for the promotion CAS: the current owner/token/unexpired Lease and
+expected current pointer return the promoted bundle, while a stale token
+returns no rows. This is the checked CAS detection mechanism.
 
 The reusable implementation pattern for either destination is one temporary
 schema and two independently opened writer connections, one acting as current
 owner and one as stale writer. The probe output includes
 `independent_writer_connections=PASS`, and any failed fencing boolean exits
 nonzero. The probes use a Lease row with owner/token and
-expiry, conditional renewal matching owner/token, a stale-token update that
-must affect zero rows, and a transaction that writes bundle members and swaps
-the pointer together. Credentials remain environment inputs and must never be
-embedded in evidence.
+expiry, conditional renewal matching owner/token, current and stale writers
+attempting the same Lease/token/expiry/pointer-guarded promotion shape, and a
+transaction that writes the current bundle member and swaps the pointer
+together. Credentials remain environment inputs and must never be embedded in
+evidence. Temporary schemas, including stale candidate rows, are dropped in a
+`finally` block.
 
 ## Final application/DBOS topology and timestamp bound
 
@@ -140,7 +155,7 @@ database connections and separate schemas. An absent
 `DBOS_SYSTEM_DATABASE_URL` intentionally selects the application endpoint;
 this is the supported final fallback, not an unresolved topology choice.
 
-The checked-in `capture-skew` command ran exactly 100 zero-work samples using
+The exploratory `capture-skew` command ran exactly 100 zero-work samples using
 independent application and DBOS connections. `DBOS_SYSTEM_DATABASE_URL` is
 currently absent, so the pinned fallback selected the same configured physical
 endpoint for the system connection. Results:
@@ -177,12 +192,24 @@ An earlier independent run observed p99 `0.248 ms` and median query quantum
 `0.045 ms`; it produced the same 100 ms bound. The recorded rerun above is the
 auditable sample set.
 
-The bound is `ceil((p99 + 2 * median_query_quantum) / 100) * 100`, with a
-minimum increment of 100 ms and a hard cap of 5,000 ms. The reusable command
-also emits all raw samples plus non-secret endpoint hashes. P7 reruns the same
-100 samples as verification of the pinned topology, not as topology selection.
-Changing either endpoint or the resulting bound is a reviewed
-configuration-contract change.
+The exploratory bound is
+`ceil((p99 + 2 * median_query_quantum) / 100) * 100`, with a minimum increment
+of 100 ms and a hard cap of 5,000 ms. The reusable command
+also emits all raw samples plus non-secret endpoint hashes. The separate
+`verify-capture-skew` command exits nonzero unless both endpoint hashes, the
+pinned same-endpoint/fallback relationship, the configured and derived 100 ms
+bound, and measured p99 skew all match the frozen contract. P7 reruns that
+verification rather than selecting topology. Changing either endpoint or the
+bound is a reviewed configuration-contract change.
+
+The 2026-07-12 remediation rerun used the checked-in guarded promotion probes.
+Neon hash `3bb33d910255` and MotherDuck hash `493872f2ab39` both reported current
+promotion success, stale promotion rejection, atomic pointer visibility, and
+independent connections as `PASS`. Post-probe checks found zero temporary
+schemas on both providers. The pinned skew verification used application/system
+hashes `56f797833dee`, observed the required `same-endpoint-fallback`
+relationship over 100 samples, measured p99 `0.339 ms`, and passed identity,
+relationship, configured/derived 100 ms bound, and measured-bound checks.
 
 ## Unitbench and Vercel evidence
 

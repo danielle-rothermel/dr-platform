@@ -17,7 +17,9 @@ from dr_platform.reconciliation_runtime import (
     DbosLifecycleReader,
     LifecycleObservationReader,
     ReconcileOptions,
+    ReconciliationObservation,
     ReconciliationObservationDisposition,
+    WorkflowMetadataDisposition,
     reconcile,
 )
 from dr_platform.records import FailureSnapshot
@@ -53,11 +55,13 @@ def _status(
     *,
     workflow_id: str = "workflow-1",
     parent_workflow_id: str | None = None,
+    application_version: str | None = "application-v1",
 ) -> object:
     return SimpleNamespace(
         workflow_id=workflow_id,
         status=status,
         parent_workflow_id=parent_workflow_id,
+        application_version=application_version,
     )
 
 
@@ -112,10 +116,7 @@ def test_status_reader_normalizes_payload_free_workflow_state(
     client = FakeDbosClient(matches=[_status(status.value)])
     reader = DbosLifecycleReader(cast("DBOSClient", client))
 
-    observation = reader.observe(
-        workflow_id="workflow-1",
-        classify_error=_classify,
-    )
+    observation = reader.observe(workflow_id="workflow-1")
 
     assert observation.disposition is disposition
     assert observation.dbos_status is status
@@ -130,38 +131,12 @@ def test_status_reader_normalizes_payload_free_workflow_state(
     ]
 
 
-def test_error_status_uses_classifier_without_loading_dbos_payload() -> None:
+def test_error_status_fails_closed_without_authoritative_classification() -> (
+    None
+):
     client = FakeDbosClient(matches=[_status(DbosWorkflowStatus.ERROR.value)])
-    classified: list[BaseException] = []
-
-    def classify(error: BaseException) -> FailureSnapshot:
-        classified.append(error)
-        return _classify(error)
-
     observation = DbosLifecycleReader(cast("DBOSClient", client)).observe(
         workflow_id="workflow-1",
-        classify_error=classify,
-    )
-
-    assert (
-        observation.disposition is ReconciliationObservationDisposition.ERROR
-    )
-    assert observation.failure is not None
-    assert observation.failure.failure_class is FailureClass.TRANSIENT
-    assert len(classified) == 1
-    assert "payload" in str(classified[0])
-
-
-def test_error_status_fails_closed_when_classifier_raises() -> None:
-    client = FakeDbosClient(matches=[_status(DbosWorkflowStatus.ERROR.value)])
-
-    def reject_classification(error: BaseException) -> FailureSnapshot:
-        del error
-        raise ValueError("sensitive classifier detail")
-
-    observation = DbosLifecycleReader(cast("DBOSClient", client)).observe(
-        workflow_id="workflow-1",
-        classify_error=reject_classification,
     )
 
     assert (
@@ -169,7 +144,29 @@ def test_error_status_fails_closed_when_classifier_raises() -> None:
     )
     assert observation.failure is not None
     assert observation.failure.failure_class is FailureClass.PERMANENT
-    assert "sensitive classifier detail" not in observation.failure.message
+    assert observation.failure.error_type == "DbosWorkflowErrorUnclassifiable"
+    assert "unavailable" in observation.failure.message
+
+
+@pytest.mark.parametrize(
+    "failure_class", [FailureClass.TRANSIENT, FailureClass.PERMANENT]
+)
+def test_authoritative_reader_can_supply_typed_error_classification(
+    failure_class: FailureClass,
+) -> None:
+    observation = ReconciliationObservation(
+        workflow_id="workflow-1",
+        disposition=ReconciliationObservationDisposition.ERROR,
+        dbos_status=DbosWorkflowStatus.ERROR,
+        failure=FailureSnapshot(
+            failure_class=failure_class,
+            error_type="AuthoritativeWorkflowFailure",
+            message="safe diagnostic",
+        ),
+    )
+
+    assert observation.failure is not None
+    assert observation.failure.failure_class is failure_class
 
 
 @pytest.mark.parametrize(
@@ -221,7 +218,6 @@ def test_status_reader_fails_closed_on_ambiguous_or_invalid_lookup(
 ) -> None:
     observation = DbosLifecycleReader(cast("DBOSClient", client)).observe(
         workflow_id="workflow-1",
-        classify_error=_classify,
     )
 
     assert (
@@ -237,7 +233,6 @@ def test_status_reader_reports_exact_absence_without_failure() -> None:
         cast("DBOSClient", FakeDbosClient())
     ).observe(
         workflow_id="workflow-1",
-        classify_error=_classify,
     )
 
     assert (
@@ -245,6 +240,57 @@ def test_status_reader_reports_exact_absence_without_failure() -> None:
     )
     assert observation.dbos_status is None
     assert observation.failure is None
+
+
+@pytest.mark.parametrize(
+    ("client", "disposition", "application_version"),
+    [
+        pytest.param(
+            FakeDbosClient(
+                matches=[_status(DbosWorkflowStatus.SUCCESS.value)]
+            ),
+            WorkflowMetadataDisposition.AVAILABLE,
+            "application-v1",
+            id="available",
+        ),
+        pytest.param(
+            FakeDbosClient(),
+            WorkflowMetadataDisposition.UNAVAILABLE,
+            None,
+            id="absent",
+        ),
+        pytest.param(
+            FakeDbosClient(error=RuntimeError("secret")),
+            WorkflowMetadataDisposition.UNAVAILABLE,
+            None,
+            id="lookup-unavailable",
+        ),
+        pytest.param(
+            FakeDbosClient(
+                matches=[
+                    _status(DbosWorkflowStatus.SUCCESS.value),
+                    _status(DbosWorkflowStatus.SUCCESS.value),
+                ]
+            ),
+            WorkflowMetadataDisposition.AMBIGUOUS,
+            None,
+            id="ambiguous",
+        ),
+    ],
+)
+def test_workflow_metadata_reader_returns_typed_payload_free_outcome(
+    client: FakeDbosClient,
+    disposition: WorkflowMetadataDisposition,
+    application_version: str | None,
+) -> None:
+    metadata = DbosLifecycleReader(
+        cast("DBOSClient", client)
+    ).read_workflow_metadata(workflow_id="workflow-1")
+
+    assert metadata.disposition is disposition
+    assert metadata.application_version == application_version
+    assert client.calls[0]["load_input"] is False
+    assert client.calls[0]["load_output"] is False
 
 
 class FakeStepResult:

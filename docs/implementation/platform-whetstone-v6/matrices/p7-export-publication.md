@@ -57,8 +57,17 @@ P7 verification on 2026-07-12:
   measured p99 skew `0.297 ms`, median query quantum `0.188 ms`, and retained
   the pinned `100 ms` bound. `DBOS_SYSTEM_DATABASE_URL` was absent, so the
   specified application-endpoint fallback was exercised.
+- The 2026-07-12 Phase-0 remediation rerun verified that same pinned topology
+  and both expected hashes, measured p99 skew `0.339 ms`, and passed the
+  configured/derived `100 ms` and measured-bound checks. The separate
+  exploratory command is not treated as contract verification.
 - Neon project hash `3bb33d910255`: the production fence promoted a physically
   present row-count/checksum-validated bundle with a database-server source
   coordinate and resolved an active pin. The endpoint was supplied through
   encrypted `DR_LLM_POSTGRES_SYNC_ADMIN_URL`; no URL value was printed or
   persisted. This closes the live Neon credential gate.
+- The reusable preflight probes also made current and stale writers attempt the
+  owner/token/unexpired-Lease/current-pointer guarded promotion CAS on Neon and
+  MotherDuck. Current promotion returned one row, stale promotion returned no
+  rows, atomic pointer visibility passed, and post-probe temporary-schema counts
+  were zero on both providers.

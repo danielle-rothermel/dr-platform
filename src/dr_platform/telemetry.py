@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
@@ -9,29 +11,22 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-_FORBIDDEN_KEY_PARTS = (
-    "access_token",
-    "api_key",
-    "auth_token",
-    "authorization",
-    "credential",
-    "database_url",
-    "error_payload",
-    "output",
-    "password",
-    "private_key",
-    "prompt",
-    "raw_metadata",
-    "secret",
-)
-_FORBIDDEN_VALUE_MARKERS = (
+_CREDENTIAL_VALUE_MARKERS = (
     "://",
+    "api-key",
     "api_key=",
     "apikey=",
-    "password=",
-    "token=",
+    "authorization",
     "bearer ",
+    "credential",
+    "password=",
+    "private_key",
+    "secret",
+    "token=",
 )
+_CREDENTIAL_VALUE_PREFIXES = ("ghp_", "github_pat_", "sk-", "sk_")
+_SAFE_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,255}$")
+_MAX_COUNTER = 2**63 - 1
 
 
 class TelemetryInitializationResult(BaseModel):
@@ -68,17 +63,63 @@ def initialize_telemetry_safely(
 def validated_telemetry_attributes(
     attributes: Mapping[str, str | int | float | bool],
 ) -> dict[str, str | int | float | bool]:
-    """Return safe span attributes or reject payload/secret-shaped facts."""
+    """Return the closed set of safe, typed span attributes."""
     validated: dict[str, str | int | float | bool] = {}
     for key, value in attributes.items():
-        normalized_key = key.casefold()
-        if not key.startswith(("platform.", "whetstone.")):
-            raise ValueError("telemetry attribute namespace is not allowed")
-        if any(part in normalized_key for part in _FORBIDDEN_KEY_PARTS):
-            raise ValueError("telemetry attribute key is forbidden")
-        if isinstance(value, str) and any(
-            marker in value.casefold() for marker in _FORBIDDEN_VALUE_MARKERS
-        ):
-            raise ValueError("telemetry attribute value is forbidden")
+        validator = _ATTRIBUTE_VALIDATORS.get(key)
+        if validator is None:
+            raise ValueError("telemetry attribute key is not approved")
+        validator(value)
         validated[key] = value
     return validated
+
+
+def _validate_safe_text(value: object) -> None:
+    if type(value) is not str or _SAFE_TEXT.fullmatch(value) is None:
+        raise ValueError("telemetry attribute value is not safe text")
+    normalized = value.casefold()
+    if normalized.startswith(_CREDENTIAL_VALUE_PREFIXES) or any(
+        marker in normalized for marker in _CREDENTIAL_VALUE_MARKERS
+    ):
+        raise ValueError("telemetry attribute value resembles a credential")
+
+
+def _validate_counter(value: object) -> None:
+    if type(value) is not int or not 0 <= value <= _MAX_COUNTER:
+        raise ValueError("telemetry attribute value is not a valid counter")
+
+
+def _validate_cost(value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(  # noqa: TRY004 -- one validation failure contract
+            "telemetry attribute value is not a valid cost"
+        )
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric < 0:
+        raise ValueError("telemetry attribute value is not a valid cost")
+
+
+def _validate_throttle_delay(value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(  # noqa: TRY004 -- one validation failure contract
+            "telemetry attribute value is not a valid delay"
+        )
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric < 0:
+        raise ValueError("telemetry attribute value is not a valid delay")
+
+
+_ATTRIBUTE_VALIDATORS = {
+    "platform.operation_key": _validate_safe_text,
+    "platform.execution_key": _validate_safe_text,
+    "platform.workflow_role": _validate_safe_text,
+    "platform.attempt": _validate_counter,
+    "platform.publication.destination_id": _validate_safe_text,
+    "platform.publication.disposition": _validate_safe_text,
+    "platform.publication.snapshot_seq": _validate_counter,
+    "whetstone.provider": _validate_safe_text,
+    "whetstone.model": _validate_safe_text,
+    "whetstone.token_count": _validate_counter,
+    "whetstone.provider_cost_usd": _validate_cost,
+    "whetstone.throttle_delay_ms": _validate_throttle_delay,
+}
