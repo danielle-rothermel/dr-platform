@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any, Protocol, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Protocol,
+    cast,
+    runtime_checkable,
+)
 from uuid import uuid4
 
 from dr_serialize import (
@@ -53,6 +60,11 @@ from dr_platform.status import (
 )
 
 if TYPE_CHECKING:
+    from dr_platform.enqueue_runtime import (
+        PhysicalEnqueueAdapter,
+        QueueLookup,
+        WorkflowObserver,
+    )
     from dr_platform.targets import ExecutionTarget, TargetResolver
 
 DEFAULT_PAGE_SIZE = 500
@@ -333,8 +345,11 @@ def submit(  # noqa: PLR0913 -- explicit public facade contract
     options: SubmitOptions | None = None,
     source_application_version: str = SOURCE_APPLICATION_VERSION_DEFAULT,
     schema: PlatformSchema | None = None,
+    queue_lookup: QueueLookup | None = None,
+    enqueue_adapter: PhysicalEnqueueAdapter | None = None,
+    workflow_observer: WorkflowObserver | None = None,
 ) -> SubmitResult:
-    """Register one immutable Operation completely without enqueueing DBOS."""
+    """Register and enqueue one immutable Operation through one pipeline."""
     selected_schema = schema or PlatformSchema()
     selected_options = options or SubmitOptions(page_size=manifest.page_size)
     if selected_options.page_size != manifest.page_size:
@@ -384,11 +399,65 @@ def submit(  # noqa: PLR0913 -- explicit public facade contract
             ),
         )
 
+    _enqueue_registered_page(
+        engine=engine,
+        resolver=resolver,
+        schema=selected_schema,
+        options=selected_options,
+        queue_lookup=queue_lookup,
+        enqueue_adapter=enqueue_adapter,
+        workflow_observer=workflow_observer,
+    )
+
     return _load_submit_result(
         engine=engine,
         schema=selected_schema,
         operation_key=manifest.operation_key,
     )
+
+
+def _enqueue_registered_page(  # noqa: PLR0913
+    *,
+    engine: Engine,
+    resolver: TargetResolver,
+    schema: PlatformSchema,
+    options: SubmitOptions,
+    queue_lookup: QueueLookup | None,
+    enqueue_adapter: PhysicalEnqueueAdapter | None,
+    workflow_observer: WorkflowObserver | None = None,
+) -> None:
+    from dbos import DBOS  # noqa: PLC0415 -- breaks claims/submission cycle
+
+    from dr_platform.claims import (  # noqa: PLC0415 -- cycle boundary
+        ClaimPageOptions,
+    )
+    from dr_platform.enqueue_runtime import (  # noqa: PLC0415 -- cycle boundary
+        enqueue_pending_page,
+        enqueue_replacement_page,
+        recover_call_started_page,
+    )
+
+    selected_queue_lookup = (
+        cast("QueueLookup", DBOS) if queue_lookup is None else queue_lookup
+    )
+    claim_options = ClaimPageOptions(
+        page_size=options.page_size,
+        lease_seconds=options.claim_lease_seconds,
+    )
+    common = {
+        "resolver": resolver,
+        "queue_lookup": selected_queue_lookup,
+        "options": claim_options,
+        "schema": schema,
+        "adapter": enqueue_adapter,
+    }
+    recover_call_started_page(
+        engine,
+        **common,
+        observer=workflow_observer,
+    )
+    enqueue_replacement_page(engine, **common)
+    enqueue_pending_page(engine, **common)
 
 
 def abandon_registration(  # noqa: PLR0913 -- explicit public facade contract

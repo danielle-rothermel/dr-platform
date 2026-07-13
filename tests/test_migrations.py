@@ -25,18 +25,13 @@ KERNEL_TABLE_SUFFIXES = {
     "platform_alembic_version",
 }
 
-CHANGE_TRACKED_SUFFIXES = KERNEL_TABLE_SUFFIXES - {
-    "platform_alembic_version"
-}
+CHANGE_TRACKED_SUFFIXES = KERNEL_TABLE_SUFFIXES - {"platform_alembic_version"}
 
 LEDGER_CHANGE_SEQ_QUERIES = {
     "operations": (
-        "SELECT change_seq FROM platform_operations "
-        "WHERE operation_key = 'op'"
+        "SELECT change_seq FROM platform_operations WHERE operation_key = 'op'"
     ),
-    "items": (
-        "SELECT change_seq FROM platform_items WHERE item_id = 'item'"
-    ),
+    "items": ("SELECT change_seq FROM platform_items WHERE item_id = 'item'"),
     "enqueue_claims": (
         "SELECT change_seq FROM platform_enqueue_claims "
         "WHERE claim_id = 'claim'"
@@ -106,6 +101,26 @@ def test_fresh_upgrade_creates_complete_kernel_schema(
         "change_seq",
     } <= attempt_columns
 
+    database_inspector = inspect(pg_engine)
+    claim_uniques = database_inspector.get_unique_constraints(
+        "platform_enqueue_claims"
+    )
+    assert any(
+        constraint["column_names"]
+        == ["item_id", "attempt", "claim_id", "workflow_id"]
+        for constraint in claim_uniques
+    )
+    compensation_foreign_keys = database_inspector.get_foreign_keys(
+        "platform_enqueue_compensations"
+    )
+    assert any(
+        foreign_key["constrained_columns"]
+        == ["item_id", "attempt", "claim_id", "workflow_id"]
+        and foreign_key["referred_columns"]
+        == ["item_id", "attempt", "claim_id", "workflow_id"]
+        for foreign_key in compensation_foreign_keys
+    )
+
 
 def test_prefix_is_the_only_physical_naming_option(pg_engine: Engine) -> None:
     upgrade_platform_schema(str(pg_engine.url), prefix="whetstone")
@@ -121,14 +136,56 @@ def test_prefix_is_the_only_physical_naming_option(pg_engine: Engine) -> None:
     }
 
 
+def test_claim_workflow_provenance_upgrades_existing_baseline(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                ALTER TABLE platform_enqueue_compensations
+                  DROP CONSTRAINT platform_fk_compensations_claim;
+                ALTER TABLE platform_enqueue_claims
+                  DROP CONSTRAINT platform_uq_claims_workflow_provenance;
+                ALTER TABLE platform_enqueue_compensations
+                  ADD CONSTRAINT platform_fk_compensations_claim
+                  FOREIGN KEY (item_id, attempt, claim_id)
+                  REFERENCES platform_enqueue_claims
+                    (item_id, attempt, claim_id)
+                  ON DELETE RESTRICT;
+                UPDATE platform_platform_alembic_version
+                  SET version_num = '0001_platform_baseline';
+                """
+            )
+        )
+
+    upgrade_platform_schema(str(pg_engine.url))
+
+    database_inspector = inspect(pg_engine)
+    assert any(
+        constraint["column_names"]
+        == ["item_id", "attempt", "claim_id", "workflow_id"]
+        for constraint in database_inspector.get_unique_constraints(
+            "platform_enqueue_claims"
+        )
+    )
+    assert any(
+        foreign_key["constrained_columns"]
+        == ["item_id", "attempt", "claim_id", "workflow_id"]
+        for foreign_key in database_inspector.get_foreign_keys(
+            "platform_enqueue_compensations"
+        )
+    )
+
+
 def test_prefix_rejects_generated_identifiers_over_postgres_limit(
     pg_engine: Engine,
 ) -> None:
     boundary_prefix = "p" * MAX_PREFIX_BYTES
     schema = PlatformSchema(prefix=boundary_prefix)
     generated_metadata_names = {
-        table.name
-        for table in schema.metadata.tables.values()
+        table.name for table in schema.metadata.tables.values()
     } | {
         named.name
         for table in schema.metadata.tables.values()
@@ -244,15 +301,18 @@ def test_kernel_rows_reject_hard_delete(pg_engine: Engine) -> None:
             )
         )
 
-    with pytest.raises(
-        Exception, match="kernel lifecycle rows cannot be deleted"
-    ), pg_engine.begin() as connection:
+    with (
+        pytest.raises(
+            Exception, match="kernel lifecycle rows cannot be deleted"
+        ),
+        pg_engine.begin() as connection,
+    ):
         connection.execute(
             text(
                 "DELETE FROM platform_throttle_state "
                 "WHERE throttle_key = 'provider:model'"
             )
-            )
+        )
 
 
 def _insert_terminal_attempt_fixture(connection: Connection) -> None:
@@ -337,9 +397,7 @@ def test_terminal_attempt_allows_noop_and_rejects_mutation(
     assert result.rowcount == 0
 
     with (
-        pytest.raises(
-            Exception, match="terminal item attempts are immutable"
-        ),
+        pytest.raises(Exception, match="terminal item attempts are immutable"),
         pg_engine.begin() as connection,
     ):
         connection.execute(
@@ -699,7 +757,9 @@ def test_call_started_claim_can_expire_or_be_replaced_without_losing_fact(
                     WHERE claim_id IN ('expired-claim', 'replaced-claim')
                     """
                 )
-            ).tuples().all()
+            )
+            .tuples()
+            .all()
         )
         connection.execute(
             text(
@@ -730,7 +790,9 @@ def test_call_started_claim_can_expire_or_be_replaced_without_losing_fact(
                     WHERE claim_id IN ('expired-claim', 'replaced-claim')
                     """
                 )
-            ).tuples().all()
+            )
+            .tuples()
+            .all()
         )
 
     assert after == before
@@ -795,8 +857,7 @@ def test_lifecycle_ledger_guards_reject_immutable_mutation(
             "Operation identity fields are immutable",
         ),
         (
-            "UPDATE platform_operations "
-            "SET metadata = '{\"changed\": true}'",
+            "UPDATE platform_operations SET metadata = '{\"changed\": true}'",
             "Operation identity fields are immutable",
         ),
         (
@@ -902,6 +963,47 @@ def test_compensation_created_at_is_always_immutable(
             text(
                 "UPDATE platform_enqueue_compensations "
                 "SET created_at = created_at + interval '1 second'"
+            )
+        )
+
+
+def test_compensation_fk_rejects_forged_claim_workflow(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    with pg_engine.begin() as connection:
+        _insert_terminal_attempt_fixture(connection)
+        connection.execute(
+            text(
+                """
+                INSERT INTO platform_enqueue_claims (
+                    item_id, attempt, claim_id, workflow_id, enqueue_try,
+                    claimed_at, lease_expires_at, enqueue_call_started_at,
+                    disposition, created_at
+                ) VALUES (
+                    'item', 0, 'claim', 'workflow', 1,
+                    now(), now() + interval '1 minute', now(),
+                    'call_started', now()
+                )
+                """
+            )
+        )
+
+    with (
+        pytest.raises(Exception, match="fk_compensations_claim"),
+        pg_engine.begin() as connection,
+    ):
+        connection.execute(
+            text(
+                """
+                INSERT INTO platform_enqueue_compensations (
+                    item_id, attempt, claim_id, workflow_id, reason,
+                    cancel_disposition, created_at
+                ) VALUES (
+                    'item', 0, 'claim', 'forged-workflow',
+                    'invalidated_call_started_claim', 'pending', now()
+                )
+                """
             )
         )
 

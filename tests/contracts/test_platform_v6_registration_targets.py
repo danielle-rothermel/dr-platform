@@ -67,6 +67,15 @@ TARGET_REF = ExecutionTargetRef(
 )
 
 
+@pytest.fixture(autouse=True)
+def _registration_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        submission_module,
+        "_enqueue_registered_page",
+        lambda **_kwargs: None,
+    )
+
+
 class ExampleItem(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
