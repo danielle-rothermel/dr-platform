@@ -158,13 +158,20 @@ implementation-first final hard cut: every slice is final-intent, old paths are
 deleted as their tested replacements land, and rollback uses source control
 plus fresh schemas rather than runtime compatibility paths.
 
-**Exact next action:** prepare implementation under
-[ADR 0022](../../adr/0022-implementation-first-final-hard-cut.md): create the
-implementation state-machine and scenario matrices that link every v6 A1-A3,
-L1-L2, and V1 risk, including the ADR 0023 compatibility-bound contract, to
-implementation decisions, focused tests, observability and escalation
-triggers, and code-review checkpoints; then begin the final-intent replacement
-slices against those artifacts without generating v7.
+Implementation under
+[ADR 0022](../../adr/0022-implementation-first-final-hard-cut.md) is complete
+(`READY_WITH_EXTERNAL_GATES`; see the
+[orchestration reflection](../../implementation/platform-whetstone-v6/orchestration-reflection.md)).
+[ADR 0025](../../adr/0025-v6-descope-recovery-automation-and-deferred-work.md)
+then descoped automated release recovery, MotherDuck operation-cleanup
+enablement, `PARTIAL` promotion, the queued cancellation extensions, and
+recurring hosted parity, closing all ambiguous work-in-progress
+([execution record](../../implementation/platform-whetstone-v6/descope-cleanup.md)).
+
+**Exact next action:** merge whetstone-ai PR #41 (strict run-schema
+isolation), rerun store acceptance, run the 12-cell canary, then the full
+locked paid sweep; the remaining open risks (A2 verification, A3 P7/W7, L1 W3,
+L2, V1) close on sweep/validation evidence.
 
 ## Historical provenance
 
