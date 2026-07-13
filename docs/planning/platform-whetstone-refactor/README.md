@@ -168,10 +168,30 @@ enablement, `PARTIAL` promotion, the queued cancellation extensions, and
 recurring hosted parity, closing all ambiguous work-in-progress
 ([execution record](../../implementation/platform-whetstone-v6/descope-cleanup.md)).
 
-**Exact next action:** merge whetstone-ai PR #41 (strict run-schema
-isolation), rerun store acceptance, run the 12-cell canary, then the full
-locked paid sweep; the remaining open risks (A2 verification, A3 P7/W7, L1 W3,
-L2, V1) close on sweep/validation evidence.
+On 2026-07-13 the live campaign ran through store acceptance, the 12-cell
+canary (three production defects found and fixed: whetstone-ai PRs #43, #44,
+#46), and 4,212 of 5,904 cells (4,206 succeeded, 6 retryable typed failures)
+before the owner deliberately halted it: measured straggler behavior (mean
+cell 7.7 s, slowest 1,139.7 s) showed the locked flow's shard barriers make
+the longest single call block the entire pipeline, which is not a usable
+system. The
+[streaming-conversion handoff](../../implementation/platform-whetstone-v6/handoff-streaming-conversion.md)
+records the full evidence, the resume inventory, and the changed completion
+criterion.
+
+**Exact next action:** implement whetstone-ai issues
+[#48](https://github.com/danielle-rothermel/whetstone-ai/issues/48) (separate
+generation/scoring worker pools) and
+[#49](https://github.com/danielle-rothermel/whetstone-ai/issues/49)
+(end-to-end streaming: generation never blocks on submission, scoring never
+blocks on generation, submission runs consistently; accepted trade of some
+determinism/verifiability), first re-examining the affected reviewed
+constraints (frozen scoring cut, ADR 0018/0020 acceptance timing, L2
+selection ordering, campaign-lock shard artifacts) through the adversarial
+plan-review process. The implementation is complete and validated only when
+the sweep is finished on the streaming design; scoring, acceptance,
+publication, hosted parity, UI validation, cutover, and the operations report
+follow it unchanged.
 
 ## Historical provenance
 
