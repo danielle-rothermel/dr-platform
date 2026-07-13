@@ -66,6 +66,7 @@ from dr_platform.submission import (
     submit,
 )
 from dr_platform.targets import TargetRegistry
+from tests.conftest import engine_dsn
 from tests.contracts.test_platform_v6_enqueue_claims import (
     ClaimTestItem,
     ClaimTestSource,
@@ -211,7 +212,7 @@ def _cancellation_cut(
 def test_cancellation_persists_intent_and_exact_replay(
     pg_engine: Any,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine,
@@ -298,7 +299,7 @@ def test_cancellation_persists_intent_and_exact_replay(
 def test_cancellation_rejects_operation_cut_drift_without_mutation(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine,
@@ -360,7 +361,7 @@ def test_cancellation_rejects_operation_cut_drift_without_mutation(
 def test_cancellation_rejects_successor_installed_after_preview(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     registry = _register_operation(
         pg_engine,
@@ -436,7 +437,7 @@ def test_cancellation_rejects_successor_installed_after_preview(
 def test_cancellation_cut_requires_order_and_rejects_attempt_aba_drift(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine,
@@ -503,7 +504,7 @@ def test_cancellation_cut_requires_order_and_rejects_attempt_aba_drift(
 def test_cancellation_invalidates_claim_and_finalizes_not_enqueued(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine,
@@ -558,7 +559,7 @@ def test_cancellation_invalidates_claim_and_finalizes_not_enqueued(
 def test_cancellation_repairs_invalidated_call_started_claim(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine,
@@ -619,7 +620,7 @@ def test_cancellation_repairs_invalidated_call_started_claim(
 def test_absent_late_enqueue_hazard_blocks_new_reference(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine,
@@ -693,7 +694,7 @@ def test_absent_late_enqueue_hazard_blocks_new_reference(
 def test_retry_reference_paths_share_unresolved_cancellation_guard(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     registry = _register_operation(
         pg_engine,
@@ -844,7 +845,7 @@ def test_retry_reference_paths_share_unresolved_cancellation_guard(
 def test_absence_threshold_unblocks_and_late_appearance_appends_successor(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine,
@@ -1046,7 +1047,7 @@ def test_absence_threshold_unblocks_and_late_appearance_appends_successor(
 def test_multiple_compensations_for_one_workflow_converge_without_recancel(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine,
@@ -1119,7 +1120,7 @@ def test_multiple_compensations_for_one_workflow_converge_without_recancel(
 def test_partial_external_failure_is_durable_and_replay_retries_only_failure(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine,
@@ -1204,7 +1205,7 @@ def test_partial_external_failure_is_durable_and_replay_retries_only_failure(
 def test_shared_reference_skips_dbos_and_is_locally_sticky(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine, schema, operation_key="owner-a", item_keys=("shared",)
@@ -1251,7 +1252,7 @@ def test_terminal_observation_wins_cancellation_race(
     pg_engine: Engine,
     terminal: str,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine, schema, operation_key="terminal-race", item_keys=(terminal,)
@@ -1306,7 +1307,7 @@ def test_local_terminal_cancellation_is_observed_without_row_mutation(
     pg_engine: Engine,
     terminal: str,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine,
@@ -1364,7 +1365,7 @@ def test_local_terminal_cancellation_is_observed_without_row_mutation(
 def test_topology_drift_fails_closed_without_recursive_cancel(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine, schema, operation_key="topology", item_keys=("parent",)
@@ -1413,7 +1414,7 @@ def test_topology_drift_fails_closed_without_recursive_cancel(
 def test_cancelled_attempt_is_sticky_against_late_success(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     registry = _register_operation(
         pg_engine, schema, operation_key="sticky", item_keys=("late",)
@@ -1459,7 +1460,7 @@ def test_cancelled_attempt_is_sticky_against_late_success(
 def test_foreign_cancellation_provenance_allows_confirmed_retry(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     _register_operation(
         pg_engine, schema, operation_key="origin", item_keys=("shared",)
@@ -1540,7 +1541,7 @@ def test_foreign_cancellation_provenance_allows_confirmed_retry(
 def test_ambiguous_foreign_cancellation_provenance_fails_closed(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     registry = _register_operation(
         pg_engine, schema, operation_key="linked", item_keys=("shared",)
@@ -1611,7 +1612,7 @@ def test_ambiguous_foreign_cancellation_provenance_fails_closed(
 def test_missing_foreign_cancellation_provenance_fails_closed(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     registry = _register_operation(
         pg_engine,

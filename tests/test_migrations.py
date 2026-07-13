@@ -21,6 +21,7 @@ from dr_platform.db.schema import (
     POSTGRES_IDENTIFIER_MAX_BYTES,
     PlatformSchema,
 )
+from tests.conftest import engine_dsn
 
 KERNEL_TABLE_SUFFIXES = {
     "operations",
@@ -68,7 +69,7 @@ def _table_columns(engine: Engine, table: str) -> set[str]:
 def test_fresh_upgrade_creates_complete_kernel_schema(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
 
     tables = set(inspect(pg_engine).get_table_names())
     assert {f"platform_{suffix}" for suffix in KERNEL_TABLE_SUFFIXES} <= tables
@@ -148,7 +149,7 @@ def test_fresh_upgrade_creates_complete_kernel_schema(
 
 
 def test_prefix_is_the_only_physical_naming_option(pg_engine: Engine) -> None:
-    upgrade_platform_schema(str(pg_engine.url), prefix="whetstone")
+    upgrade_platform_schema(engine_dsn(pg_engine), prefix="whetstone")
 
     tables = set(inspect(pg_engine).get_table_names())
     expected_tables = {
@@ -178,7 +179,7 @@ def test_final_baseline_is_the_only_head_revision() -> None:
 
 def test_baseline_upgrade_and_downgrade_are_exact(pg_engine: Engine) -> None:
     upgrade_platform_schema(
-        str(pg_engine.url), revision=PLATFORM_BASELINE_REVISION
+        engine_dsn(pg_engine), revision=PLATFORM_BASELINE_REVISION
     )
     assert set(inspect(pg_engine).get_table_names()) == {
         f"platform_{suffix}" for suffix in KERNEL_TABLE_SUFFIXES
@@ -194,7 +195,7 @@ def test_baseline_upgrade_and_downgrade_are_exact(pg_engine: Engine) -> None:
         )
 
     command.downgrade(
-        migrate._alembic_config(str(pg_engine.url), "platform"), "base"
+        migrate._alembic_config(engine_dsn(pg_engine), "platform"), "base"
     )
 
     assert set(inspect(pg_engine).get_table_names()) == {
@@ -244,7 +245,7 @@ def test_prefix_rejects_generated_identifiers_over_postgres_limit(
         len(name.encode()) <= POSTGRES_IDENTIFIER_MAX_BYTES
         for name in generated_names
     )
-    upgrade_platform_schema(str(pg_engine.url), prefix=boundary_prefix)
+    upgrade_platform_schema(engine_dsn(pg_engine), prefix=boundary_prefix)
     assert f"{boundary_prefix}_operations" in set(
         inspect(pg_engine).get_table_names()
     )
@@ -253,7 +254,7 @@ def test_prefix_rejects_generated_identifiers_over_postgres_limit(
     with pytest.raises(ValueError, match="too long"):
         PlatformSchema(prefix=too_long_prefix)
     with pytest.raises(ValueError, match="too long"):
-        upgrade_platform_schema(str(pg_engine.url), prefix=too_long_prefix)
+        upgrade_platform_schema(engine_dsn(pg_engine), prefix=too_long_prefix)
     assert not any(
         table.startswith(too_long_prefix)
         for table in inspect(pg_engine).get_table_names()
@@ -269,7 +270,7 @@ def test_prefix_rejects_noncanonical_sql_identifiers(prefix: str) -> None:
 def test_change_sequence_advances_for_insert_and_update(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         connection.execute(
             text(
@@ -308,7 +309,7 @@ def test_change_sequence_advances_for_insert_and_update(
 
 
 def test_kernel_rows_reject_hard_delete(pg_engine: Engine) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         connection.execute(
             text(
@@ -405,7 +406,7 @@ def _insert_terminal_attempt_fixture(connection: Connection) -> None:
 def test_terminal_attempt_allows_noop_and_rejects_mutation(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
 
@@ -435,7 +436,7 @@ def test_terminal_attempt_allows_noop_and_rejects_mutation(
 def test_operation_completion_and_abandonment_require_complete_facts(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
 
@@ -500,7 +501,7 @@ def test_operation_timestamps_cannot_precede_creation(
     pg_engine: Engine,
     statement: str,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
 
@@ -512,7 +513,7 @@ def test_operation_timestamps_cannot_precede_creation(
 
 
 def test_item_updated_at_cannot_precede_creation(pg_engine: Engine) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
 
@@ -536,7 +537,7 @@ def test_attempt_timestamps_cannot_precede_creation(
     pg_engine: Engine,
     timestamp_field: str,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
 
@@ -652,7 +653,7 @@ def _ledger_change_seqs(connection: Connection) -> dict[str, int]:
 def test_lifecycle_ledger_guards_allow_noops_and_valid_transitions(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
         _insert_update_guard_fixtures(connection)
@@ -755,7 +756,7 @@ def test_lifecycle_ledger_guards_allow_noops_and_valid_transitions(
 def test_call_started_claim_can_expire_or_be_replaced_without_losing_fact(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
         connection.execute(
@@ -870,7 +871,7 @@ def test_lifecycle_ledger_guards_reject_immutable_mutation(
     statement: str,
     message: str,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
         _insert_update_guard_fixtures(connection)
@@ -931,7 +932,7 @@ def test_operation_and_item_guards_reject_immutable_mutation(
     statement: str,
     message: str,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
 
@@ -970,7 +971,7 @@ def test_resolved_ledgers_reject_every_non_noop_mutation(
     case: tuple[str, str, str, str, str],
 ) -> None:
     resolution, select_seq, noop, mutation, message = case
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
         _insert_update_guard_fixtures(connection)
@@ -991,7 +992,7 @@ def test_resolved_ledgers_reject_every_non_noop_mutation(
 def test_compensation_created_at_is_always_immutable(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
         _insert_update_guard_fixtures(connection)
@@ -1011,7 +1012,7 @@ def test_compensation_created_at_is_always_immutable(
 def test_compensation_fk_rejects_forged_claim_workflow(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
         connection.execute(
@@ -1052,7 +1053,7 @@ def test_compensation_fk_rejects_forged_claim_workflow(
 def test_claimed_disposition_cannot_have_call_started_timestamp(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
 
@@ -1080,7 +1081,7 @@ def test_claimed_disposition_cannot_have_call_started_timestamp(
 def test_claim_invalidation_facts_require_invalidated_disposition(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         _insert_terminal_attempt_fixture(connection)
         _insert_update_guard_fixtures(connection)
@@ -1103,7 +1104,7 @@ def test_claim_invalidation_facts_require_invalidated_disposition(
 def test_every_exported_kernel_table_has_change_trigger(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.connect() as connection:
         trigger_tables = set(
             connection.execute(
@@ -1123,18 +1124,18 @@ def test_every_exported_kernel_table_has_change_trigger(
 
 
 def test_upgrade_accepts_percent_encoded_urls(pg_engine: Engine) -> None:
-    url = str(pg_engine.url) + "?options=-csearch_path%3Dpublic"
+    url = engine_dsn(pg_engine) + "?options=-csearch_path%3Dpublic"
     upgrade_platform_schema(url)
     assert "platform_operations" in set(inspect(pg_engine).get_table_names())
 
 
 def test_search_path_schema_has_independent_lineage(pg_engine: Engine) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         connection.execute(text("DROP SCHEMA IF EXISTS scratch CASCADE"))
         connection.execute(text("CREATE SCHEMA scratch"))
     scratch_url = (
-        str(pg_engine.url) + "?options=-csearch_path%3Dscratch,public"
+        engine_dsn(pg_engine) + "?options=-csearch_path%3Dscratch,public"
     )
     upgrade_platform_schema(scratch_url)
 

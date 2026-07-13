@@ -18,9 +18,12 @@ UNICODE_WHITESPACE = (
     "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
     "\u2028\u2029\u202f\u205f\u3000"
 )
+# COLLATE "C" pins [[:space:]] to ASCII whitespace; without it the regex
+# classifies non-ASCII whitespace by the provisioned database locale, which
+# differs between libc implementations (macOS vs the glibc CI container).
 POPULATED_SQL = (
     "CAST(:value AS text) IS NOT NULL "
-    "AND CAST(:value AS text) ~ '[^[:space:]]'"
+    "AND CAST(:value AS text) COLLATE \"C\" ~ '[^[:space:]]'"
 )
 BASE_POPULATED_CASES = (
     (None, False),
@@ -34,7 +37,8 @@ BASE_POPULATED_CASES = (
     ("\u0008", True),
 )
 POPULATED_CASES = BASE_POPULATED_CASES + tuple(
-    (character, character == "\u0085") for character in UNICODE_WHITESPACE
+    (character, character not in " \t\n\v\f\r")
+    for character in UNICODE_WHITESPACE
 )
 LOCK_PROBE = """
 import fcntl
@@ -70,7 +74,7 @@ def test_postgres_reports_database_ctype_and_collation(
         row = (
             connection.execute(
                 text(
-                    "SELECT datcollate, datctype, datlocprovider, datlocale "
+                    "SELECT datcollate, datctype, datlocprovider "
                     "FROM pg_database WHERE datname = current_database()"
                 )
             )
@@ -83,7 +87,7 @@ def test_postgres_reports_database_ctype_and_collation(
     assert row["datlocprovider"] in {"b", "c", "i"}
 
 
-def test_frozen_populated_predicate_uses_provisioned_postgres_semantics(
+def test_frozen_populated_predicate_pins_ascii_whitespace_semantics(
     contract_pg_engine: Engine,
 ) -> None:
     assert len(UNICODE_WHITESPACE) == 25

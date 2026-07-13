@@ -10,6 +10,7 @@ from sqlalchemy import CheckConstraint, Engine, text
 from sqlalchemy import inspect as inspect_database
 
 import dr_platform
+from tests.conftest import engine_dsn
 
 PREFIX = "p1_contract"
 FINAL_TABLE_SUFFIXES = frozenset(
@@ -401,7 +402,7 @@ def test_migration_lineage_has_only_the_final_baseline() -> None:
 
 
 def test_fresh_upgrade_creates_only_final_tables(pg_engine: Engine) -> None:
-    _upgrade(str(pg_engine.url))
+    _upgrade(engine_dsn(pg_engine))
     database_inspector = inspect_database(pg_engine)
     application_tables = {
         name
@@ -417,7 +418,7 @@ def test_fresh_upgrade_creates_only_final_tables(pg_engine: Engine) -> None:
 def test_fresh_upgrade_installs_change_sequence_ownership(
     pg_engine: Engine,
 ) -> None:
-    _upgrade(str(pg_engine.url))
+    _upgrade(engine_dsn(pg_engine))
     expected_tables = {
         f"{PREFIX}_{suffix}" for suffix in CHANGE_SEQUENCE_SUFFIXES
     }
@@ -457,7 +458,7 @@ def test_fresh_upgrade_installs_change_sequence_ownership(
 def test_fresh_upgrade_installs_append_only_and_terminal_guards(
     pg_engine: Engine,
 ) -> None:
-    _upgrade(str(pg_engine.url))
+    _upgrade(engine_dsn(pg_engine))
     expected_delete_guard_tables = {
         f"{PREFIX}_{suffix}" for suffix in LIFECYCLE_LEDGER_SUFFIXES
     }

@@ -72,6 +72,7 @@ from dr_platform.targets import (
     TargetContractDeclaration,
     TargetRegistry,
 )
+from tests.conftest import engine_dsn
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 SOURCE_ROOT: Final = REPO_ROOT / "src" / "dr_platform"
@@ -149,7 +150,7 @@ def _target() -> ExecutionTarget:
 
 
 def _upgrade_schema(engine: Engine) -> PlatformSchema:
-    upgrade_platform_schema(str(engine.url))
+    upgrade_platform_schema(engine_dsn(engine))
     return PlatformSchema()
 
 

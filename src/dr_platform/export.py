@@ -23,7 +23,7 @@ from enum import Enum, StrEnum
 from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, cast
 
 import duckdb
 from pydantic import (
@@ -34,6 +34,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     field_serializer,
+    model_validator,
 )
 from sqlalchemy import Connection, Engine, Table, text
 from sqlalchemy.sql import sqltypes
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
         QueueLookup,
         WorkflowObserver,
     )
+    from dr_platform.publication import PublicationReceipt
     from dr_platform.targets import TargetResolver
 
 NonEmptyStr = Annotated[StrictStr, Field(min_length=1)]
@@ -172,6 +174,7 @@ class ExportOptions(BaseModel):
     destination_id: NonEmptyStr = "local-duckdb"
     bundle_key: NonEmptyStr = "platform-kernel"
     run_id: NonEmptyStr = Field(default_factory=lambda: uuid.uuid4().hex)
+    operation_id: NonEmptyStr | None = None
     lease_seconds: PositiveInt = 60
     full_rebuild: StrictBool = False
     projections: tuple[ProjectionSpec, ...] = ()
@@ -179,6 +182,14 @@ class ExportOptions(BaseModel):
     # Every new local promotion is attested. Legacy rows are signed by the
     # explicit backfill API before readers begin enforcing this rule.
     integrity_signer: Any = None
+
+    @model_validator(mode="after")
+    def default_operation_identity(self) -> ExportOptions:
+        """Keep run_id as the deprecated attempt alias for old callers."""
+
+        if self.operation_id is None:
+            object.__setattr__(self, "operation_id", self.run_id)
+        return self
 
 
 class DestinationResult(BaseModel):
@@ -188,11 +199,17 @@ class DestinationResult(BaseModel):
 
     destination_id: NonEmptyStr
     status: Literal[
-        "PROMOTED", "IDEMPOTENT", "LEASE_HELD", "STALE_PROMOTION", "FAILED"
+        "PROMOTED",
+        "IDEMPOTENT",
+        "SUPERSEDED",
+        "LEASE_HELD",
+        "STALE_PROMOTION",
+        "FAILED",
     ]
     bundle_id: StrictStr | None = None
     fencing_token: NonNegativeInt | None = None
     error: StrictStr | None = None
+    receipt: PublicationReceipt | None = None
 
 
 class LocalDestinationResult(DestinationResult):
@@ -378,6 +395,13 @@ def export(
                             status=status,
                             bundle_id=bundle_id,
                             fencing_token=token,
+                            receipt=_local_receipt(
+                                options,
+                                bundle_id=bundle_id,
+                                snapshot_seq=high_water,
+                                status=status,
+                                checksums=checksums,
+                            ),
                         )
                     ]
                 except Exception as exc:
@@ -521,6 +545,8 @@ def _publish_kernel_remotes(
     """Physically stage and fenced-promote the complete canonical kernel."""
 
     from dr_platform.publication import (  # noqa: PLC0415 -- import cycle
+        PreparedStage,
+        PublicationOperationIdentity,
         RemoteBundleManifest,
         RemoteBundleMember,
         SourceCoordinate,
@@ -572,25 +598,50 @@ def _publish_kernel_remotes(
                 for spec, source_table in members
             }
             counts, checksums = _validate_members(members, normalized_rows)
+            stage_members = tuple(
+                RemoteBundleMember(
+                    member=spec.member,
+                    schema_name=(
+                        "main" if fence.kind == "motherduck" else "public"
+                    ),
+                    table_name=fence.stage_table_name(
+                        member=spec.member,
+                        run_id=options.run_id,
+                        fencing_token=lease.fencing_token,
+                        snapshot_seq=snapshot_seq,
+                    ),
+                    key_columns=spec.unique_key,
+                    row_count=counts[spec.member],
+                    checksum=checksums[spec.member],
+                )
+                for spec, _source_table in members
+            )
+            stage_plan = RemoteBundleManifest(
+                members=stage_members, source_families=("application", "dbos")
+            )
 
             def stage(
                 connection: Connection,
+                prepared: PreparedStage | None = None,
                 *,
                 destination: Any = fence,
-                fencing_token: int = lease.fencing_token,
                 staged_rows: Mapping[
                     str, list[dict[str, Any]]
                 ] = normalized_rows,
                 staged_counts: Mapping[str, int] = counts,
                 staged_checksums: Mapping[str, str] = checksums,
+                prepared_plan: RemoteBundleManifest = stage_plan,
             ) -> RemoteBundleManifest:
                 staged: list[RemoteBundleMember] = []
                 for spec, source_table in members:
-                    table_name = destination.stage_table_name(
-                        member=spec.member,
-                        run_id=options.run_id,
-                        fencing_token=fencing_token,
-                        snapshot_seq=snapshot_seq,
+                    table_name = (
+                        prepared.table_name(spec.member)
+                        if prepared is not None
+                        else next(
+                            member.table_name
+                            for member in prepared_plan.members
+                            if member.member == spec.member
+                        )
                     )
                     connection.execute(
                         text(
@@ -630,6 +681,10 @@ def _publish_kernel_remotes(
                             checksum=staged_checksums[spec.member],
                         )
                     )
+                    if prepared is not None:
+                        destination.stage_member_complete(
+                            prepared, spec.member
+                        )
                 return RemoteBundleManifest(
                     members=tuple(staged),
                     source_families=("application", "dbos"),
@@ -645,6 +700,11 @@ def _publish_kernel_remotes(
                 source_coordinates=coordinates,
                 source_families=("application", "dbos"),
                 stage=stage,
+                operation_identity=PublicationOperationIdentity(
+                    operation_id=str(options.operation_id),
+                    attempt_id=options.run_id,
+                ),
+                stage_plan=stage_plan,
             )
             results.append(
                 PostgresDestinationResult(
@@ -652,6 +712,7 @@ def _publish_kernel_remotes(
                     status=promoted.disposition,
                     bundle_id=promoted.bundle_id,
                     fencing_token=token,
+                    receipt=promoted.receipt,
                 )
             )
         except Exception as exc:
@@ -1495,6 +1556,42 @@ def _renew_lease(
     return renewed == (token,)
 
 
+def _local_receipt(
+    options: ExportOptions,
+    *,
+    bundle_id: str | None,
+    snapshot_seq: int,
+    status: str,
+    checksums: Mapping[str, str],
+) -> PublicationReceipt | None:
+    if bundle_id is None or status not in {"PROMOTED", "IDEMPOTENT"}:
+        return None
+    from dr_platform.publication import PublicationReceipt  # noqa: PLC0415
+
+    plan_digest = hashlib.sha256(
+        _canonical(
+            {
+                "version": "dr-platform.local-recovery-plan.v1",
+                "operation_id": options.operation_id,
+                "destination_id": options.destination_id,
+                "bundle_key": options.bundle_key,
+                "bundle_id": bundle_id,
+                "snapshot_seq": snapshot_seq,
+                "checksums": dict(checksums),
+            }
+        ).encode()
+    ).hexdigest()
+    return PublicationReceipt(
+        operation_id=str(options.operation_id),
+        destination_id=options.destination_id,
+        bundle_key=options.bundle_key,
+        bundle_id=bundle_id,
+        snapshot_seq=snapshot_seq,
+        stage_plan_digest=plan_digest,
+        disposition=cast("Literal['PROMOTED', 'IDEMPOTENT']", status),
+    )
+
+
 def _empty_result(
     schema: PlatformSchema,
     options: ExportOptions,
@@ -1595,6 +1692,13 @@ def _export_application(
                         status=status,
                         bundle_id=bundle_id,
                         fencing_token=token,
+                        receipt=_local_receipt(
+                            options,
+                            bundle_id=bundle_id,
+                            snapshot_seq=snapshot_seq,
+                            status=status,
+                            checksums=checksums,
+                        ),
                     )
                 ]
                 destinations.extend(
@@ -1657,6 +1761,8 @@ def _publish_application_remotes(
 
     from dr_platform.publication import (  # noqa: PLC0415 -- import cycle
         PostgresPublicationFence,
+        PreparedStage,
+        PublicationOperationIdentity,
         RemoteBundleManifest,
         RemoteBundleMember,
         SourceCoordinate,
@@ -1690,20 +1796,46 @@ def _publish_application_remotes(
                 )
                 continue
             assert lease.fencing_token is not None
+            stage_plan = RemoteBundleManifest(
+                members=tuple(
+                    RemoteBundleMember(
+                        member=spec.member,
+                        schema_name=(
+                            "main" if fence.kind == "motherduck" else "public"
+                        ),
+                        table_name=fence.stage_table_name(
+                            member=spec.member,
+                            run_id=options.run_id,
+                            fencing_token=lease.fencing_token,
+                            snapshot_seq=snapshot_seq,
+                        ),
+                        key_columns=spec.unique_key,
+                        row_count=counts[spec.member],
+                        checksum=checksums[spec.member],
+                        column_schema=spec.column_schema,
+                    )
+                    for spec in specs
+                ),
+                source_families=("application",),
+            )
 
             def stage(
                 connection: Connection,
+                prepared: PreparedStage | None = None,
                 *,
                 destination: Any = fence,
-                token: int = lease.fencing_token,
+                prepared_plan: RemoteBundleManifest = stage_plan,
             ) -> Any:
                 members: list[RemoteBundleMember] = []
                 for spec in specs:
-                    table_name = destination.stage_table_name(
-                        member=spec.member,
-                        run_id=options.run_id,
-                        fencing_token=token,
-                        snapshot_seq=snapshot_seq,
+                    table_name = (
+                        prepared.table_name(spec.member)
+                        if prepared is not None
+                        else next(
+                            member.table_name
+                            for member in prepared_plan.members
+                            if member.member == spec.member
+                        )
                     )
                     connection.execute(
                         text(
@@ -1751,6 +1883,10 @@ def _publish_application_remotes(
                             column_schema=spec.column_schema,
                         )
                     )
+                    if prepared is not None:
+                        destination.stage_member_complete(
+                            prepared, spec.member
+                        )
                 return RemoteBundleManifest(
                     members=tuple(members), source_families=("application",)
                 )
@@ -1767,6 +1903,11 @@ def _publish_application_remotes(
                 source_coordinates=(coordinate,),
                 source_families=("application",),
                 stage=stage,
+                operation_identity=PublicationOperationIdentity(
+                    operation_id=str(options.operation_id),
+                    attempt_id=options.run_id,
+                ),
+                stage_plan=stage_plan,
             )
             results.append(
                 PostgresDestinationResult(
@@ -1774,6 +1915,7 @@ def _publish_application_remotes(
                     status=promoted.disposition,
                     bundle_id=promoted.bundle_id,
                     fencing_token=lease.fencing_token,
+                    receipt=promoted.receipt,
                 )
             )
         except Exception as exc:

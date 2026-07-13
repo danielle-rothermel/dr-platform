@@ -39,6 +39,7 @@ from dr_platform.targets import (
     TargetContractDeclaration,
     TargetRegistry,
 )
+from tests.conftest import engine_dsn
 
 if TYPE_CHECKING:
     from dr_platform.items import SubmittableItem
@@ -127,7 +128,7 @@ def _register(
     *,
     service_classes: tuple[ServiceClass, ...],
 ) -> tuple[PlatformSchema, ExecutionTarget]:
-    upgrade_platform_schema(str(engine.url))
+    upgrade_platform_schema(engine_dsn(engine))
     schema = PlatformSchema()
     target = _target()
     registry = TargetRegistry()

@@ -60,6 +60,7 @@ from dr_platform.submission import (
     submit,
 )
 from dr_platform.targets import ExecutionTarget, TargetRegistry
+from tests.conftest import engine_dsn
 from tests.test_claims import _Item, _register, _Source, _target
 from tests.test_submission_pipeline import _manifest
 
@@ -93,7 +94,7 @@ def _register_with_policy(
     *,
     policy: RetryPolicy,
 ) -> tuple[PlatformSchema, ExecutionTarget]:
-    upgrade_platform_schema(str(engine.url))
+    upgrade_platform_schema(engine_dsn(engine))
     schema = PlatformSchema()
     target = _target()
     registry = _registry(target)

@@ -20,6 +20,17 @@ TEST_DATABASE_URL = os.environ.get(
 )
 
 
+def engine_dsn(engine: Engine) -> str:
+    """The engine's DSN with credentials intact.
+
+    ``str(URL)`` masks any password as the literal ``***``; a DSN
+    rebuilt that way still authenticates against trust-auth local sockets
+    but fails against password-authenticated servers such as the hosted CI
+    service container.
+    """
+    return engine.url.render_as_string(hide_password=False)
+
+
 @lru_cache(maxsize=1)
 def signed_integrity_test_material() -> tuple[
     OpenSslEd25519Signer, dict[str, str]
