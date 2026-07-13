@@ -16,7 +16,7 @@ from uuid import uuid4
 import duckdb
 import pytest
 from sqlalchemy import Connection, Engine, create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from dr_platform import (
     ExportOptions,
@@ -65,7 +65,7 @@ def export(source: Engine, options: ExportOptions, **kwargs):  # type: ignore[no
 
 
 def _empty_candidate_manifest(
-    connection: Connection, table_name: str
+    connection: Connection, table_name: str, schema_name: str = "public"
 ) -> RemoteBundleManifest:
     connection.execute(text(f'CREATE TABLE "{table_name}" (id BIGINT)'))
     return RemoteBundleManifest(
@@ -73,6 +73,7 @@ def _empty_candidate_manifest(
         members=(
             RemoteBundleMember(
                 member="member",
+                schema_name=schema_name,
                 table_name=table_name,
                 key_columns=("id",),
                 row_count=0,
@@ -960,6 +961,60 @@ def test_operation_cleanup_capability_is_fail_closed(
         default_neon.cleanup_operation("operation", "request", "digest")
 
 
+class _FakeDriverError(Exception):
+    """Driver-shaped error carrying the sqlstate psycopg exposes."""
+
+    def __init__(self, message: str, sqlstate: str) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+        self._message = message
+
+    def __str__(self) -> str:
+        return self._message
+
+
+def test_retryable_conflict_classification_is_backend_scoped() -> None:
+    engine = create_engine("postgresql+psycopg:///never_connected")
+
+    def wrapped(message: str, sqlstate: str) -> DBAPIError:
+        return DBAPIError(
+            "UPDATE gate", None, _FakeDriverError(message, sqlstate)
+        )
+
+    serialization = wrapped("serialization failure", "40001")
+    deadlock = wrapped("deadlock detected", "40P01")
+    # MotherDuck reports every failure as XXUUU; only its TransactionContext
+    # write-write aborts are transient, so classification must read DuckDB's
+    # message, and only for the motherduck backend.
+    update_conflict = wrapped(
+        "TransactionContext Error: Conflict on update!", "XXUUU"
+    )
+    catalog_conflict = wrapped(
+        "TransactionContext Error: Catalog write-write conflict on alter "
+        'with "Schema\0main\0main"',
+        "XXUUU",
+    )
+    catalog_missing = wrapped(
+        "Catalog Error: Table with name missing does not exist!", "XXUUU"
+    )
+    parser_error = wrapped(
+        'Parser Error: syntax error at or near "SELEKT"', "XXUUU"
+    )
+
+    kinds: tuple[Literal["motherduck", "neon"], ...] = ("motherduck", "neon")
+    for kind in kinds:
+        fence = PostgresPublicationFence(
+            engine, destination_id="classification", kind=kind
+        )
+        assert fence._retryable_database_error(serialization)
+        assert fence._retryable_database_error(deadlock)
+        assert not fence._retryable_database_error(catalog_missing)
+        assert not fence._retryable_database_error(parser_error)
+        expected = kind == "motherduck"
+        assert fence._retryable_database_error(update_conflict) is expected
+        assert fence._retryable_database_error(catalog_conflict) is expected
+
+
 def test_cleanup_rejects_a_plan_signed_by_an_unknown_key(
     pg_engine: Engine,
 ) -> None:
@@ -1422,11 +1477,67 @@ def test_remote_bad_builder_cannot_name_an_unowned_candidate_table(
     assert committed == 0
 
 
+def _motherduck_source_coordinate(
+    engine: Engine, snapshot_seq: int
+) -> SourceCoordinate:
+    """Capture a database-server coordinate from a MotherDuck endpoint.
+
+    MotherDuck's endpoint has no clock_timestamp(); its transaction-stable
+    CURRENT_TIMESTAMP is the only database-server clock and is sufficient
+    for a single-family cut.
+    """
+
+    with engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT current_database(), CURRENT_TIMESTAMP")
+        ).one()
+    return SourceCoordinate(
+        source_id=f"application:{row[0]}",
+        database_server=str(row[0]),
+        captured_at=row[1],
+        snapshot_seq=snapshot_seq,
+    )
+
+
+def _remote_table_exists(
+    engine: Engine,
+    kind: Literal["motherduck", "neon"],
+    schema_name: str,
+    table_name: str,
+) -> bool:
+    """Catalog existence probe; MotherDuck has no to_regclass."""
+
+    with engine.connect() as connection:
+        if kind == "neon":
+            return (
+                connection.execute(
+                    text("SELECT to_regclass(CAST(:name AS TEXT))"),
+                    {"name": f"{schema_name}.{table_name}"},
+                ).scalar_one()
+                is not None
+            )
+        return (
+            connection.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = :schema_name "
+                    "AND table_name = :table_name"
+                ),
+                {"schema_name": schema_name, "table_name": table_name},
+            ).one_or_none()
+            is not None
+        )
+
+
 def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
     engine: Engine, kind: Literal["motherduck", "neon"]
 ) -> None:
     suffix = uuid4().hex[:12]
     state_table = f"publication_state_{suffix}"
+    # MotherDuck's endpoint exposes exactly one writable schema, main;
+    # PostgreSQL destinations stage into public. This mirrors export's
+    # kind-derived member schema.
+    schema = "main" if kind == "motherduck" else "public"
     signer, key_ring = signed_integrity_test_material()
     fence = PostgresPublicationFence(
         engine,
@@ -1473,8 +1584,12 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
             lease_seconds=60,
         )
 
-        coordinate = capture_source_coordinate(
-            engine, source_id="application", snapshot_seq=1
+        coordinate = (
+            _motherduck_source_coordinate(engine, snapshot_seq=1)
+            if kind == "motherduck"
+            else capture_source_coordinate(
+                engine, source_id="application", snapshot_seq=1
+            )
         )
 
         def create_stale_stage(
@@ -1488,6 +1603,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
                 members=(
                     RemoteBundleMember(
                         member="member",
+                        schema_name=schema,
                         table_name=staged_table,
                         key_columns=("id",),
                         row_count=0,
@@ -1508,11 +1624,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
             stage=create_stale_stage,
         )
         assert stale.disposition == "STALE_PROMOTION"
-        with engine.connect() as connection:
-            exists = connection.execute(
-                text("SELECT to_regclass(:name)"), {"name": staged_table}
-            ).scalar_one()
-        assert exists is None
+        assert not _remote_table_exists(engine, kind, schema, staged_table)
 
         def expire_during_stage(
             connection: Connection,
@@ -1534,6 +1646,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
                 members=(
                     RemoteBundleMember(
                         member="member",
+                        schema_name=schema,
                         table_name=expired_table,
                         key_columns=("id",),
                         row_count=0,
@@ -1570,6 +1683,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
                 members=(
                     RemoteBundleMember(
                         member="member",
+                        schema_name=schema,
                         table_name=promoted_table,
                         key_columns=("id",),
                         row_count=0,
@@ -1605,7 +1719,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
             source_coordinates=(coordinate,),
             source_families=("application",),
             stage=lambda connection: _empty_candidate_manifest(
-                connection, replay_table
+                connection, replay_table, schema
             ),
         )
         assert idempotent.disposition == "IDEMPOTENT"
@@ -1614,7 +1728,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
         pin = fence.pin_bundle(bundle_key="analysis", ttl_seconds=60)
         resolved = fence.resolve_pin(pin)
         assert resolved.bundle_id == "bundle-one"
-        assert resolved.members == {"member": f"public.{promoted_table}"}
+        assert resolved.members == {"member": f"{schema}.{promoted_table}"}
 
         successor_lease = fence.acquire_lease(
             bundle_key="analysis", run_id="successor", lease_seconds=60
@@ -1628,13 +1742,15 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
             bundle_id="bundle-two",
             cursors={"member": 2},
             source_coordinates=(
-                capture_source_coordinate(
+                _motherduck_source_coordinate(engine, snapshot_seq=2)
+                if kind == "motherduck"
+                else capture_source_coordinate(
                     engine, source_id="application", snapshot_seq=2
                 ),
             ),
             source_families=("application",),
             stage=lambda connection: _empty_candidate_manifest(
-                connection, successor_table
+                connection, successor_table, schema
             ),
         )
         assert successor.disposition == "PROMOTED"
@@ -1678,6 +1794,14 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
             connection.execute(
                 text(f'DROP TABLE IF EXISTS "{state_table}_bundles"')
             )
+            connection.execute(
+                text(f'DROP TABLE IF EXISTS "{state_table}_operations"')
+            )
+            connection.execute(
+                text(
+                    f'DROP TABLE IF EXISTS "{state_table}_operation_members"'
+                )
+            )
             connection.execute(text(f'DROP TABLE IF EXISTS "{state_table}"'))
 
 
@@ -1700,7 +1824,10 @@ def motherduck_engine() -> Iterator[Engine]:
             "MotherDuck capability test requires "
             "DR_PLATFORM_MOTHERDUCK_TEST_DATABASE_URL"
         )
-    engine = create_engine(url)
+    # SQLAlchemy's psycopg dialect probes the hstore extension type inside a
+    # SAVEPOINT on first connect; MotherDuck's endpoint parses neither, so the
+    # probe must be disabled for the connection to initialize at all.
+    engine = create_engine(url, use_native_hstore=False)
     try:
         with engine.connect():
             pass

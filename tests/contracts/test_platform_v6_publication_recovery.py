@@ -95,6 +95,33 @@ def test_motherduck_operation_path_avoids_unproven_postgres_constructs() -> (
         assert forbidden not in ensure_schema_source
     assert "whetstone" not in publication_source.lower()
     assert "SERIALIZABLE" not in promote_source
+    # MotherDuck's parser rejects ADD COLUMN with constraints, so additive
+    # legacy migrations stay constraint-free; fresh CREATE statements carry
+    # the full NOT NULL shape instead.
+    # Exactly one constrained occurrence (the fresh CREATE) and one
+    # constraint-free occurrence (the legacy ADD COLUMN tuple) per column:
+    # a NOT NULL regression in the legacy migration flips both counts.
+    for constrained, legacy in (
+        (
+            "mutation_epoch BIGINT NOT NULL DEFAULT 0",
+            "mutation_epoch BIGINT DEFAULT 0",
+        ),
+        (
+            "pin_kind TEXT NOT NULL DEFAULT 'EXTERNAL'",
+            "pin_kind TEXT DEFAULT 'EXTERNAL'",
+        ),
+    ):
+        assert ensure_schema_source.count(constrained) == 1
+        assert ensure_schema_source.count(legacy) == 1
+    # MotherDuck rejects SERIALIZABLE; destructive cleanup relies on the
+    # same-transaction gate compare-and-set instead of an isolation level.
+    for cleanup in (
+        PostgresPublicationFence._cleanup_operation_once,
+        PostgresPublicationFence._cleanup_bundles_once,
+    ):
+        cleanup_source = inspect.getsource(cleanup)
+        assert 'if self.kind == "neon":' in cleanup_source
+        assert 'isolation_level="SERIALIZABLE"' in cleanup_source
 
 
 def test_fault_boundaries_are_named_in_platform_protocol() -> None:
