@@ -18,6 +18,13 @@ from dbos._sys_db import (
 )
 from sqlalchemy import create_engine, text
 
+from dr_platform.reconciliation_runtime import (
+    DbosLifecycleReader,
+    ReconciliationObservationDisposition,
+)
+from dr_platform.records import FailureSnapshot
+from dr_platform.status import FailureClass
+
 DBOS_VERSION = "2.26.0"
 CONTRACT_SCHEMA_PREFIX = "dbos_contract_preflight"
 QUEUE_NAME = "contract-priority"
@@ -655,6 +662,25 @@ def test_allowlisted_step_timeline_never_selects_or_deserializes_payloads(
             1,
             2,
         )
+        assert serializer.deserialize_calls == 1
+
+        reader = DbosLifecycleReader(payload_rejecting_client)
+        observation = reader.observe(
+            workflow_id="contract-payload",
+            classify_error=lambda error: FailureSnapshot(
+                failure_class=FailureClass.UNKNOWN,
+                error_type=type(error).__name__,
+                message=str(error),
+            ),
+        )
+        timeline = reader.read_step_history(workflow_id="contract-payload")
+
+        assert (
+            observation.disposition
+            is ReconciliationObservationDisposition.ACTIVE
+        )
+        assert len(timeline) == 1
+        assert timeline[0].function_name == "provider-call"
         assert serializer.deserialize_calls == 1
     finally:
         payload_rejecting_client.destroy()

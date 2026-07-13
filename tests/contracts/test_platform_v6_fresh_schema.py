@@ -20,6 +20,7 @@ FINAL_TABLE_SUFFIXES = frozenset(
         "next_attempt_requests",
         "enqueue_claims",
         "enqueue_compensations",
+        "missing_reobservations",
         "throttle_state",
     }
 )
@@ -126,6 +127,16 @@ EXPECTED_COLUMN_SUBSETS: dict[str, frozenset[str]] = {
             "cancel_disposition",
             "created_at",
             "resolved_at",
+            "change_seq",
+        }
+    ),
+    "missing_reobservations": frozenset(
+        {
+            "item_id",
+            "attempt",
+            "last_reobserved_at",
+            "observation_count",
+            "created_at",
             "change_seq",
         }
     ),
@@ -267,6 +278,29 @@ def test_claim_and_compensation_keys_are_exact() -> None:
     assert claim_foreign_key is not None
 
 
+def test_missing_reobservation_fact_is_attempt_scoped_and_indexed() -> None:
+    schema = _schema()
+    markers = _table(schema, "missing_reobservations")
+
+    assert tuple(column.name for column in markers.primary_key.columns) == (
+        "item_id",
+        "attempt",
+    )
+    foreign_key = next(iter(markers.foreign_key_constraints))
+    assert tuple(
+        element.target_fullname for element in foreign_key.elements
+    ) == (
+        f"{PREFIX}_item_attempts.item_id",
+        f"{PREFIX}_item_attempts.attempt",
+    )
+    assert foreign_key.ondelete == "RESTRICT"
+    index_columns = {
+        tuple(column.name for column in index.columns)
+        for index in markers.indexes
+    }
+    assert ("last_reobserved_at", "item_id", "attempt") in index_columns
+
+
 def test_shared_execution_identity_is_not_unique_per_attempt() -> None:
     schema = _schema()
     attempts = _table(schema, "item_attempts")
@@ -335,6 +369,8 @@ def test_migration_lineage_has_fresh_baseline_and_p3_provenance() -> None:
     assert versions == [
         "0001_platform_baseline.py",
         "0002_claim_workflow_provenance.py",
+        "0003_attempt_retry_reason.py",
+        "0004_missing_reobservation_schedule.py",
     ]
     assert not hasattr(migrate, "stamp_platform_schema")
     assert not hasattr(dr_platform, "stamp_platform_schema")

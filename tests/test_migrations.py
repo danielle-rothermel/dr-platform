@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 
 import pytest
 from sqlalchemy import Connection, Engine, inspect, text
@@ -21,6 +22,7 @@ KERNEL_TABLE_SUFFIXES = {
     "next_attempt_requests",
     "enqueue_claims",
     "enqueue_compensations",
+    "missing_reobservations",
     "throttle_state",
     "platform_alembic_version",
 }
@@ -86,6 +88,17 @@ def test_fresh_upgrade_creates_complete_kernel_schema(
         "change_seq",
     } <= item_columns
     assert "enqueue_metadata" not in item_columns
+
+    marker_columns = _table_columns(
+        pg_engine, "platform_missing_reobservations"
+    )
+    assert {
+        "item_id",
+        "attempt",
+        "last_reobserved_at",
+        "observation_count",
+        "change_seq",
+    } <= marker_columns
 
     attempt_columns = _table_columns(pg_engine, "platform_item_attempts")
     assert {
@@ -170,6 +183,34 @@ def test_claim_workflow_provenance_upgrades_existing_baseline(
             "platform_enqueue_claims"
         )
     )
+
+
+def test_missing_reobservation_schedule_upgrades_existing_schema(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(str(pg_engine.url))
+    with pg_engine.begin() as connection:
+        connection.execute(text("DROP TABLE platform_missing_reobservations"))
+        connection.execute(
+            text(
+                "UPDATE platform_platform_alembic_version "
+                "SET version_num = '0003_attempt_retry_reason'"
+            )
+        )
+
+    upgrade_platform_schema(str(pg_engine.url))
+
+    database_inspector = inspect(pg_engine)
+    assert "platform_missing_reobservations" in set(
+        database_inspector.get_table_names()
+    )
+    index_columns = {
+        tuple(index["column_names"])
+        for index in database_inspector.get_indexes(
+            "platform_missing_reobservations"
+        )
+    }
+    assert ("last_reobserved_at", "item_id", "attempt") in index_columns
     assert any(
         foreign_key["constrained_columns"]
         == ["item_id", "attempt", "claim_id", "workflow_id"]
@@ -177,6 +218,15 @@ def test_claim_workflow_provenance_upgrades_existing_baseline(
             "platform_enqueue_compensations"
         )
     )
+
+
+def test_attempt_retry_reason_downgrade_is_explicitly_irreversible() -> None:
+    migration = import_module(
+        "dr_platform.db.alembic.versions.0003_attempt_retry_reason"
+    )
+
+    with pytest.raises(RuntimeError, match="fresh schema"):
+        migration.downgrade()
 
 
 def test_prefix_rejects_generated_identifiers_over_postgres_limit(

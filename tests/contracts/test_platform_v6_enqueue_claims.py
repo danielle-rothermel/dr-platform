@@ -1779,7 +1779,7 @@ def test_root_submit_missing_queue_creates_no_claim(
         )
 
 
-def test_root_submit_runs_recovery_replacement_then_pending_without_cut_bump(
+def test_root_submit_runs_reconcile_before_enqueue_without_cut_bump(
     pg_engine: Engine,
 ) -> None:
     schema = _upgrade_schema(pg_engine)
@@ -1818,19 +1818,9 @@ def test_root_submit_runs_recovery_replacement_then_pending_without_cut_bump(
             priority_enabled=True,
         )
     )
-    with (
-        patch(
-            "dr_platform.enqueue_runtime.recover_call_started_page",
-            side_effect=stage("recover"),
-        ),
-        patch(
-            "dr_platform.enqueue_runtime.enqueue_replacement_page",
-            side_effect=stage("replace"),
-        ),
-        patch(
-            "dr_platform.enqueue_runtime.enqueue_pending_page",
-            side_effect=stage("pending"),
-        ),
+    with patch(
+        "dr_platform.reconciliation_runtime.reconcile",
+        side_effect=stage("reconcile"),
     ):
         dr_platform.submit(
             manifest,
@@ -1859,13 +1849,9 @@ def test_root_submit_runs_recovery_replacement_then_pending_without_cut_bump(
             )
 
     assert stage_order == [
-        "recover",
-        "replace",
-        "pending",
+        "reconcile",
         "replay-boundary",
-        "recover",
-        "replace",
-        "pending",
+        "reconcile",
     ]
     assert replay_cut == first_cut
 

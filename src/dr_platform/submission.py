@@ -8,7 +8,6 @@ from typing import (
     Annotated,
     Any,
     Protocol,
-    cast,
     runtime_checkable,
 )
 from uuid import uuid4
@@ -65,6 +64,7 @@ if TYPE_CHECKING:
         QueueLookup,
         WorkflowObserver,
     )
+    from dr_platform.reconciliation_runtime import LifecycleObservationReader
     from dr_platform.targets import ExecutionTarget, TargetResolver
 
 DEFAULT_PAGE_SIZE = 500
@@ -348,6 +348,7 @@ def submit(  # noqa: PLR0913 -- explicit public facade contract
     queue_lookup: QueueLookup | None = None,
     enqueue_adapter: PhysicalEnqueueAdapter | None = None,
     workflow_observer: WorkflowObserver | None = None,
+    reconciliation_reader: LifecycleObservationReader | None = None,
 ) -> SubmitResult:
     """Register and enqueue one immutable Operation through one pipeline."""
     selected_schema = schema or PlatformSchema()
@@ -407,6 +408,7 @@ def submit(  # noqa: PLR0913 -- explicit public facade contract
         queue_lookup=queue_lookup,
         enqueue_adapter=enqueue_adapter,
         workflow_observer=workflow_observer,
+        reconciliation_reader=reconciliation_reader,
     )
 
     return _load_submit_result(
@@ -425,39 +427,29 @@ def _enqueue_registered_page(  # noqa: PLR0913
     queue_lookup: QueueLookup | None,
     enqueue_adapter: PhysicalEnqueueAdapter | None,
     workflow_observer: WorkflowObserver | None = None,
+    reconciliation_reader: LifecycleObservationReader | None = None,
 ) -> None:
-    from dbos import DBOS  # noqa: PLC0415 -- breaks claims/submission cycle
-
-    from dr_platform.claims import (  # noqa: PLC0415 -- cycle boundary
-        ClaimPageOptions,
-    )
-    from dr_platform.enqueue_runtime import (  # noqa: PLC0415 -- cycle boundary
-        enqueue_pending_page,
-        enqueue_replacement_page,
-        recover_call_started_page,
+    from dr_platform.reconciliation_runtime import (  # noqa: PLC0415
+        ReconcileOptions,
+        reconcile,
     )
 
-    selected_queue_lookup = (
-        cast("QueueLookup", DBOS) if queue_lookup is None else queue_lookup
-    )
-    claim_options = ClaimPageOptions(
+    reconcile_options = ReconcileOptions(
         page_size=options.page_size,
-        lease_seconds=options.claim_lease_seconds,
+        claim_lease_seconds=options.claim_lease_seconds,
+        missing_grace_seconds=options.missing_grace_seconds,
+        missing_required_observations=(options.missing_required_observations),
     )
-    common = {
-        "resolver": resolver,
-        "queue_lookup": selected_queue_lookup,
-        "options": claim_options,
-        "schema": schema,
-        "adapter": enqueue_adapter,
-    }
-    recover_call_started_page(
+    reconcile(
         engine,
-        **common,
-        observer=workflow_observer,
+        resolver=resolver,
+        queue_lookup=queue_lookup,
+        options=reconcile_options,
+        schema=schema,
+        reader=reconciliation_reader,
+        recovery_observer=workflow_observer,
+        enqueue_adapter=enqueue_adapter,
     )
-    enqueue_replacement_page(engine, **common)
-    enqueue_pending_page(engine, **common)
 
 
 def abandon_registration(  # noqa: PLR0913 -- explicit public facade contract
