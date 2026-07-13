@@ -328,6 +328,7 @@ def test_application_bundle_promotes_and_resolves_remote_fence(
         ExportOptions(
             destination_path=str(tmp_path / "remote-local.duckdb"),
             bundle_key="remote-application",
+            operation_id="remote-operation",
             full_rebuild=True,
             projections=(
                 ProjectionSpec(
@@ -346,10 +347,36 @@ def test_application_bundle_promotes_and_resolves_remote_fence(
         "PROMOTED",
         "PROMOTED",
     ]
+    receipts = {
+        destination.destination_id: destination.receipt
+        for destination in result.destinations
+    }
+    assert set(receipts) == {"local-duckdb", "remote-fixture"}
+    assert all(receipt is not None for receipt in receipts.values())
+    assert {
+        receipt.operation_id
+        for receipt in receipts.values()
+        if receipt is not None
+    } == {"remote-operation"}
     pin = fence.pin_bundle(bundle_key="remote-application", pin_id="fixture")
     resolved = fence.resolve_pin(pin)
     assert resolved.snapshot_seq == result.snapshot_seq
     assert set(resolved.members) == {"roots"}
+    fence.release_pin(pin)
+    remote_receipt = next(
+        destination.receipt
+        for destination in result.destinations
+        if destination.destination_id == "remote-fixture"
+    )
+    assert remote_receipt is not None
+    assert (
+        fence.cleanup_operation(
+            remote_receipt.operation_id,
+            "export-cleanup",
+            remote_receipt.stage_plan_digest,
+        ).disposition
+        == "CLEANED"
+    )
 
 
 def test_application_bundle_records_motherduck_main_schema(

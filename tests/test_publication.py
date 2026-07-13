@@ -1,5 +1,5 @@
 """P7b remote fence, compatibility, and pin/cleanup coverage."""
-# ruff: noqa: PLR0915, S608
+# ruff: noqa: E501, PLR0915, S608
 
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier, Event
 from typing import Literal
 from uuid import uuid4
 
@@ -22,6 +24,9 @@ from dr_platform import (
     PinnedBundleGoneError,
     PlatformSchema,
     PostgresPublicationFence,
+    PreparedStage,
+    PublicationOperationIdentity,
+    PublicationReceipt,
     RemoteBundleManifest,
     RemoteBundleMember,
     SourceCoordinate,
@@ -73,6 +78,678 @@ def _empty_candidate_manifest(
                 checksum=_EMPTY_CHECKSUM,
             ),
         ),
+    )
+
+
+def _promoted_operation_fixture(
+    pg_engine: Engine, suffix: str
+) -> tuple[
+    PostgresPublicationFence,
+    PublicationOperationIdentity,
+    PublicationReceipt,
+]:
+    signer, key_ring = signed_integrity_test_material()
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"race-{suffix}",
+        table_name=f"race_state_{suffix}",
+        signer=signer,
+        public_key_ring=key_ring,
+    )
+    fence.ensure_schema()
+    identity = PublicationOperationIdentity(
+        operation_id=f"race-{uuid4().hex}", attempt_id="attempt"
+    )
+    lease = fence.acquire_lease(
+        bundle_key="analysis", run_id="attempt", lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    table_name = fence.stage_table_name(
+        member="member",
+        run_id="attempt",
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+    )
+    member = RemoteBundleMember(
+        member="member",
+        table_name=table_name,
+        key_columns=("id",),
+        row_count=0,
+        checksum=_EMPTY_CHECKSUM,
+    )
+    promoted = fence.promote(
+        bundle_key="analysis",
+        run_id="attempt",
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+        bundle_id=f"bundle-{suffix}",
+        cursors={"member": 1},
+        source_coordinates=(
+            capture_source_coordinate(
+                pg_engine, source_id="application", snapshot_seq=1
+            ),
+        ),
+        source_families=("application",),
+        stage=lambda connection, _prepared: _empty_candidate_manifest(
+            connection, table_name
+        ),
+        operation_identity=identity,
+        stage_plan=RemoteBundleManifest(
+            members=(member,), source_families=("application",)
+        ),
+    )
+    assert promoted.receipt is not None
+    return fence, identity, promoted.receipt
+
+
+def test_two_connection_pin_cleanup_race_serializes_at_gate(
+    pg_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    fence, identity, receipt = _promoted_operation_fixture(pg_engine, suffix)
+    barrier = Barrier(2)
+
+    def pin() -> str:
+        barrier.wait()
+        try:
+            fence.pin_bundle(bundle_key="analysis", pin_id="racing-reader")
+        except PinnedBundleGoneError:
+            return "GONE"
+        return "PINNED"
+
+    def cleanup() -> str:
+        barrier.wait()
+        return fence.cleanup_operation(
+            identity.operation_id,
+            "cleanup",
+            receipt.stage_plan_digest,
+        ).disposition
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        pin_future = executor.submit(pin)
+        cleanup_future = executor.submit(cleanup)
+        outcome = (pin_future.result(), cleanup_future.result())
+    assert outcome in {
+        ("PINNED", "BLOCKED_EXTERNAL_PIN"),
+        ("GONE", "CLEANED"),
+    }
+
+
+def test_cleanup_retries_a_real_serialization_conflict(
+    pg_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    fence, identity, receipt = _promoted_operation_fixture(pg_engine, suffix)
+    before_gate = Event()
+    pin_committed = Event()
+    armed = True
+
+    def fault(boundary: str) -> None:
+        nonlocal armed
+        if boundary == "before_cleanup_gate" and armed:
+            armed = False
+            before_gate.set()
+            assert pin_committed.wait(timeout=5)
+
+    object.__setattr__(fence, "fault_hook", fault)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            fence.cleanup_operation,
+            identity.operation_id,
+            "cleanup",
+            receipt.stage_plan_digest,
+        )
+        assert before_gate.wait(timeout=5)
+        fence.pin_bundle(bundle_key="analysis", pin_id="serialization-reader")
+        pin_committed.set()
+        result = future.result(timeout=5)
+    # The first SERIALIZABLE snapshot saw no pin. This outcome is possible
+    # only after PostgreSQL aborts that gate update and Platform retries with a
+    # fresh snapshot that observes the committed external pin.
+    assert result.disposition == "BLOCKED_EXTERNAL_PIN"
+
+
+def test_two_connection_successor_cleanup_race_preserves_winner(
+    pg_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    fence, identity, receipt = _promoted_operation_fixture(pg_engine, suffix)
+    barrier = Barrier(2)
+    coordinate = capture_source_coordinate(
+        pg_engine, source_id="application", snapshot_seq=2
+    )
+
+    def successor() -> str:
+        barrier.wait()
+        lease = fence.acquire_lease(
+            bundle_key="analysis", run_id="successor", lease_seconds=60
+        )
+        assert lease.fencing_token is not None
+        table_name = fence.stage_table_name(
+            member="member",
+            run_id="successor",
+            fencing_token=lease.fencing_token,
+            snapshot_seq=2,
+        )
+        return fence.promote(
+            bundle_key="analysis",
+            run_id="successor",
+            fencing_token=lease.fencing_token,
+            snapshot_seq=2,
+            bundle_id=f"successor-{suffix}",
+            cursors={"member": 2},
+            source_coordinates=(coordinate,),
+            source_families=("application",),
+            stage=lambda connection: _empty_candidate_manifest(
+                connection, table_name
+            ),
+        ).disposition
+
+    def cleanup() -> str:
+        barrier.wait()
+        return fence.cleanup_operation(
+            identity.operation_id,
+            "cleanup",
+            receipt.stage_plan_digest,
+        ).disposition
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        successor_future = executor.submit(successor)
+        cleanup_future = executor.submit(cleanup)
+        successor_outcome = successor_future.result()
+        cleanup_outcome = cleanup_future.result()
+    assert successor_outcome == "PROMOTED"
+    assert cleanup_outcome in {"CLEANED", "BLOCKED_SUCCESSOR"}
+    observation = fence.observe_operation(identity.operation_id)
+    assert observation.current_pointer_relation == "SUCCESSOR"
+
+
+def test_publication_operation_persists_receipt_and_cleans_exact_inventory(
+    pg_engine: Engine,
+) -> None:
+    _require_pgcrypto(pg_engine)
+    suffix = uuid4().hex[:12]
+    signer, key_ring = signed_integrity_test_material()
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"operation-{suffix}",
+        table_name=f"operation_state_{suffix}",
+        signer=signer,
+        public_key_ring=key_ring,
+    )
+    fence.ensure_schema()
+    identity = PublicationOperationIdentity(
+        operation_id=f"operation-{uuid4().hex}", attempt_id="attempt"
+    )
+    lease = fence.acquire_lease(
+        bundle_key="analysis", run_id=identity.attempt_id, lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    table_name = fence.stage_table_name(
+        member="member",
+        run_id=identity.attempt_id,
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+    )
+    plan = RemoteBundleManifest(
+        source_families=("application",),
+        members=(
+            RemoteBundleMember(
+                member="member",
+                table_name=table_name,
+                key_columns=("id",),
+                row_count=0,
+                checksum=_EMPTY_CHECKSUM,
+            ),
+        ),
+    )
+
+    def stage(
+        connection: Connection, prepared: PreparedStage
+    ) -> RemoteBundleManifest:
+        assert prepared.table_name("member") == table_name
+        return _empty_candidate_manifest(connection, table_name)
+
+    promoted = fence.promote(
+        bundle_key="analysis",
+        run_id=identity.attempt_id,
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+        bundle_id="operation-bundle",
+        cursors={"member": 1},
+        source_coordinates=(
+            capture_source_coordinate(
+                pg_engine, source_id="application", snapshot_seq=1
+            ),
+        ),
+        source_families=("application",),
+        stage=stage,
+        operation_identity=identity,
+        stage_plan=plan,
+    )
+    assert promoted.receipt is not None
+    observation = fence.observe_operation(identity.operation_id)
+    assert observation.state == "PROMOTED"
+    assert observation.current_pointer_relation == "CURRENT"
+    assert observation.present_members == ("member",)
+    with pg_engine.connect() as connection:
+        owner, published_operation_id = connection.execute(
+            text(
+                f'SELECT owner, published_operation_id FROM "{fence.table_name}" '
+                "WHERE bundle_key = 'analysis'"
+            )
+        ).one()
+    assert owner is None
+    assert published_operation_id == identity.operation_id
+
+    replay_lease = fence.acquire_lease(
+        bundle_key="analysis", run_id=identity.attempt_id, lease_seconds=60
+    )
+    assert replay_lease.fencing_token is not None
+    replay_table = fence.stage_table_name(
+        member="member",
+        run_id=identity.attempt_id,
+        fencing_token=replay_lease.fencing_token,
+        snapshot_seq=1,
+    )
+    replay = fence.promote(
+        bundle_key="analysis",
+        run_id=identity.attempt_id,
+        fencing_token=replay_lease.fencing_token,
+        snapshot_seq=1,
+        bundle_id="ignored-replay-bundle",
+        cursors={"member": 1},
+        source_coordinates=(
+            capture_source_coordinate(
+                pg_engine, source_id="application", snapshot_seq=1
+            ),
+        ),
+        source_families=("application",),
+        stage=lambda *_args: pytest.fail(
+            "published operation must not restage"
+        ),
+        operation_identity=identity,
+        stage_plan=plan.model_copy(
+            update={
+                "members": (
+                    plan.members[0].model_copy(
+                        update={"table_name": replay_table}
+                    ),
+                )
+            }
+        ),
+    )
+    assert replay.disposition == "IDEMPOTENT"
+    assert replay.receipt is not None
+    assert (
+        replay.receipt.stage_plan_digest == promoted.receipt.stage_plan_digest
+    )
+    assert (
+        fence.cleanup_operation(
+            identity.operation_id, "wrong-authority", "wrong-digest"
+        ).disposition
+        == "AUTHORITY_MISMATCH"
+    )
+
+    external = fence.pin_bundle(bundle_key="analysis", pin_id="reader")
+    blocked = fence.cleanup_operation(
+        identity.operation_id, "cleanup", promoted.receipt.stage_plan_digest
+    )
+    assert blocked.disposition == "BLOCKED_EXTERNAL_PIN"
+    fence.release_pin(external)
+    owned = fence.pin_bundle(
+        bundle_key="analysis",
+        pin_id="operation-pin",
+        owner_operation_id=identity.operation_id,
+    )
+    assert owned.pin_id == "operation-pin"
+    cleaned = fence.cleanup_operation(
+        identity.operation_id, "cleanup", promoted.receipt.stage_plan_digest
+    )
+    assert cleaned.disposition == "CLEANED"
+    assert cleaned.observation.present_members == ()
+    assert (
+        fence.cleanup_operation(
+            identity.operation_id,
+            "cleanup",
+            promoted.receipt.stage_plan_digest,
+        )
+        == cleaned
+    )
+    already = fence.cleanup_operation(
+        identity.operation_id,
+        "different-request",
+        promoted.receipt.stage_plan_digest,
+    )
+    assert already.disposition == "ALREADY_CLEANED"
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected_state"),
+    [
+        ("after_plan_commit", "PLANNED"),
+        ("after_each_stage_member", "STAGING"),
+        ("after_stage_commit", "STAGING"),
+        ("after_promotion_commit", "PROMOTED"),
+    ],
+)
+def test_publication_operation_crash_boundaries_replay_without_orphan(
+    pg_engine: Engine, boundary: str, expected_state: str
+) -> None:
+    _require_pgcrypto(pg_engine)
+    suffix = uuid4().hex[:12]
+    armed = True
+
+    def fault(observed: str) -> None:
+        nonlocal armed
+        if armed and observed == boundary:
+            armed = False
+            raise RuntimeError(boundary)
+
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"crash-{suffix}",
+        table_name=f"crash_state_{suffix}",
+        signer=signed_integrity_test_material()[0],
+        fault_hook=fault,
+    )
+    fence.ensure_schema()
+    identity = PublicationOperationIdentity(
+        operation_id=f"crash-{uuid4().hex}", attempt_id="attempt"
+    )
+    lease = fence.acquire_lease(
+        bundle_key="analysis", run_id="attempt", lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    table_name = fence.stage_table_name(
+        member="member",
+        run_id="attempt",
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+    )
+    plan = RemoteBundleManifest(
+        source_families=("application",),
+        members=(
+            RemoteBundleMember(
+                member="member",
+                table_name=table_name,
+                key_columns=("id",),
+                row_count=0,
+                checksum=_EMPTY_CHECKSUM,
+            ),
+        ),
+    )
+
+    def stage(
+        connection: Connection, prepared: PreparedStage
+    ) -> RemoteBundleManifest:
+        manifest = _empty_candidate_manifest(connection, table_name)
+        fence.stage_member_complete(prepared, "member")
+        return manifest
+
+    with pytest.raises(RuntimeError, match=boundary):
+        fence.promote(
+            bundle_key="analysis",
+            run_id="attempt",
+            fencing_token=lease.fencing_token,
+            snapshot_seq=1,
+            bundle_id="crash-bundle",
+            cursors={"member": 1},
+            source_coordinates=(
+                capture_source_coordinate(
+                    pg_engine, source_id="application", snapshot_seq=1
+                ),
+            ),
+            source_families=("application",),
+            stage=stage,
+            operation_identity=identity,
+            stage_plan=plan,
+        )
+    observation = fence.observe_operation(identity.operation_id)
+    assert observation.state == expected_state
+    cleaned = fence.cleanup_operation(
+        identity.operation_id, "cleanup", str(observation.stage_plan_digest)
+    )
+    assert cleaned.disposition == "CLEANED"
+    assert fence.observe_operation(identity.operation_id).state == "CLEANED"
+    with pg_engine.connect() as connection:
+        assert (
+            connection.scalar(
+                text("SELECT to_regclass(:name)"), {"name": table_name}
+            )
+            is None
+        )
+
+
+def test_cleanup_commit_fault_replays_durable_tombstone(
+    pg_engine: Engine,
+) -> None:
+    _require_pgcrypto(pg_engine)
+    suffix = uuid4().hex[:12]
+    cleanup_fault = False
+
+    def fault(boundary: str) -> None:
+        nonlocal cleanup_fault
+        if boundary == "after_cleanup_commit" and cleanup_fault:
+            cleanup_fault = False
+            raise RuntimeError(boundary)
+
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"cleanup-crash-{suffix}",
+        table_name=f"cleanup_crash_state_{suffix}",
+        signer=signed_integrity_test_material()[0],
+        fault_hook=fault,
+    )
+    fence.ensure_schema()
+    identity = PublicationOperationIdentity(
+        operation_id=f"cleanup-crash-{uuid4().hex}", attempt_id="attempt"
+    )
+    lease = fence.acquire_lease(
+        bundle_key="analysis", run_id="attempt", lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    table_name = fence.stage_table_name(
+        member="member",
+        run_id="attempt",
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+    )
+    member = RemoteBundleMember(
+        member="member",
+        table_name=table_name,
+        key_columns=("id",),
+        row_count=0,
+        checksum=_EMPTY_CHECKSUM,
+    )
+    promoted = fence.promote(
+        bundle_key="analysis",
+        run_id="attempt",
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+        bundle_id="cleanup-crash-bundle",
+        cursors={"member": 1},
+        source_coordinates=(
+            capture_source_coordinate(
+                pg_engine, source_id="application", snapshot_seq=1
+            ),
+        ),
+        source_families=("application",),
+        stage=lambda connection, _prepared: _empty_candidate_manifest(
+            connection, table_name
+        ),
+        operation_identity=identity,
+        stage_plan=RemoteBundleManifest(
+            members=(member,), source_families=("application",)
+        ),
+    )
+    assert promoted.receipt is not None
+    cleanup_fault = True
+    with pytest.raises(RuntimeError, match="after_cleanup_commit"):
+        fence.cleanup_operation(
+            identity.operation_id,
+            "cleanup",
+            promoted.receipt.stage_plan_digest,
+        )
+    replay = fence.cleanup_operation(
+        identity.operation_id, "cleanup", promoted.receipt.stage_plan_digest
+    )
+    assert replay.disposition == "CLEANED"
+    assert replay.observation.state == "CLEANED"
+
+
+def test_motherduck_operation_cleanup_is_explicitly_capability_disabled(
+    pg_engine: Engine,
+) -> None:
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id="motherduck-disabled",
+        table_name=f"motherduck_disabled_{uuid4().hex[:12]}",
+        kind="motherduck",
+    )
+    assert not fence.capabilities.operation_cleanup
+    with pytest.raises(RuntimeError, match="capability proof"):
+        fence.cleanup_operation("operation", "request", "digest")
+
+
+def test_operation_cleanup_blocks_a_newer_current_pointer(
+    pg_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    fence = PostgresPublicationFence(
+        pg_engine,
+        destination_id=f"successor-{suffix}",
+        table_name=f"successor_state_{suffix}",
+        signer=signed_integrity_test_material()[0],
+    )
+    fence.ensure_schema()
+    identity = PublicationOperationIdentity(
+        operation_id=f"successor-{uuid4().hex}", attempt_id="attempt"
+    )
+    lease = fence.acquire_lease(
+        bundle_key="analysis", run_id="attempt", lease_seconds=60
+    )
+    assert lease.fencing_token is not None
+    table_name = fence.stage_table_name(
+        member="member",
+        run_id="attempt",
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+    )
+    prepared = fence.prepare_stage(
+        bundle_key="analysis",
+        identity=identity,
+        fencing_token=lease.fencing_token,
+        snapshot_seq=1,
+        bundle_id="candidate",
+        manifest=RemoteBundleManifest(
+            source_families=("application",),
+            members=(
+                RemoteBundleMember(
+                    member="member",
+                    table_name=table_name,
+                    key_columns=("id",),
+                    row_count=0,
+                    checksum=_EMPTY_CHECKSUM,
+                ),
+            ),
+        ),
+    )
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                f'UPDATE "{fence.table_name}" SET committed_snapshot_seq = 2, '
+                "bundle_id = 'successor', owner = NULL, lease_expires_at = NULL "
+                "WHERE bundle_key = 'analysis'"
+            )
+        )
+    preflight = fence.preflight_cleanup(
+        identity.operation_id, prepared.plan_digest
+    )
+    assert preflight.disposition == "BLOCKED_SUCCESSOR"
+    assert (
+        fence.cleanup_operation(
+            identity.operation_id, "cleanup", prepared.plan_digest
+        ).disposition
+        == "BLOCKED_SUCCESSOR"
+    )
+
+
+def test_ensure_schema_additively_migrates_legacy_rows_fail_closed(
+    pg_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    table_name = f"legacy_state_{suffix}"
+    destination = f"legacy-{suffix}"
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                f'CREATE TABLE "{table_name}" ('
+                "destination_id TEXT NOT NULL, bundle_key TEXT NOT NULL, committed_snapshot_seq BIGINT NOT NULL DEFAULT 0, "
+                "cursors_json TEXT NOT NULL DEFAULT '{}', checksums_json TEXT NOT NULL DEFAULT '{}', bundle_id TEXT, "
+                "owner TEXT, lease_expires_at TIMESTAMPTZ, fencing_token BIGINT NOT NULL DEFAULT 0, "
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(destination_id, bundle_key))"
+            )
+        )
+        connection.execute(
+            text(
+                f'CREATE TABLE "{table_name}_bundles" ('
+                "destination_id TEXT NOT NULL, bundle_key TEXT NOT NULL, bundle_id TEXT NOT NULL, snapshot_seq BIGINT NOT NULL, "
+                "source_coordinates_json TEXT NOT NULL, manifest_json TEXT NOT NULL, status TEXT NOT NULL, owner TEXT NOT NULL, "
+                "fencing_token BIGINT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                "PRIMARY KEY(destination_id, bundle_key, bundle_id))"
+            )
+        )
+        connection.execute(
+            text(
+                f'CREATE TABLE "{table_name}_pins" ('
+                "destination_id TEXT NOT NULL, bundle_key TEXT NOT NULL, pin_id TEXT NOT NULL, bundle_id TEXT NOT NULL, "
+                "expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                "PRIMARY KEY(destination_id, bundle_key, pin_id))"
+            )
+        )
+        connection.execute(
+            text(
+                f'INSERT INTO "{table_name}" (destination_id, bundle_key, bundle_id) '
+                "VALUES (:destination, 'analysis', 'legacy-bundle')"
+            ),
+            {"destination": destination},
+        )
+        connection.execute(
+            text(
+                f'INSERT INTO "{table_name}_bundles" (destination_id, bundle_key, bundle_id, snapshot_seq, '
+                "source_coordinates_json, manifest_json, status, owner, fencing_token) "
+                "VALUES (:destination, 'analysis', 'legacy-bundle', 1, '[]', '{}', 'PROMOTED', 'legacy', 1)"
+            ),
+            {"destination": destination},
+        )
+        connection.execute(
+            text(
+                f'INSERT INTO "{table_name}_pins" (destination_id, bundle_key, pin_id, bundle_id, expires_at) '
+                "VALUES (:destination, 'analysis', 'legacy-pin', 'legacy-bundle', CURRENT_TIMESTAMP + INTERVAL '1 hour')"
+            ),
+            {"destination": destination},
+        )
+    fence = PostgresPublicationFence(
+        pg_engine, destination_id=destination, table_name=table_name
+    )
+    fence.ensure_schema()
+    with pg_engine.connect() as connection:
+        assert connection.execute(
+            text(
+                f"SELECT pin_kind, owner_operation_id FROM \"{table_name}_pins\" WHERE pin_id = 'legacy-pin'"
+            )
+        ).one() == ("EXTERNAL", None)
+        assert (
+            connection.scalar(
+                text(
+                    f"SELECT operation_id FROM \"{table_name}_bundles\" WHERE bundle_id = 'legacy-bundle'"
+                )
+            )
+            is None
+        )
+    assert (
+        fence.preflight_cleanup("legacy", "digest").disposition == "NOT_FOUND"
     )
 
 
