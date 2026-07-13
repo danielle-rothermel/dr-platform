@@ -1,0 +1,36 @@
+{
+  "version": "v5",
+  "entrypoint": "plan.md",
+  "documents": [
+    {
+      "path": "plan.md",
+      "role": "normative",
+      "purpose": "System overview, invariants, lifecycle, phase gates, and review protocol"
+    },
+    {
+      "path": "contracts/platform.md",
+      "role": "normative",
+      "purpose": "dr-platform kernel contract"
+    },
+    {
+      "path": "contracts/whetstone.md",
+      "role": "normative",
+      "purpose": "Whetstone domain and platform-boundary contract"
+    },
+    {
+      "path": "contracts/publication.md",
+      "role": "normative",
+      "purpose": "Export, publication, and two-plane reader contract"
+    },
+    {
+      "path": "contracts/delivery.md",
+      "role": "normative",
+      "purpose": "Migration, verification, cutover, rollback, and deferral contract"
+    },
+    {
+      "path": "traceability.md",
+      "role": "traceability",
+      "purpose": "Prior-review provenance, owner decisions, revision history, and source coverage"
+    }
+  ]
+}

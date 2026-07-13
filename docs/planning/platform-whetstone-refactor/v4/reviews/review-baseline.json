@@ -1,0 +1,138 @@
+{
+  "captured_at": "2026-07-11T06:03:36.965972Z",
+  "version_dir": "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4",
+  "plan_manifest": {
+    "path": "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/plan-manifest.json",
+    "sha256": "9a35e26c089aa93ebc23c9955c98051bfea209c7f16d823fea28fe48d507989f"
+  },
+  "plan_documents": [
+    {
+      "path": "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/plan.md",
+      "sha256": "b39b540b45a5c7c0300e74341da5b4629fc37b486438db49a1cd2e50b2259374"
+    },
+    {
+      "path": "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/contracts/platform.md",
+      "sha256": "01244d42d6e6e8f1362e5ae059c901e4277aed4f7c279cfe5fbbce7855465ca3"
+    },
+    {
+      "path": "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/contracts/whetstone.md",
+      "sha256": "3a49729a2b901ce3fb7636e89255b8c6b3e2b523d564695e54f198d8d5598288"
+    },
+    {
+      "path": "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/contracts/publication.md",
+      "sha256": "d5e92bd26a4d7777e0f41b78971150a295784933687fba1dfcf887692197dbbf"
+    },
+    {
+      "path": "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/contracts/delivery.md",
+      "sha256": "1d7a386c38d1d655ee5a443ca0ae692cec1129c5ecafa24e82dfa9be9301bff8"
+    },
+    {
+      "path": "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/traceability.md",
+      "sha256": "1185f20e86fa6c3abc4b6917eea4043b9243ae7f27bcac91fee9ea2291ddadd5"
+    }
+  ],
+  "codex_prompt": {
+    "path": "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/reviews/codex-prompt.md",
+    "sha256": "8d7d1611ccd4fa6edbacb93394cb66df1c901eee58fa1dcbccd977f46d76a4b9"
+  },
+  "fable_prompt": {
+    "path": "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/reviews/fable-prompt.md",
+    "sha256": "9bfc8bc3bfb9f70b0888959cd6ffeef8fac915015880261a5471840040087873"
+  },
+  "repositories": [
+    {
+      "root": "/Users/daniellerothermel/drotherm/repos/dr-platform",
+      "branch": "07-08-refactor",
+      "head": "7b9b340fd8f2717e44de36804396077b7beeb661",
+      "dirty_paths": [
+        "CONTEXT.md",
+        "docs/adr/0001-content-scoped-execution-identity.md",
+        "docs/adr/0002-platform-owns-attempt-lineage.md",
+        "docs/adr/0003-append-only-attempt-ledger.md",
+        "docs/adr/0005-reference-aware-cancellation.md",
+        "docs/adr/0007-separate-urgency-from-shuffle-order.md",
+        "docs/adr/0008-destination-local-export-state.md",
+        "docs/adr/0009-transactional-registration-hook.md",
+        "docs/adr/0010-monotonic-change-sequence-with-export-barrier.md",
+        "docs/adr/0011-exclude-dbos-replay-payloads-from-export.md",
+        "docs/adr/0012-scoring-as-platform-managed-operation.md",
+        "docs/adr/0013-separate-platform-execution-from-domain-outcome.md",
+        "docs/adr/0015-two-plane-analysis-and-detail-stores.md",
+        "docs/adr/0016-kernel-executes-platform-enqueue.md",
+        "docs/adr/0018-strict-experiment-acceptance.md",
+        "docs/adr/0019-accept-paid-call-overlap-after-cancellation.md",
+        "docs/adr/0020-append-only-experiment-acceptance.md",
+        "docs/planning/platform-whetstone-refactor/README.md",
+        "docs/planning/platform-whetstone-refactor/v1/reviews/codex-findings.md",
+        "docs/planning/platform-whetstone-refactor/v1/reviews/fable-findings.md",
+        "docs/planning/platform-whetstone-refactor/v1/reviews/unified-feedback.md",
+        "docs/planning/platform-whetstone-refactor/v2/plan.md",
+        "docs/planning/platform-whetstone-refactor/v2/reviews/codex-findings.md",
+        "docs/planning/platform-whetstone-refactor/v2/reviews/codex-prompt.md",
+        "docs/planning/platform-whetstone-refactor/v2/reviews/fable-findings.md",
+        "docs/planning/platform-whetstone-refactor/v2/reviews/fable-prompt.md",
+        "docs/planning/platform-whetstone-refactor/v2/reviews/unified-feedback.md",
+        "docs/planning/platform-whetstone-refactor/v3/plan.md",
+        "docs/planning/platform-whetstone-refactor/v3/planning-prompt.md",
+        "docs/planning/platform-whetstone-refactor/v3/reviews/codex-findings.md",
+        "docs/planning/platform-whetstone-refactor/v3/reviews/codex-prompt.md",
+        "docs/planning/platform-whetstone-refactor/v3/reviews/fable-findings.md",
+        "docs/planning/platform-whetstone-refactor/v3/reviews/fable-prompt.md",
+        "docs/planning/platform-whetstone-refactor/v3/reviews/unified-feedback.md",
+        "docs/planning/platform-whetstone-refactor/v4/contracts/delivery.md",
+        "docs/planning/platform-whetstone-refactor/v4/contracts/platform.md",
+        "docs/planning/platform-whetstone-refactor/v4/contracts/publication.md",
+        "docs/planning/platform-whetstone-refactor/v4/contracts/whetstone.md",
+        "docs/planning/platform-whetstone-refactor/v4/normalization-prompt.md",
+        "docs/planning/platform-whetstone-refactor/v4/plan-manifest.json",
+        "docs/planning/platform-whetstone-refactor/v4/plan.md",
+        "docs/planning/platform-whetstone-refactor/v4/planning-prompt.md",
+        "docs/planning/platform-whetstone-refactor/v4/reviews/codex-prompt.md",
+        "docs/planning/platform-whetstone-refactor/v4/reviews/fable-prompt.md",
+        "docs/planning/platform-whetstone-refactor/v4/traceability.md"
+      ]
+    },
+    {
+      "root": "/Users/daniellerothermel/drotherm/repos/whetstone-ai",
+      "branch": "codex/versioned-planning-docs",
+      "head": "ccd9818d505ce45aafd7bd8503a2bcbd85f37289",
+      "dirty_paths": [
+        "CONTEXT.md"
+      ]
+    },
+    {
+      "root": "/Users/daniellerothermel/drotherm/repos/unitbench",
+      "branch": "codex/versioned-planning-docs",
+      "head": "cafd493ab9e9c1940106037209b1b218097f847e",
+      "dirty_paths": []
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "dbos",
+      "version": "2.26.0",
+      "path": "/Users/daniellerothermel/drotherm/repos/dr-platform/.venv/lib/python3.12/site-packages/dbos",
+      "sha256": "ad1645c529a81320b8d421aaf938f938ba2b7bc1a10f62b1e237994e3a73a6f8"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer": "codex",
+      "model": "sol",
+      "effort": "high",
+      "max_budget_usd": null
+    },
+    {
+      "reviewer": "claude",
+      "model": "claude-fable-5",
+      "effort": "high",
+      "max_budget_usd": null
+    }
+  ],
+  "allowed_review_outputs": [
+    "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/reviews/review-baseline.json",
+    "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/reviews/codex-findings.md",
+    "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/reviews/fable-findings.md",
+    "/Users/daniellerothermel/drotherm/repos/dr-platform/docs/planning/platform-whetstone-refactor/v4/reviews/unified-feedback.md"
+  ]
+}
