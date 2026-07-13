@@ -49,6 +49,8 @@ from dr_platform.status import (
     AttemptEnqueueState,
     AttemptExecutionState,
     AttemptRetryReason,
+    CancellationDisposition,
+    CancellationOrigin,
     NextAttemptDisposition,
     NextAttemptReason,
     OperationStatus,
@@ -752,20 +754,30 @@ def _apply_one_observation(  # noqa: PLR0911,PLR0912,PLR0913,PLR0915
                 ),
             ],
         )
-        operation = _lock_operation_for_item(
-            connection,
-            schema=schema,
-            operation_key=candidate.item.operation_key,
-        )
-        item = _lock_item(
-            connection, schema=schema, item_id=candidate.item.item_id
-        )
-        attempt = _lock_attempt(
-            connection,
-            schema=schema,
-            item_id=candidate.item.item_id,
-            attempt=candidate.attempt.attempt,
-        )
+        if observation.disposition.value == "cancelled":
+            operation, item, attempt = _lock_cancelled_reference_hierarchy(
+                connection,
+                schema=schema,
+                workflow_id=observation.workflow_id,
+                operation_key=candidate.item.operation_key,
+                item_id=candidate.item.item_id,
+                attempt=candidate.attempt.attempt,
+            )
+        else:
+            operation = _lock_operation_for_item(
+                connection,
+                schema=schema,
+                operation_key=candidate.item.operation_key,
+            )
+            item = _lock_item(
+                connection, schema=schema, item_id=candidate.item.item_id
+            )
+            attempt = _lock_attempt(
+                connection,
+                schema=schema,
+                item_id=candidate.item.item_id,
+                attempt=candidate.attempt.attempt,
+            )
         terminal_attempt = attempt["execution_state"] in {
             state.value for state in TERMINAL_EXECUTION_STATES
         }
@@ -789,8 +801,7 @@ def _apply_one_observation(  # noqa: PLR0911,PLR0912,PLR0913,PLR0915
             return None
         if successor_execution is not None:
             if (
-                operation["target_key"]
-                != candidate.target_ref.target_key
+                operation["target_key"] != candidate.target_ref.target_key
                 or operation["target_version"]
                 != candidate.target_ref.target_version
                 or operation["target_contract_digest"]
@@ -810,8 +821,7 @@ def _apply_one_observation(  # noqa: PLR0911,PLR0912,PLR0913,PLR0915
                     "automatic retry target identity changed under lock"
                 )
             if (
-                attempt["execution_key"]
-                != candidate.attempt.execution_key
+                attempt["execution_key"] != candidate.attempt.execution_key
                 or attempt["execution_recipe_digest"]
                 != candidate.attempt.execution_recipe_digest
             ):
@@ -906,6 +916,28 @@ def _apply_one_observation(  # noqa: PLR0911,PLR0912,PLR0913,PLR0915
                 "cancelled": AttemptExecutionState.CANCELLED,
                 "recovery_exhausted": AttemptExecutionState.RECOVERY_EXHAUSTED,
             }[disposition]
+            values: dict[str, Any] = {
+                "execution_state": terminal_state.value,
+                "dbos_status": (
+                    observation.dbos_status.value
+                    if observation.dbos_status is not None
+                    else None
+                ),
+                "terminal_at": now,
+                "updated_at": now,
+            }
+            if (
+                disposition == "cancelled"
+                and attempt["cancellation_request_id"] is None
+            ):
+                values.update(
+                    _foreign_cancellation_provenance(
+                        connection,
+                        schema=schema,
+                        workflow_id=observation.workflow_id,
+                        local_operation_key=candidate.item.operation_key,
+                    )
+                )
             connection.execute(
                 update(schema.item_attempts)
                 .where(
@@ -916,16 +948,7 @@ def _apply_one_observation(  # noqa: PLR0911,PLR0912,PLR0913,PLR0915
                         == candidate.attempt.attempt,
                     )
                 )
-                .values(
-                    execution_state=terminal_state.value,
-                    dbos_status=(
-                        observation.dbos_status.value
-                        if observation.dbos_status is not None
-                        else None
-                    ),
-                    terminal_at=now,
-                    updated_at=now,
-                )
+                .values(**values)
             )
         elif disposition == "error":
             if observation.failure is None:
@@ -1067,6 +1090,146 @@ def _insert_automatic_attempt(  # noqa: PLR0913
         raise ReconciliationConflictError("automatic retry Item CAS lost")
 
 
+def _foreign_cancellation_provenance(
+    connection: Connection,
+    *,
+    schema: PlatformSchema,
+    workflow_id: str,
+    local_operation_key: str,
+) -> dict[str, Any]:
+    """Copy one uniquely attributable cancellation across a workflow link."""
+    rows = list(
+        connection.execute(
+            select(
+                schema.items.c.operation_key,
+                schema.item_attempts.c.cancellation_request_id,
+                schema.item_attempts.c.cancellation_requested_at,
+                schema.item_attempts.c.cancellation_requested_by,
+            )
+            .select_from(schema.items)
+            .join(
+                schema.item_attempts,
+                schema.item_attempts.c.item_id == schema.items.c.item_id,
+            )
+            .where(
+                and_(
+                    schema.item_attempts.c.workflow_id == workflow_id,
+                    schema.items.c.operation_key != local_operation_key,
+                    schema.item_attempts.c.cancellation_origin
+                    == CancellationOrigin.LOCAL_OPERATION.value,
+                    schema.item_attempts.c.execution_state
+                    == AttemptExecutionState.CANCELLED.value,
+                )
+            )
+            .order_by(
+                schema.items.c.operation_key,
+                schema.item_attempts.c.cancellation_request_id,
+            )
+            .with_for_update()
+        ).mappings()
+    )
+    identities = {
+        (row["operation_key"], row["cancellation_request_id"]) for row in rows
+    }
+    if len(identities) > 1:
+        raise ReconciliationConflictError(
+            "foreign cancellation provenance is ambiguous"
+        )
+    if not rows:
+        return {}
+    source = dict(rows[0])
+    return {
+        "cancellation_request_id": source["cancellation_request_id"],
+        "cancellation_requested_at": source["cancellation_requested_at"],
+        "cancellation_requested_by": source["cancellation_requested_by"],
+        "cancellation_origin": CancellationOrigin.FOREIGN_OPERATION.value,
+        "cancellation_origin_operation_key": source["operation_key"],
+        "foreign_cancellation_request_id": source["cancellation_request_id"],
+    }
+
+
+def _lock_cancelled_reference_hierarchy(  # noqa: PLR0913
+    connection: Connection,
+    *,
+    schema: PlatformSchema,
+    workflow_id: str,
+    operation_key: str,
+    item_id: str,
+    attempt: int,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+    references = list(
+        connection.execute(
+            select(
+                schema.items.c.operation_key,
+                schema.items.c.item_id,
+                schema.item_attempts.c.attempt,
+            )
+            .select_from(schema.items)
+            .join(
+                schema.item_attempts,
+                and_(
+                    schema.item_attempts.c.item_id == schema.items.c.item_id,
+                    schema.item_attempts.c.attempt
+                    == schema.items.c.current_attempt,
+                ),
+            )
+            .where(schema.item_attempts.c.workflow_id == workflow_id)
+        ).mappings()
+    )
+    operation_keys = sorted(
+        {operation_key, *(str(row["operation_key"]) for row in references)}
+    )
+    operations = {
+        str(row["operation_key"]): dict(row)
+        for row in connection.execute(
+            select(schema.operations)
+            .where(schema.operations.c.operation_key.in_(operation_keys))
+            .order_by(schema.operations.c.operation_key)
+            .with_for_update()
+        ).mappings()
+    }
+    item_ids = sorted({item_id, *(str(row["item_id"]) for row in references)})
+    items = {
+        str(row["item_id"]): dict(row)
+        for row in connection.execute(
+            select(schema.items)
+            .where(schema.items.c.item_id.in_(item_ids))
+            .order_by(schema.items.c.item_id)
+            .with_for_update()
+        ).mappings()
+    }
+    attempt_keys = sorted(
+        {
+            (item_id, attempt),
+            *(
+                (str(row["item_id"]), int(row["attempt"]))
+                for row in references
+            ),
+        }
+    )
+    attempts: dict[tuple[str, int], Mapping[str, Any]] = {}
+    for reference_item_id, reference_attempt in attempt_keys:
+        attempts[(reference_item_id, reference_attempt)] = dict(
+            connection.execute(
+                select(schema.item_attempts)
+                .where(
+                    and_(
+                        schema.item_attempts.c.item_id == reference_item_id,
+                        schema.item_attempts.c.attempt == reference_attempt,
+                    )
+                )
+                .with_for_update()
+            )
+            .mappings()
+            .one()
+        )
+    return (
+        operations[operation_key],
+        items[item_id],
+        attempts[(item_id, attempt)],
+    )
+
+
 def _lock_operation_for_item(
     connection: Connection,
     *,
@@ -1138,6 +1301,8 @@ def _refresh_operation_lifecycle(
                 schema.item_attempts.c.enqueue_try,
                 schema.item_attempts.c.execution_state,
                 schema.item_attempts.c.failure,
+                schema.item_attempts.c.cancellation_request_id,
+                schema.item_attempts.c.cancellation_disposition,
             )
             .select_from(schema.items)
             .join(
@@ -1208,10 +1373,26 @@ def _refresh_operation_lifecycle(
             execution_states, enqueue_states, strict=True
         )
     )
-    if any(
+    cancellation_incomplete = any(
+        row["cancellation_request_id"] is not None
+        and row["cancellation_disposition"]
+        in {None, CancellationDisposition.FAILED.value}
+        for row in rows
+    )
+    if cancellation_incomplete:
+        status = OperationStatus.CANCELLING
+    elif any(
         state in {AttemptEnqueueState.PENDING, AttemptEnqueueState.CLAIMING}
-        for state in enqueue_states
-    ) or any(retryable_enqueue_errors):
+        and execution_state not in TERMINAL_EXECUTION_STATES
+        for state, execution_state in zip(
+            enqueue_states, execution_states, strict=True
+        )
+    ) or any(
+        retryable and execution_state not in TERMINAL_EXECUTION_STATES
+        for retryable, execution_state in zip(
+            retryable_enqueue_errors, execution_states, strict=True
+        )
+    ):
         status = OperationStatus.ENQUEUEING
     elif active:
         status = OperationStatus.RUNNING
