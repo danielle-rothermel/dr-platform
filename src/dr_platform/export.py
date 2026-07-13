@@ -7,6 +7,7 @@ and remote destinations deliberately remain outside this module.
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import hashlib
 import json
@@ -22,7 +23,7 @@ from enum import Enum, StrEnum
 from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 
 import duckdb
 from pydantic import (
@@ -152,10 +153,20 @@ class _ReconciledSourceCut(BaseModel):
     reconciled_at: datetime
 
 
+class LocalBundleIntegritySigner(Protocol):
+    """Injected signer for local DuckDB bundle records."""
+
+    key_id: str
+
+    def sign(self, message: bytes) -> bytes: ...
+
+
 class ExportOptions(BaseModel):
     """Options for one local kernel publication attempt."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, arbitrary_types_allowed=True
+    )
 
     destination_path: NonEmptyStr
     destination_id: NonEmptyStr = "local-duckdb"
@@ -165,6 +176,9 @@ class ExportOptions(BaseModel):
     full_rebuild: StrictBool = False
     projections: tuple[ProjectionSpec, ...] = ()
     source_change_sequence: NonEmptyStr = "platform_change_seq"
+    # Every new local promotion is attested. Legacy rows are signed by the
+    # explicit backfill API before readers begin enforcing this rule.
+    integrity_signer: Any = None
 
 
 class DestinationResult(BaseModel):
@@ -848,6 +862,16 @@ def _create_destination_tables(connection: duckdb.DuckDBPyConnection) -> None:
         "snapshot_seq BIGINT, manifest_json VARCHAR, created_at BIGINT, "
         "PRIMARY KEY(destination_id, bundle_key, bundle_id))"
     )
+    for column in (
+        "integrity_version VARCHAR",
+        "integrity_key_id VARCHAR",
+        "integrity_payload_json VARCHAR",
+        "integrity_signature VARCHAR",
+        "physical_digest_algorithm VARCHAR",
+    ):
+        connection.execute(
+            f"ALTER TABLE {_BUNDLE_TABLE} ADD COLUMN IF NOT EXISTS {column}"
+        )
     connection.execute(
         f"CREATE TABLE IF NOT EXISTS {_PIN_TABLE} ("
         "destination_id VARCHAR, bundle_key VARCHAR, pin_id VARCHAR, "
@@ -908,6 +932,77 @@ def _acquire_lease(
     except Exception:
         connection.execute("ROLLBACK")
         raise
+
+
+def _local_signed_integrity(
+    connection: duckdb.DuckDBPyConnection,
+    options: ExportOptions,
+    *,
+    bundle_id: str,
+    snapshot_seq: int,
+    specs: Sequence[ProjectionSpec],
+    candidate_tables: Mapping[str, str],
+    checksums: Mapping[str, str],
+) -> tuple[str, str, str, str, str]:
+    """Sign native DuckDB facts without moving the mutable current pointer."""
+
+    if options.integrity_signer is None:
+        raise ValueError(
+            "local promotion requires an injected integrity signer"
+        )
+    # Avoid an import cycle: publication owns the shared wire payload while
+    # export owns DuckDB's physical tables.
+    from dr_platform.publication import (  # noqa: PLC0415
+        RemoteBundleMember,
+        SignedBundleIntegrityPayload,
+        canonical_integrity_payload,
+        integrity_message,
+    )
+
+    algorithm = "duckdb-json-length-framed-sha256-v1"
+    members = []
+    for spec in specs:
+        table = _quoted(candidate_tables[spec.member])
+        ordering = ", ".join(_quoted(key) for key in spec.unique_key)
+        row = connection.execute(
+            "SELECT COUNT(*) AS row_count, "
+            "sha256(COALESCE(string_agg(length(to_json(t)::VARCHAR)::VARCHAR "
+            f"|| ':' || to_json(t)::VARCHAR, '' ORDER BY {ordering}), '')) "
+            f"AS physical_digest FROM {table} t"
+        ).fetchone()
+        if row is None or int(row[0]) < 0 or not isinstance(row[1], str):
+            raise ValueError("DuckDB physical digest validation failed")
+        members.append(
+            RemoteBundleMember(
+                member=spec.member,
+                schema_name="main",
+                table_name=candidate_tables[spec.member],
+                key_columns=spec.unique_key,
+                row_count=int(row[0]),
+                checksum=checksums[spec.member],
+                physical_digest=row[1],
+                column_schema=spec.column_schema,
+                columns=spec.columns if not spec.column_schema else (),
+            )
+        )
+    payload = SignedBundleIntegrityPayload(
+        destination_id=options.destination_id,
+        bundle_key=options.bundle_key,
+        bundle_id=bundle_id,
+        snapshot_seq=snapshot_seq,
+        integrity_version="dr-platform.bundle-integrity.v1",
+        source_coordinates_sha256=hashlib.sha256(b"[]").hexdigest(),
+        physical_digest_algorithm=algorithm,
+        members=tuple(members),
+    )
+    signature = options.integrity_signer.sign(integrity_message(payload))
+    return (
+        payload.integrity_version,
+        options.integrity_signer.key_id,
+        canonical_integrity_payload(payload).decode(),
+        base64.b64encode(signature).decode(),
+        algorithm,
+    )
 
 
 def _stage_and_promote(
@@ -1069,14 +1164,24 @@ def _stage_and_promote(
             }
             for spec, _ in members
         }
+        integrity = _local_signed_integrity(
+            connection,
+            options,
+            bundle_id=bundle_id,
+            snapshot_seq=snapshot_seq,
+            specs=tuple(spec for spec, _ in members),
+            candidate_tables=candidate_tables,
+            checksums=candidate_checksums,
+        )
         connection.execute(
-            f"INSERT INTO {_BUNDLE_TABLE} VALUES (?, ?, ?, ?, ?, epoch_ms(now()))",
+            f"INSERT INTO {_BUNDLE_TABLE} (destination_id, bundle_key, bundle_id, snapshot_seq, manifest_json, created_at, integrity_version, integrity_key_id, integrity_payload_json, integrity_signature, physical_digest_algorithm) VALUES (?, ?, ?, ?, ?, epoch_ms(now()), ?, ?, ?, ?, ?)",
             [
                 options.destination_id,
                 options.bundle_key,
                 bundle_id,
                 snapshot_seq,
                 _canonical(manifest),
+                *integrity,
             ],
         )
         cursors = {spec.member: snapshot_seq for spec, _ in members}
@@ -1218,14 +1323,24 @@ def _stage_and_promote_application(
             }
             for spec in specs
         }
+        integrity = _local_signed_integrity(
+            connection,
+            options,
+            bundle_id=bundle_id,
+            snapshot_seq=snapshot_seq,
+            specs=specs,
+            candidate_tables=candidate_tables,
+            checksums=candidate_checksums,
+        )
         connection.execute(
-            f"INSERT INTO {_BUNDLE_TABLE} VALUES (?, ?, ?, ?, ?, epoch_ms(now()))",
+            f"INSERT INTO {_BUNDLE_TABLE} (destination_id, bundle_key, bundle_id, snapshot_seq, manifest_json, created_at, integrity_version, integrity_key_id, integrity_payload_json, integrity_signature, physical_digest_algorithm) VALUES (?, ?, ?, ?, ?, epoch_ms(now()), ?, ?, ?, ?, ?)",
             [
                 options.destination_id,
                 options.bundle_key,
                 bundle_id,
                 snapshot_seq,
                 _canonical(manifest),
+                *integrity,
             ],
         )
         promoted = connection.execute(
