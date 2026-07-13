@@ -4,8 +4,8 @@ Every risk starts open. A risk closes only when the owning PR links its executab
 
 | Risk | Owner | Required closure | Status |
 | --- | --- | --- | --- |
-| A1 — authorized `PARTIAL` acceptance | W4-W5 | Truthful selected-partial-policy state, immutable authorization and digest, exact run/Attempt proof, provenance, promotion/current-read fixtures. | Open |
-| A2 — delayed enqueue after `NO_WORKFLOW_FOUND` | P3-P5 | Late-enqueue successor/escalation, periodic re-observation, claimant-success path, exclusivity re-check, blocked-enqueue delayed-commit fixture. | Open |
+| A1 — authorized `PARTIAL` acceptance | W4-W5 | Truthful selected-partial-policy state, immutable authorization and digest, exact run/Attempt proof, provenance, promotion/current-read fixtures. | Closed (out of scope) — `PARTIAL` promotion stays disabled permanently for v6 per [ADR 0025](../../adr/0025-v6-descope-recovery-automation-and-deferred-work.md); closure work cancelled, not completed. |
+| A2 — delayed enqueue after `NO_WORKFLOW_FOUND` | P3-P5 | Late-enqueue successor/escalation, periodic re-observation, claimant-success path, exclusivity re-check, blocked-enqueue delayed-commit fixture. | Open — merged P3-P5 behavior is final; the queued protocol-extension owner decision is closed out of scope per [ADR 0025](../../adr/0025-v6-descope-recovery-automation-and-deferred-work.md). |
 | A3 — independent application/DBOS source cuts | P0, P7, W7 | Truthful coordinates/timestamps, deterministic bound, transition-between-captures fixture, measured skew, fail-closed outcomes. | P0 same-endpoint/separate-schema topology pinned and measured; open through P7/W7 verification. |
 | L1 — exact populated-only predicate | P0, W3 | Pinned database character semantics, one ctype-independent boundary, aligned Python behavior, ASCII and non-ASCII corpus. | P0 closed 25-code-point set pinned; open through W3 adoption. |
 | L2 — plural membership versus accepted run | W3-W5 | Complete eligible Manifest membership, separately derived pinned winner, `SUPERSEDED_GENERATION` provenance. | Open |
