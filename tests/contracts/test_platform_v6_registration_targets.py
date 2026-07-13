@@ -60,6 +60,7 @@ from dr_platform.targets import (
     TargetResolutionErrorCode,
     TargetUnavailableError,
 )
+from tests.conftest import engine_dsn
 
 TARGET_REF = ExecutionTargetRef(
     target_key="generation",
@@ -227,7 +228,7 @@ def _registry(target: ExecutionTarget) -> TargetRegistry:
 
 
 def _upgrade_scratch_schema(engine: Engine) -> PlatformSchema:
-    upgrade_platform_schema(str(engine.url))
+    upgrade_platform_schema(engine_dsn(engine))
     return PlatformSchema()
 
 

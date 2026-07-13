@@ -44,7 +44,7 @@ from dr_platform import (
     export as _export,
 )
 from dr_platform.publication import _StalePromotionError
-from tests.conftest import signed_integrity_test_material
+from tests.conftest import engine_dsn, signed_integrity_test_material
 from tests.contracts.test_platform_v6_cancellation import _register_operation
 from tests.test_export import _reconciliation
 
@@ -1723,7 +1723,7 @@ def test_active_pin_survives_cleanup_then_missing_bundle_is_typed(
     pg_engine: Engine, tmp_path
 ) -> None:
     schema = PlatformSchema()
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     _register_operation(
         pg_engine,
         schema,

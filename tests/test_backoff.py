@@ -16,6 +16,7 @@ from dr_platform.backoff import (
 )
 from dr_platform.db import PlatformSchema, upgrade_platform_schema
 from dr_platform.status import FailureClass
+from tests.conftest import engine_dsn
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -23,7 +24,7 @@ NOW = datetime(2026, 1, 1, tzinfo=UTC)
 def test_throttle_failure_hold_tags_and_clear_share_v6_state(
     pg_engine: Engine,
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     schema = PlatformSchema()
     with pg_engine.begin() as connection:
         first = record_throttle_failure(

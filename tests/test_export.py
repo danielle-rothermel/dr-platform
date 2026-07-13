@@ -63,7 +63,7 @@ from dr_platform.reconciliation_runtime import (
     ReconciliationObservationDisposition,
 )
 from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
-from tests.conftest import signed_integrity_test_material
+from tests.conftest import engine_dsn, signed_integrity_test_material
 from tests.contracts.test_platform_v6_cancellation import _register_operation
 from tests.contracts.test_platform_v6_enqueue_claims import _target
 
@@ -141,7 +141,7 @@ def _text_schema(*names: str) -> tuple[ProjectionColumn, ...]:
 def test_empty_kernel_export_promotes_and_replays(
     pg_engine: Engine, tmp_path
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     database = tmp_path / "kernel.duckdb"
     first = export(
         pg_engine,
@@ -211,7 +211,7 @@ def test_projection_full_rebuild_contract_and_dbos_telemetry_are_frozen() -> (
 def test_application_projection_bundle_builds_one_snapshot(
     pg_engine: Engine, tmp_path
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         connection.execute(
             text("CREATE TABLE application_roots (id TEXT PRIMARY KEY)")
@@ -296,7 +296,7 @@ def test_application_bundle_promotes_and_resolves_remote_fence(
 ) -> None:
     """One public export captures once and independently promotes Postgres."""
 
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
         connection.execute(
             text("CREATE TABLE remote_application (id TEXT PRIMARY KEY)")
@@ -385,7 +385,7 @@ def test_application_bundle_records_motherduck_main_schema(
 ) -> None:
     """MotherDuck unqualified stages live in `main`, not Postgres `public`."""
 
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
 
     def roots(
         _connection: Connection, _snapshot: ApplicationSnapshot
@@ -445,7 +445,7 @@ def test_application_bundle_records_motherduck_main_schema(
 def test_application_projection_types_round_trip_and_aggregate(
     pg_engine: Engine, tmp_path
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     captured = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
 
     def typed_rows(
@@ -635,7 +635,7 @@ def test_application_projection_types_round_trip_and_aggregate(
 def test_application_projection_schema_and_values_fail_closed(
     pg_engine: Engine, tmp_path
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
 
     def invalid_value(
         _connection: Connection, _snapshot: ApplicationSnapshot
@@ -686,7 +686,7 @@ def test_application_projection_schema_and_values_fail_closed(
 def test_application_projection_rejects_missing_builder_and_invalid_closure(
     pg_engine: Engine, tmp_path
 ) -> None:
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     options = ExportOptions(
         destination_path=str(tmp_path / "invalid.duckdb"),
         bundle_key="application-invalid",
@@ -756,7 +756,7 @@ def test_nonempty_export_preserves_types_and_excludes_opaque_payloads(
     pg_engine: Engine, tmp_path
 ) -> None:
     schema = PlatformSchema()
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     _register_operation(
         pg_engine,
         schema,
@@ -904,7 +904,7 @@ def test_source_barrier_waits_for_committed_writer(
     pg_engine: Engine, tmp_path
 ) -> None:
     schema = PlatformSchema()
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     _register_operation(
         pg_engine,
         schema,
@@ -980,7 +980,7 @@ def test_structured_failure_preserves_populated_pointer(
     pg_engine: Engine, tmp_path
 ) -> None:
     schema = PlatformSchema()
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     _register_operation(
         pg_engine,
         schema,
@@ -1019,7 +1019,7 @@ def test_export_drives_terminal_reconciliation_before_capture(
     pg_engine: Engine, tmp_path
 ) -> None:
     schema = PlatformSchema()
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     _register_operation(
         pg_engine,
         schema,
@@ -1085,7 +1085,7 @@ def test_reconciliation_failure_and_bound_exhaustion_are_destination_outcomes(
     pg_engine: Engine, tmp_path
 ) -> None:
     schema = PlatformSchema()
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     _register_operation(
         pg_engine,
         schema,
@@ -1165,7 +1165,7 @@ def test_kernel_remote_stages_every_member_and_retries_independently(
     pg_engine: Engine, tmp_path
 ) -> None:
     schema = PlatformSchema()
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     _register_operation(
         pg_engine,
         schema,
@@ -1235,7 +1235,7 @@ def test_kernel_remote_runs_when_local_destination_is_unavailable(
     pg_engine: Engine, tmp_path
 ) -> None:
     schema = PlatformSchema()
-    upgrade_platform_schema(str(pg_engine.url))
+    upgrade_platform_schema(engine_dsn(pg_engine))
     _register_operation(
         pg_engine,
         schema,
