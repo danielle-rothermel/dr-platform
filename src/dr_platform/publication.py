@@ -604,8 +604,9 @@ class PostgresPublicationFence:
     table_name: str = "dr_platform_publication_state"
     kind: Literal["motherduck", "neon"] = "neon"
     # Destructive operation cleanup is an explicit positive capability, not a
-    # backend-label inference: only Neon construction sites that opt in may
-    # execute it, so an omitted or mistyped label stays fail-closed.
+    # backend-label inference: only construction sites that opt in may execute
+    # it, so an omitted flag stays fail-closed and a mistyped label fails at
+    # construction. Both backends carry a live fault-matrix cleanup proof.
     operation_cleanup_enabled: bool = False
     signer: BundleIntegritySigner | None = None
     # Readers receive a replaceable public-only ring. Rotation is an atomic
@@ -652,16 +653,12 @@ class PostgresPublicationFence:
 
     @property
     def capabilities(self) -> PublicationCapabilities:
-        enabled = self.kind == "neon" and self.operation_cleanup_enabled
-        if enabled:
-            reason = None
-        elif self.kind == "neon":
-            reason = "operation cleanup requires explicit operation_cleanup_enabled=True"
-        else:
-            reason = "MotherDuck operation cleanup requires endpoint capability proof"
+        enabled = self.operation_cleanup_enabled
         return PublicationCapabilities(
             operation_cleanup=enabled,
-            reason=reason,
+            reason=None
+            if enabled
+            else "operation cleanup requires explicit operation_cleanup_enabled=True",
         )
 
     @property
@@ -686,11 +683,17 @@ class PostgresPublicationFence:
                     "owner TEXT, lease_expires_at TIMESTAMPTZ, "
                     "fencing_token BIGINT NOT NULL DEFAULT 0, "
                     f"updated_at TIMESTAMPTZ NOT NULL DEFAULT {self._now}, "
+                    "mutation_epoch BIGINT NOT NULL DEFAULT 0, "
+                    "published_operation_id TEXT, "
                     "PRIMARY KEY(destination_id, bundle_key))"
                 )
             )
+            # Legacy migrations must stay constraint-free: MotherDuck's parser
+            # rejects ADD COLUMN with constraints outright, while a DEFAULT
+            # still backfills every pre-existing row. Fresh tables carry the
+            # full NOT NULL shape from their CREATE statements above/below.
             for column in (
-                "mutation_epoch BIGINT NOT NULL DEFAULT 0",
+                "mutation_epoch BIGINT DEFAULT 0",
                 "published_operation_id TEXT",
             ):
                 connection.execute(
@@ -725,12 +728,14 @@ class PostgresPublicationFence:
                 text(
                     f"CREATE TABLE IF NOT EXISTS {self._pins_table} (destination_id TEXT NOT NULL, bundle_key TEXT NOT NULL, "
                     "pin_id TEXT NOT NULL, bundle_id TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, "
-                    f"created_at TIMESTAMPTZ NOT NULL DEFAULT {self._now}, PRIMARY KEY(destination_id, bundle_key, pin_id))"
+                    f"created_at TIMESTAMPTZ NOT NULL DEFAULT {self._now}, "
+                    "owner_operation_id TEXT, pin_kind TEXT NOT NULL DEFAULT 'EXTERNAL', "
+                    "PRIMARY KEY(destination_id, bundle_key, pin_id))"
                 )
             )
             for column in (
                 "owner_operation_id TEXT",
-                "pin_kind TEXT NOT NULL DEFAULT 'EXTERNAL'",
+                "pin_kind TEXT DEFAULT 'EXTERNAL'",
             ):
                 connection.execute(
                     text(
@@ -2678,13 +2683,26 @@ class PostgresPublicationFence:
             observation=observation,
         )
 
-    @staticmethod
-    def _retryable_database_error(exc: DBAPIError) -> bool:
+    def _retryable_database_error(self, exc: DBAPIError) -> bool:
         original = exc.orig
         code = getattr(original, "sqlstate", None) or getattr(
             original, "pgcode", None
         )
-        return code in {"40001", "40P01"}
+        if code in {"40001", "40P01"}:
+            return True
+        if self.kind != "motherduck":
+            return False
+        # MotherDuck reports every failure as SQLSTATE XXUUU, so its
+        # optimistic write-write aborts are identifiable only by DuckDB's
+        # TransactionContext message. A retry re-runs the whole gate
+        # transaction from a fresh snapshot, exactly like a PostgreSQL
+        # serialization retry.
+        message = str(original)
+        return (
+            code == "XXUUU"
+            and message.startswith("TransactionContext Error:")
+            and "conflict" in message.lower()
+        )
 
     def cleanup_operation(
         self,
@@ -2780,9 +2798,15 @@ class PostgresPublicationFence:
         cleanup_request_id: str,
         expected_plan_digest: str,
     ) -> CleanupResult:
-        connection = self.engine.connect().execution_options(
-            isolation_level="SERIALIZABLE"
-        )
+        connection = self.engine.connect()
+        if self.kind == "neon":
+            # MotherDuck's endpoint rejects SERIALIZABLE outright; its
+            # optimistic transactions abort conflicting writes on their own,
+            # and the gate compare-and-set below is the isolation-independent
+            # fence either way.
+            connection = connection.execution_options(
+                isolation_level="SERIALIZABLE"
+            )
         try:
             with connection.begin():
                 operation = connection.execute(

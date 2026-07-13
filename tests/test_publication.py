@@ -1,5 +1,5 @@
 """P7b remote fence, compatibility, and pin/cleanup coverage."""
-# ruff: noqa: E501, PLR0915, S608
+# ruff: noqa: E501, PLR0913, PLR0915, S608
 
 from __future__ import annotations
 
@@ -16,9 +16,10 @@ from uuid import uuid4
 import duckdb
 import pytest
 from sqlalchemy import Connection, Engine, create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from dr_platform import (
+    BundlePin,
     ExportOptions,
     IncompatibleSnapshotError,
     PinnedBundleGoneError,
@@ -43,6 +44,7 @@ from dr_platform import (
 from dr_platform import (
     export as _export,
 )
+from dr_platform.export import _canonical
 from dr_platform.publication import _StalePromotionError
 from tests.conftest import engine_dsn, signed_integrity_test_material
 from tests.contracts.test_platform_v6_cancellation import _register_operation
@@ -65,7 +67,7 @@ def export(source: Engine, options: ExportOptions, **kwargs):  # type: ignore[no
 
 
 def _empty_candidate_manifest(
-    connection: Connection, table_name: str
+    connection: Connection, table_name: str, schema_name: str = "public"
 ) -> RemoteBundleManifest:
     connection.execute(text(f'CREATE TABLE "{table_name}" (id BIGINT)'))
     return RemoteBundleManifest(
@@ -73,6 +75,7 @@ def _empty_candidate_manifest(
         members=(
             RemoteBundleMember(
                 member="member",
+                schema_name=schema_name,
                 table_name=table_name,
                 key_columns=("id",),
                 row_count=0,
@@ -937,27 +940,82 @@ def test_operation_cleanup_capability_is_fail_closed(
     pg_engine: Engine,
 ) -> None:
     suffix = uuid4().hex[:12]
-    # A MotherDuck endpoint can never opt in, even explicitly.
+    # An explicit opt-in enables cleanup on both proven backends.
     motherduck = PostgresPublicationFence(
         pg_engine,
-        destination_id="motherduck-disabled",
-        table_name=f"motherduck_disabled_{suffix}",
+        destination_id="motherduck-enabled",
+        table_name=f"motherduck_enabled_{suffix}",
         kind="motherduck",
         operation_cleanup_enabled=True,
     )
-    assert not motherduck.capabilities.operation_cleanup
-    with pytest.raises(RuntimeError, match="capability proof"):
-        motherduck.cleanup_operation("operation", "request", "digest")
-    # An omitted enablement flag leaves even a Neon endpoint fail-closed, so
-    # a missed or mistyped backend label cannot route destructive cleanup.
-    default_neon = PostgresPublicationFence(
-        pg_engine,
-        destination_id="neon-default-disabled",
-        table_name=f"neon_default_disabled_{suffix}",
+    assert motherduck.capabilities.operation_cleanup
+    # An omitted enablement flag leaves every endpoint fail-closed, so a
+    # missing opt-in cannot route destructive cleanup on either backend.
+    kinds: tuple[Literal["motherduck", "neon"], ...] = ("motherduck", "neon")
+    for kind in kinds:
+        disabled = PostgresPublicationFence(
+            pg_engine,
+            destination_id=f"{kind}-default-disabled",
+            table_name=f"{kind}_default_disabled_{suffix}",
+            kind=kind,
+        )
+        assert not disabled.capabilities.operation_cleanup
+        with pytest.raises(RuntimeError, match="operation_cleanup_enabled"):
+            disabled.cleanup_operation("operation", "request", "digest")
+
+
+class _FakeDriverError(Exception):
+    """Driver-shaped error carrying the sqlstate psycopg exposes."""
+
+    def __init__(self, message: str, sqlstate: str) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+        self._message = message
+
+    def __str__(self) -> str:
+        return self._message
+
+
+def test_retryable_conflict_classification_is_backend_scoped() -> None:
+    engine = create_engine("postgresql+psycopg:///never_connected")
+
+    def wrapped(message: str, sqlstate: str) -> DBAPIError:
+        return DBAPIError(
+            "UPDATE gate", None, _FakeDriverError(message, sqlstate)
+        )
+
+    serialization = wrapped("serialization failure", "40001")
+    deadlock = wrapped("deadlock detected", "40P01")
+    # MotherDuck reports every failure as XXUUU; only its TransactionContext
+    # write-write aborts are transient, so classification must read DuckDB's
+    # message, and only for the motherduck backend.
+    update_conflict = wrapped(
+        "TransactionContext Error: Conflict on update!", "XXUUU"
     )
-    assert not default_neon.capabilities.operation_cleanup
-    with pytest.raises(RuntimeError, match="operation_cleanup_enabled"):
-        default_neon.cleanup_operation("operation", "request", "digest")
+    catalog_conflict = wrapped(
+        "TransactionContext Error: Catalog write-write conflict on alter "
+        'with "Schema\0main\0main"',
+        "XXUUU",
+    )
+    catalog_missing = wrapped(
+        "Catalog Error: Table with name missing does not exist!", "XXUUU"
+    )
+    parser_error = wrapped(
+        'Parser Error: syntax error at or near "SELEKT"', "XXUUU"
+    )
+
+    kinds: tuple[Literal["motherduck", "neon"], ...] = ("motherduck", "neon")
+    for kind in kinds:
+        fence = PostgresPublicationFence(
+            engine, destination_id="classification", kind=kind
+        )
+        assert fence._retryable_database_error(serialization)
+        assert fence._retryable_database_error(deadlock)
+        assert not fence._retryable_database_error(catalog_missing)
+        assert not fence._retryable_database_error(parser_error)
+        expected = kind == "motherduck"
+        assert fence._retryable_database_error(update_conflict) is expected
+        assert fence._retryable_database_error(catalog_conflict) is expected
 
 
 def test_cleanup_rejects_a_plan_signed_by_an_unknown_key(
@@ -1422,11 +1480,67 @@ def test_remote_bad_builder_cannot_name_an_unowned_candidate_table(
     assert committed == 0
 
 
+def _motherduck_source_coordinate(
+    engine: Engine, snapshot_seq: int
+) -> SourceCoordinate:
+    """Capture a database-server coordinate from a MotherDuck endpoint.
+
+    MotherDuck's endpoint has no clock_timestamp(); its transaction-stable
+    CURRENT_TIMESTAMP is the only database-server clock and is sufficient
+    for a single-family cut.
+    """
+
+    with engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT current_database(), CURRENT_TIMESTAMP")
+        ).one()
+    return SourceCoordinate(
+        source_id=f"application:{row[0]}",
+        database_server=str(row[0]),
+        captured_at=row[1],
+        snapshot_seq=snapshot_seq,
+    )
+
+
+def _remote_table_exists(
+    engine: Engine,
+    kind: Literal["motherduck", "neon"],
+    schema_name: str,
+    table_name: str,
+) -> bool:
+    """Catalog existence probe; MotherDuck has no to_regclass."""
+
+    with engine.connect() as connection:
+        if kind == "neon":
+            return (
+                connection.execute(
+                    text("SELECT to_regclass(CAST(:name AS TEXT))"),
+                    {"name": f"{schema_name}.{table_name}"},
+                ).scalar_one()
+                is not None
+            )
+        return (
+            connection.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = :schema_name "
+                    "AND table_name = :table_name"
+                ),
+                {"schema_name": schema_name, "table_name": table_name},
+            ).one_or_none()
+            is not None
+        )
+
+
 def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
     engine: Engine, kind: Literal["motherduck", "neon"]
 ) -> None:
     suffix = uuid4().hex[:12]
     state_table = f"publication_state_{suffix}"
+    # MotherDuck's endpoint exposes exactly one writable schema, main;
+    # PostgreSQL destinations stage into public. This mirrors export's
+    # kind-derived member schema.
+    schema = "main" if kind == "motherduck" else "public"
     signer, key_ring = signed_integrity_test_material()
     fence = PostgresPublicationFence(
         engine,
@@ -1473,8 +1587,12 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
             lease_seconds=60,
         )
 
-        coordinate = capture_source_coordinate(
-            engine, source_id="application", snapshot_seq=1
+        coordinate = (
+            _motherduck_source_coordinate(engine, snapshot_seq=1)
+            if kind == "motherduck"
+            else capture_source_coordinate(
+                engine, source_id="application", snapshot_seq=1
+            )
         )
 
         def create_stale_stage(
@@ -1488,6 +1606,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
                 members=(
                     RemoteBundleMember(
                         member="member",
+                        schema_name=schema,
                         table_name=staged_table,
                         key_columns=("id",),
                         row_count=0,
@@ -1508,11 +1627,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
             stage=create_stale_stage,
         )
         assert stale.disposition == "STALE_PROMOTION"
-        with engine.connect() as connection:
-            exists = connection.execute(
-                text("SELECT to_regclass(:name)"), {"name": staged_table}
-            ).scalar_one()
-        assert exists is None
+        assert not _remote_table_exists(engine, kind, schema, staged_table)
 
         def expire_during_stage(
             connection: Connection,
@@ -1534,6 +1649,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
                 members=(
                     RemoteBundleMember(
                         member="member",
+                        schema_name=schema,
                         table_name=expired_table,
                         key_columns=("id",),
                         row_count=0,
@@ -1570,6 +1686,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
                 members=(
                     RemoteBundleMember(
                         member="member",
+                        schema_name=schema,
                         table_name=promoted_table,
                         key_columns=("id",),
                         row_count=0,
@@ -1605,7 +1722,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
             source_coordinates=(coordinate,),
             source_families=("application",),
             stage=lambda connection: _empty_candidate_manifest(
-                connection, replay_table
+                connection, replay_table, schema
             ),
         )
         assert idempotent.disposition == "IDEMPOTENT"
@@ -1614,7 +1731,7 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
         pin = fence.pin_bundle(bundle_key="analysis", ttl_seconds=60)
         resolved = fence.resolve_pin(pin)
         assert resolved.bundle_id == "bundle-one"
-        assert resolved.members == {"member": f"public.{promoted_table}"}
+        assert resolved.members == {"member": f"{schema}.{promoted_table}"}
 
         successor_lease = fence.acquire_lease(
             bundle_key="analysis", run_id="successor", lease_seconds=60
@@ -1628,13 +1745,15 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
             bundle_id="bundle-two",
             cursors={"member": 2},
             source_coordinates=(
-                capture_source_coordinate(
+                _motherduck_source_coordinate(engine, snapshot_seq=2)
+                if kind == "motherduck"
+                else capture_source_coordinate(
                     engine, source_id="application", snapshot_seq=2
                 ),
             ),
             source_families=("application",),
             stage=lambda connection: _empty_candidate_manifest(
-                connection, successor_table
+                connection, successor_table, schema
             ),
         )
         assert successor.disposition == "PROMOTED"
@@ -1678,6 +1797,14 @@ def _assert_remote_fence_rejects_stale_stage_and_uses_returning(
             connection.execute(
                 text(f'DROP TABLE IF EXISTS "{state_table}_bundles"')
             )
+            connection.execute(
+                text(f'DROP TABLE IF EXISTS "{state_table}_operations"')
+            )
+            connection.execute(
+                text(
+                    f'DROP TABLE IF EXISTS "{state_table}_operation_members"'
+                )
+            )
             connection.execute(text(f'DROP TABLE IF EXISTS "{state_table}"'))
 
 
@@ -1700,7 +1827,10 @@ def motherduck_engine() -> Iterator[Engine]:
             "MotherDuck capability test requires "
             "DR_PLATFORM_MOTHERDUCK_TEST_DATABASE_URL"
         )
-    engine = create_engine(url)
+    # SQLAlchemy's psycopg dialect probes the hstore extension type inside a
+    # SAVEPOINT on first connect; MotherDuck's endpoint parses neither, so the
+    # probe must be disabled for the connection to initialize at all.
+    engine = create_engine(url, use_native_hstore=False)
     try:
         with engine.connect():
             pass
@@ -1717,6 +1847,594 @@ def test_motherduck_fence_rejects_stale_stage_and_uses_returning(
     _assert_remote_fence_rejects_stale_stage_and_uses_returning(
         motherduck_engine, "motherduck"
     )
+
+
+# The live cleanup proof publishes the same non-empty six-member Analysis
+# inventory Whetstone publishes, at the fence protocol level.
+_ANALYSIS_SHAPE: tuple[tuple[str, str], ...] = (
+    ("experiments", "experiment_id"),
+    ("predictions", "prediction_id"),
+    ("generation_runs", "generation_run_id"),
+    ("score_attempts", "score_attempt_id"),
+    ("sweep_metrics", "metric_id"),
+    ("failure_metrics", "failure_id"),
+)
+_ANALYSIS_MEMBER_NAMES = tuple(sorted(name for name, _ in _ANALYSIS_SHAPE))
+
+
+def _analysis_member_rows(member: str, key: str) -> list[dict[str, object]]:
+    return [
+        {
+            key: f"{member}-{index}",
+            "payload": f"{member}-payload-{index}",
+            "value": index,
+        }
+        for index in (1, 2)
+    ]
+
+
+def _analysis_stage_plan(
+    fence: PostgresPublicationFence,
+    *,
+    run_id: str,
+    fencing_token: int,
+    snapshot_seq: int,
+) -> tuple[RemoteBundleManifest, dict[str, tuple[str, list[dict[str, object]]]]]:
+    members: list[RemoteBundleMember] = []
+    rows_by_member: dict[str, tuple[str, list[dict[str, object]]]] = {}
+    for member, key in _ANALYSIS_SHAPE:
+        rows = _analysis_member_rows(member, key)
+        rows_by_member[member] = (key, rows)
+        members.append(
+            RemoteBundleMember(
+                member=member,
+                schema_name="main",
+                table_name=fence.stage_table_name(
+                    member=member,
+                    run_id=run_id,
+                    fencing_token=fencing_token,
+                    snapshot_seq=snapshot_seq,
+                ),
+                key_columns=(key,),
+                row_count=len(rows),
+                checksum=hashlib.sha256(_canonical(rows).encode()).hexdigest(),
+            )
+        )
+    return (
+        RemoteBundleManifest(
+            members=tuple(members), source_families=("application",)
+        ),
+        rows_by_member,
+    )
+
+
+def _stage_analysis_members(
+    connection: Connection,
+    prepared: PreparedStage,
+    fence: PostgresPublicationFence,
+    plan: RemoteBundleManifest,
+    rows_by_member: dict[str, tuple[str, list[dict[str, object]]]],
+) -> RemoteBundleManifest:
+    for member in plan.members:
+        key, rows = rows_by_member[member.member]
+        assert prepared.table_name(member.member) == member.table_name
+        connection.execute(
+            text(
+                f'CREATE TABLE "{member.table_name}" '
+                f'("{key}" VARCHAR, "payload" VARCHAR, "value" BIGINT)'
+            )
+        )
+        for row in rows:
+            connection.execute(
+                text(
+                    f'INSERT INTO "{member.table_name}" VALUES '
+                    "(:key_value, :payload, :value)"
+                ),
+                {
+                    "key_value": row[key],
+                    "payload": row["payload"],
+                    "value": row["value"],
+                },
+            )
+        fence.stage_member_complete(prepared, member.member)
+    return plan
+
+
+def _disposable_motherduck_fence(
+    engine: Engine,
+    suffix: str,
+    fault_hook: Callable[[str], None] | None = None,
+    *,
+    operation_cleanup_enabled: bool = True,
+) -> PostgresPublicationFence:
+    signer, key_ring = signed_integrity_test_material()
+    return PostgresPublicationFence(
+        engine,
+        destination_id=f"drp-cleanup-proof-{suffix}",
+        table_name=f"drp_cleanup_proof_{suffix}",
+        kind="motherduck",
+        operation_cleanup_enabled=operation_cleanup_enabled,
+        signer=signer,
+        public_key_ring=key_ring,
+        fault_hook=fault_hook or (lambda _boundary: None),
+    )
+
+
+def _promote_analysis_operation(
+    fence: PostgresPublicationFence,
+    engine: Engine,
+    identity: PublicationOperationIdentity,
+    *,
+    bundle_key: str,
+    snapshot_seq: int,
+    staged_tables: set[str],
+) -> RemotePromotionResult:
+    lease = fence.acquire_lease(
+        bundle_key=bundle_key, run_id=identity.attempt_id, lease_seconds=120
+    )
+    assert lease.fencing_token is not None
+    plan, rows_by_member = _analysis_stage_plan(
+        fence,
+        run_id=identity.attempt_id,
+        fencing_token=lease.fencing_token,
+        snapshot_seq=snapshot_seq,
+    )
+    staged_tables.update(member.table_name for member in plan.members)
+    return fence.promote(
+        bundle_key=bundle_key,
+        run_id=identity.attempt_id,
+        fencing_token=lease.fencing_token,
+        snapshot_seq=snapshot_seq,
+        bundle_id=f"drp-bundle-{identity.operation_id}",
+        cursors={member.member: snapshot_seq for member in plan.members},
+        source_coordinates=(
+            _motherduck_source_coordinate(engine, snapshot_seq=snapshot_seq),
+        ),
+        source_families=("application",),
+        stage=lambda connection, prepared: _stage_analysis_members(
+            connection, prepared, fence, plan, rows_by_member
+        ),
+        operation_identity=identity,
+        stage_plan=plan,
+    )
+
+
+def _drop_disposable_motherduck_state(
+    engine: Engine, fence: PostgresPublicationFence, staged_tables: set[str]
+) -> None:
+    with engine.begin() as connection:
+        for table_name in sorted(staged_tables):
+            connection.execute(
+                text(f'DROP TABLE IF EXISTS "main"."{table_name}"')
+            )
+        for state_suffix in (
+            "_pins",
+            "_bundles",
+            "_operations",
+            "_operation_members",
+            "",
+        ):
+            connection.execute(
+                text(
+                    f'DROP TABLE IF EXISTS "{fence.table_name}{state_suffix}"'
+                )
+            )
+
+
+def _assert_zero_operation_state(
+    fence: PostgresPublicationFence,
+    engine: Engine,
+    operation_id: str,
+    staged_tables: set[str],
+) -> None:
+    final = fence.observe_operation(operation_id)
+    assert final.state == "CLEANED"
+    assert final.present_members == ()
+    assert final.owned_pin_ids == ()
+    assert final.active_external_pin_ids == ()
+    assert final.owned_bundle_count == 0
+    assert final.current_pointer_relation == "NONE"
+    for table_name in sorted(staged_tables):
+        assert not _remote_table_exists(
+            engine, "motherduck", "main", table_name
+        )
+
+
+def test_motherduck_operation_cleanup_proves_analysis_lifecycle(
+    motherduck_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    bundle_key = "whetstone-analysis"
+    conflict_armed: list[bool] = []
+    conflict_pins: list[BundlePin] = []
+
+    def fault(boundary: str) -> None:
+        if boundary == "before_cleanup_gate" and conflict_armed:
+            conflict_armed.clear()
+            # A reader pin committed on a second connection mutates the
+            # shared gate row mid-cleanup, so the open cleanup transaction's
+            # compare-and-set aborts with MotherDuck's optimistic write-write
+            # conflict and must retry from a fresh snapshot.
+            conflict_pins.append(
+                fence.pin_bundle(
+                    bundle_key=bundle_key,
+                    pin_id=f"drp-conflict-{suffix}",
+                    ttl_seconds=600,
+                )
+            )
+
+    fence = _disposable_motherduck_fence(
+        motherduck_engine, suffix, fault_hook=fault
+    )
+    assert fence.capabilities.operation_cleanup
+    assert fence.capabilities.reason is None
+    # The omitted flag stays fail-closed against the live endpoint too.
+    flagless = _disposable_motherduck_fence(
+        motherduck_engine, suffix, operation_cleanup_enabled=False
+    )
+    assert not flagless.capabilities.operation_cleanup
+    with pytest.raises(RuntimeError, match="operation_cleanup_enabled"):
+        flagless.cleanup_operation("operation", "request", "digest")
+
+    staged_tables: set[str] = set()
+    try:
+        fence.ensure_schema()
+        identity_a = PublicationOperationIdentity(
+            operation_id=f"drp-analysis-a-{suffix}",
+            attempt_id=f"drp-attempt-a-{suffix}",
+        )
+        promoted = _promote_analysis_operation(
+            fence,
+            motherduck_engine,
+            identity_a,
+            bundle_key=bundle_key,
+            snapshot_seq=1,
+            staged_tables=staged_tables,
+        )
+        assert promoted.disposition == "PROMOTED"
+        receipt = promoted.receipt
+        assert receipt is not None
+        observation = fence.observe_operation(identity_a.operation_id)
+        assert observation.state == "PROMOTED"
+        assert observation.current_pointer_relation == "CURRENT"
+        assert observation.present_members == _ANALYSIS_MEMBER_NAMES
+        assert observation.owned_bundle_count == 1
+        assert observation.stage_plan_digest == receipt.stage_plan_digest
+
+        # Authority/digest mismatch fails closed without dropping anything.
+        wrong_digest = hashlib.sha256(b"wrong-plan").hexdigest()
+        assert (
+            fence.preflight_cleanup(
+                identity_a.operation_id, wrong_digest
+            ).disposition
+            == "AUTHORITY_MISMATCH"
+        )
+        assert (
+            fence.cleanup_operation(
+                identity_a.operation_id,
+                f"drp-cleanup-a-{suffix}",
+                wrong_digest,
+            ).disposition
+            == "AUTHORITY_MISMATCH"
+        )
+        assert (
+            fence.observe_operation(identity_a.operation_id).present_members
+            == _ANALYSIS_MEMBER_NAMES
+        )
+
+        # An active external reader pin blocks the destructive path.
+        external = fence.pin_bundle(
+            bundle_key=bundle_key,
+            pin_id=f"drp-external-{suffix}",
+            ttl_seconds=600,
+        )
+        assert (
+            fence.preflight_cleanup(
+                identity_a.operation_id, receipt.stage_plan_digest
+            ).disposition
+            == "BLOCKED_EXTERNAL_PIN"
+        )
+        assert (
+            fence.cleanup_operation(
+                identity_a.operation_id,
+                f"drp-cleanup-a-{suffix}",
+                receipt.stage_plan_digest,
+            ).disposition
+            == "BLOCKED_EXTERNAL_PIN"
+        )
+        fence.release_pin(external)
+
+        # A concurrent gate mutation mid-transaction aborts with MotherDuck's
+        # XXUUU write-write conflict; the bounded retry re-observes the fresh
+        # external pin instead of raising or cleaning past it.
+        conflict_armed.append(True)
+        conflicted = fence.cleanup_operation(
+            identity_a.operation_id,
+            f"drp-cleanup-a-{suffix}",
+            receipt.stage_plan_digest,
+        )
+        assert conflicted.disposition == "BLOCKED_EXTERNAL_PIN"
+        assert not conflict_armed
+        assert len(conflict_pins) == 1
+        fence.release_pin(conflict_pins[0])
+
+        # An operation-owned fixture pin is deleted with its operation.
+        owned = fence.pin_bundle(
+            bundle_key=bundle_key,
+            pin_id=f"drp-owned-{suffix}",
+            owner_operation_id=identity_a.operation_id,
+            ttl_seconds=600,
+        )
+        assert owned.pin_id == f"drp-owned-{suffix}"
+
+        # A successor pointer blocks the superseded operation's cleanup.
+        identity_b = PublicationOperationIdentity(
+            operation_id=f"drp-analysis-b-{suffix}",
+            attempt_id=f"drp-attempt-b-{suffix}",
+        )
+        successor = _promote_analysis_operation(
+            fence,
+            motherduck_engine,
+            identity_b,
+            bundle_key=bundle_key,
+            snapshot_seq=2,
+            staged_tables=staged_tables,
+        )
+        assert successor.disposition == "PROMOTED"
+        assert successor.receipt is not None
+        assert (
+            fence.preflight_cleanup(
+                identity_a.operation_id, receipt.stage_plan_digest
+            ).disposition
+            == "BLOCKED_SUCCESSOR"
+        )
+        assert (
+            fence.cleanup_operation(
+                identity_a.operation_id,
+                f"drp-cleanup-a-{suffix}",
+                receipt.stage_plan_digest,
+            ).disposition
+            == "BLOCKED_SUCCESSOR"
+        )
+
+        # The current operation is cleanable and clears the pointer.
+        assert (
+            fence.preflight_cleanup(
+                identity_b.operation_id, successor.receipt.stage_plan_digest
+            ).disposition
+            == "ELIGIBLE"
+        )
+        cleaned_b = fence.cleanup_operation(
+            identity_b.operation_id,
+            f"drp-cleanup-b-{suffix}",
+            successor.receipt.stage_plan_digest,
+        )
+        assert cleaned_b.disposition == "CLEANED"
+        assert cleaned_b.observation.present_members == ()
+        with motherduck_engine.connect() as connection:
+            pointer = connection.execute(
+                text(
+                    f'SELECT bundle_id, published_operation_id FROM "{fence.table_name}" '
+                    "WHERE destination_id = :destination AND bundle_key = :bundle"
+                ),
+                {"destination": fence.destination_id, "bundle": bundle_key},
+            ).one()
+        assert pointer == (None, None)
+
+        # With the pointer cleared the first operation becomes eligible.
+        assert (
+            fence.preflight_cleanup(
+                identity_a.operation_id, receipt.stage_plan_digest
+            ).disposition
+            == "ELIGIBLE"
+        )
+        cleaned_a = fence.cleanup_operation(
+            identity_a.operation_id,
+            f"drp-cleanup-a-{suffix}",
+            receipt.stage_plan_digest,
+        )
+        assert cleaned_a.disposition == "CLEANED"
+
+        # Exact replay returns the durable tombstone result; a different
+        # request against the tombstone is typed, never re-destructive.
+        replay = fence.cleanup_operation(
+            identity_a.operation_id,
+            f"drp-cleanup-a-{suffix}",
+            receipt.stage_plan_digest,
+        )
+        assert replay == cleaned_a
+        assert (
+            fence.cleanup_operation(
+                identity_a.operation_id,
+                f"drp-cleanup-a-replayed-{suffix}",
+                receipt.stage_plan_digest,
+            ).disposition
+            == "ALREADY_CLEANED"
+        )
+
+        # Zero remaining physical tables, member rows, bundle rows, and
+        # operation-owned pins; pointer relation is NONE for both operations.
+        for operation_id in (
+            identity_a.operation_id,
+            identity_b.operation_id,
+        ):
+            _assert_zero_operation_state(
+                fence, motherduck_engine, operation_id, staged_tables
+            )
+        with motherduck_engine.connect() as connection:
+            for leftover_table in (fence._bundles_table, fence._pins_table):
+                assert (
+                    connection.execute(
+                        text(
+                            f"SELECT count(*) FROM {leftover_table} "
+                            "WHERE destination_id = :destination"
+                        ),
+                        {"destination": fence.destination_id},
+                    ).scalar_one()
+                    == 0
+                )
+    finally:
+        _drop_disposable_motherduck_state(
+            motherduck_engine, fence, staged_tables
+        )
+
+
+def test_motherduck_operation_cleanup_recovers_every_fault_boundary(
+    motherduck_engine: Engine,
+) -> None:
+    suffix = uuid4().hex[:12]
+    armed: list[str] = []
+
+    def fault(boundary: str) -> None:
+        if armed and boundary == armed[0]:
+            armed.clear()
+            raise RuntimeError(boundary)
+
+    fence = _disposable_motherduck_fence(
+        motherduck_engine, suffix, fault_hook=fault
+    )
+    staged_tables: set[str] = set()
+    try:
+        fence.ensure_schema()
+        crash_boundaries = (
+            ("after_plan_commit", "PLANNED"),
+            ("after_each_stage_member", "STAGING"),
+            ("after_stage_commit", "STAGING"),
+            ("after_promotion_commit", "PROMOTED"),
+        )
+        for boundary, expected_state in crash_boundaries:
+            bundle_key = f"analysis-{boundary}"
+            identity = PublicationOperationIdentity(
+                operation_id=f"drp-{boundary}-{suffix}",
+                attempt_id=f"drp-attempt-{boundary}-{suffix}",
+            )
+            boundary_tables: set[str] = set()
+            armed.append(boundary)
+            with pytest.raises(RuntimeError, match=boundary):
+                _promote_analysis_operation(
+                    fence,
+                    motherduck_engine,
+                    identity,
+                    bundle_key=bundle_key,
+                    snapshot_seq=1,
+                    staged_tables=boundary_tables,
+                )
+            staged_tables.update(boundary_tables)
+            observation = fence.observe_operation(identity.operation_id)
+            assert observation.state == expected_state
+            if expected_state != "PROMOTED":
+                # The crashed attempt's lease is still live, so recovery is
+                # blocked until the lease expires.
+                blocked = fence.cleanup_operation(
+                    identity.operation_id,
+                    f"drp-recover-{boundary}-{suffix}",
+                    str(observation.stage_plan_digest),
+                )
+                assert blocked.disposition == "BLOCKED_LEASE_HELD"
+                with motherduck_engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            f'UPDATE "{fence.table_name}" SET lease_expires_at = '
+                            "CURRENT_TIMESTAMP - INTERVAL '1 second' "
+                            "WHERE destination_id = :destination "
+                            "AND bundle_key = :bundle"
+                        ),
+                        {
+                            "destination": fence.destination_id,
+                            "bundle": bundle_key,
+                        },
+                    )
+            cleaned = fence.cleanup_operation(
+                identity.operation_id,
+                f"drp-recover-{boundary}-{suffix}",
+                str(observation.stage_plan_digest),
+            )
+            assert cleaned.disposition == "CLEANED"
+            _assert_zero_operation_state(
+                fence,
+                motherduck_engine,
+                identity.operation_id,
+                boundary_tables,
+            )
+
+        # A crash immediately before the cleanup gate rolls the whole
+        # destructive transaction back; nothing is dropped.
+        identity = PublicationOperationIdentity(
+            operation_id=f"drp-before-gate-{suffix}",
+            attempt_id=f"drp-attempt-before-gate-{suffix}",
+        )
+        gate_tables: set[str] = set()
+        promoted = _promote_analysis_operation(
+            fence,
+            motherduck_engine,
+            identity,
+            bundle_key="analysis-before-cleanup-gate",
+            snapshot_seq=1,
+            staged_tables=gate_tables,
+        )
+        staged_tables.update(gate_tables)
+        assert promoted.disposition == "PROMOTED"
+        assert promoted.receipt is not None
+        armed.append("before_cleanup_gate")
+        with pytest.raises(RuntimeError, match="before_cleanup_gate"):
+            fence.cleanup_operation(
+                identity.operation_id,
+                f"drp-recover-before-gate-{suffix}",
+                promoted.receipt.stage_plan_digest,
+            )
+        interrupted = fence.observe_operation(identity.operation_id)
+        assert interrupted.state == "PROMOTED"
+        assert interrupted.present_members == _ANALYSIS_MEMBER_NAMES
+        cleaned = fence.cleanup_operation(
+            identity.operation_id,
+            f"drp-recover-before-gate-{suffix}",
+            promoted.receipt.stage_plan_digest,
+        )
+        assert cleaned.disposition == "CLEANED"
+        _assert_zero_operation_state(
+            fence, motherduck_engine, identity.operation_id, gate_tables
+        )
+
+        # A crash after the cleanup commit replays the durable tombstone.
+        identity = PublicationOperationIdentity(
+            operation_id=f"drp-after-commit-{suffix}",
+            attempt_id=f"drp-attempt-after-commit-{suffix}",
+        )
+        commit_tables: set[str] = set()
+        promoted = _promote_analysis_operation(
+            fence,
+            motherduck_engine,
+            identity,
+            bundle_key="analysis-after-cleanup-commit",
+            snapshot_seq=1,
+            staged_tables=commit_tables,
+        )
+        staged_tables.update(commit_tables)
+        assert promoted.disposition == "PROMOTED"
+        assert promoted.receipt is not None
+        armed.append("after_cleanup_commit")
+        with pytest.raises(RuntimeError, match="after_cleanup_commit"):
+            fence.cleanup_operation(
+                identity.operation_id,
+                f"drp-recover-after-commit-{suffix}",
+                promoted.receipt.stage_plan_digest,
+            )
+        assert (
+            fence.observe_operation(identity.operation_id).state == "CLEANED"
+        )
+        replay = fence.cleanup_operation(
+            identity.operation_id,
+            f"drp-recover-after-commit-{suffix}",
+            promoted.receipt.stage_plan_digest,
+        )
+        assert replay.disposition == "CLEANED"
+        _assert_zero_operation_state(
+            fence, motherduck_engine, identity.operation_id, commit_tables
+        )
+    finally:
+        _drop_disposable_motherduck_state(
+            motherduck_engine, fence, staged_tables
+        )
 
 
 def test_active_pin_survives_cleanup_then_missing_bundle_is_typed(
