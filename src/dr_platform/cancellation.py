@@ -7,7 +7,17 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import Connection, Engine, and_, select, update
+from sqlalchemy import (
+    Connection,
+    Engine,
+    and_,
+    insert,
+    null,
+    or_,
+    select,
+    text,
+    update,
+)
 
 from dr_platform.claims import (
     _acquire_export_writer_lock,
@@ -17,7 +27,7 @@ from dr_platform.claims import (
 )
 from dr_platform.db import PlatformSchema
 from dr_platform.reconciliation import _refresh_operation_lifecycle
-from dr_platform.records import FailureSnapshot  # noqa: TC001
+from dr_platform.records import FailureSnapshot
 from dr_platform.status import (
     CONFIRMED_ENQUEUE_STATES,
     TERMINAL_EXECUTION_STATES,
@@ -25,6 +35,10 @@ from dr_platform.status import (
     AttemptExecutionState,
     CancellationDisposition,
     CancellationOrigin,
+    EnqueueClaimDisposition,
+    EnqueueCompensationDisposition,
+    EnqueueCompensationReason,
+    FailureClass,
     OperationStatus,
     RetryDisposition,
 )
@@ -43,6 +57,7 @@ class CancellationConflictError(RuntimeError):
 
 class CancellationInspectionDisposition(StrEnum):
     ACTIVE = "active"
+    ABSENT = "absent"
     SUCCEEDED = "succeeded"
     ERROR = "error"
     CANCELLED = "cancelled"
@@ -125,7 +140,127 @@ def cancel_operation(
                 planned=row,
                 canceller=canceller,
             )
+    # A call-started claimant may cross DBOS after the intent transaction has
+    # invalidated its Claim.  Repair that durable hazard in the same bounded
+    # cancellation pass; later reconciliation can safely replay it as well.
+    repair_late_enqueue_compensations(
+        engine=engine, canceller=canceller, schema=selected_schema
+    )
     return _load_result(engine, request=request, schema=selected_schema)
+
+
+def repair_late_enqueue_compensations(
+    *,
+    engine: Engine,
+    canceller: WorkflowCanceller,
+    schema: PlatformSchema | None = None,
+    limit: int = 100,
+) -> int:
+    """Repair one bounded page of invalidated call-started enqueue hazards.
+
+    The compensation ledger is the only mutable artifact here: cancelled
+    Attempts can already be terminal, so this path never updates them.
+    Absence deliberately remains pending.  The frozen ledger has nowhere to
+    persist per-compensation grace/count observations or a late-appearance
+    successor after ``NO_WORKFLOW_FOUND``.
+    """
+    if limit <= 0:
+        raise ValueError("compensation repair limit must be positive")
+    selected_schema = schema or PlatformSchema()
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(
+                selected_schema.items.c.operation_key,
+                selected_schema.enqueue_claims.c.item_id,
+                selected_schema.enqueue_claims.c.attempt,
+                selected_schema.enqueue_claims.c.claim_id,
+                selected_schema.enqueue_claims.c.workflow_id,
+            )
+            .select_from(selected_schema.enqueue_claims)
+            .join(
+                selected_schema.items,
+                selected_schema.items.c.item_id
+                == selected_schema.enqueue_claims.c.item_id,
+            )
+            .outerjoin(
+                selected_schema.enqueue_compensations,
+                and_(
+                    selected_schema.enqueue_compensations.c.item_id
+                    == selected_schema.enqueue_claims.c.item_id,
+                    selected_schema.enqueue_compensations.c.attempt
+                    == selected_schema.enqueue_claims.c.attempt,
+                    selected_schema.enqueue_compensations.c.claim_id
+                    == selected_schema.enqueue_claims.c.claim_id,
+                ),
+            )
+            .where(
+                and_(
+                    selected_schema.enqueue_claims.c.disposition
+                    == EnqueueClaimDisposition.INVALIDATED.value,
+                    selected_schema.enqueue_claims.c.enqueue_call_started_at.is_not(
+                        None
+                    ),
+                    or_(
+                        selected_schema.enqueue_compensations.c.claim_id.is_(
+                            None
+                        ),
+                        selected_schema.enqueue_compensations.c.cancel_disposition.in_(
+                            [
+                                EnqueueCompensationDisposition.PENDING.value,
+                                EnqueueCompensationDisposition.FAILED.value,
+                            ]
+                        ),
+                    ),
+                )
+            )
+            .order_by(
+                selected_schema.enqueue_claims.c.workflow_id,
+                selected_schema.enqueue_claims.c.item_id,
+                selected_schema.enqueue_claims.c.attempt,
+                selected_schema.enqueue_claims.c.claim_id,
+            )
+            .limit(limit)
+        ).mappings()
+        candidates = [dict(row) for row in rows]
+    repaired = 0
+    for candidate in candidates:
+        with engine.connect() as guard:
+            workflow_id = str(candidate["workflow_id"])
+            guard.execute(
+                text(
+                    "SELECT pg_advisory_lock("
+                    "hashtextextended(:workflow_id, 1))"
+                ),
+                {"workflow_id": workflow_id},
+            )
+            guard.commit()
+            try:
+                prepared = _prepare_compensation_repair(
+                    engine=engine, schema=selected_schema, candidate=candidate
+                )
+                if prepared is None:
+                    continue
+                repaired += 1
+                disposition, failure = _perform_compensation_cancel(
+                    canceller=canceller, workflow_id=workflow_id
+                )
+                _finalize_compensation_repair(
+                    engine=engine,
+                    schema=selected_schema,
+                    candidate=candidate,
+                    disposition=disposition,
+                    failure=failure,
+                )
+            finally:
+                guard.execute(
+                    text(
+                        "SELECT pg_advisory_unlock("
+                        "hashtextextended(:workflow_id, 1))"
+                    ),
+                    {"workflow_id": workflow_id},
+                )
+                guard.commit()
+    return repaired
 
 
 def _persist_intent(
@@ -255,7 +390,7 @@ def _cancel_one(
             connection,
             schema=schema,
             workflow_id=workflow_id,
-            operation_key=request.operation_key,
+            item_id=str(planned["item_id"]),
         ):
             now = _database_now(connection)
             _finalize(
@@ -659,7 +794,7 @@ def _has_other_reference(
     *,
     schema: PlatformSchema,
     workflow_id: str,
-    operation_key: str,
+    item_id: str,
 ) -> bool:
     statement = (
         select(schema.item_attempts.c.item_id)
@@ -675,7 +810,7 @@ def _has_other_reference(
         .where(
             and_(
                 schema.item_attempts.c.workflow_id == workflow_id,
-                schema.items.c.operation_key != operation_key,
+                schema.item_attempts.c.item_id != item_id,
                 schema.item_attempts.c.execution_state.not_in(
                     [state.value for state in TERMINAL_EXECUTION_STATES]
                 ),
@@ -700,4 +835,280 @@ def _refresh_if_resolved(
 ) -> None:
     _refresh_operation_lifecycle(
         connection, schema=schema, operation_key=operation_key, now=now
+    )
+
+
+def _prepare_compensation_repair(
+    *,
+    engine: Engine,
+    schema: PlatformSchema,
+    candidate: Mapping[str, Any],
+) -> bool | None:
+    """Insert/reload one exact compensation and decide if it is exclusive."""
+    with engine.begin() as connection:
+        _acquire_export_writer_lock(connection)
+        # The hierarchy helper acquires lexical workflow locks before every
+        # Operation/Item/Attempt row, including all current references.
+        _, attempts = _lock_cancellation_hierarchy(
+            connection,
+            schema=schema,
+            operation_key=str(candidate["operation_key"]),
+            candidates=[candidate],
+        )
+        _lock_claims(connection, schema=schema, rows=[candidate])
+        claim = (
+            connection.execute(
+                select(schema.enqueue_claims)
+                .where(
+                    and_(
+                        schema.enqueue_claims.c.item_id
+                        == candidate["item_id"],
+                        schema.enqueue_claims.c.attempt
+                        == candidate["attempt"],
+                        schema.enqueue_claims.c.claim_id
+                        == candidate["claim_id"],
+                    )
+                )
+                .with_for_update()
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if claim is None:
+            raise CancellationConflictError("compensation Claim disappeared")
+        if (
+            claim["workflow_id"] != candidate["workflow_id"]
+            or claim["disposition"]
+            != EnqueueClaimDisposition.INVALIDATED.value
+            or claim["enqueue_call_started_at"] is None
+        ):
+            return None
+        compensation = (
+            connection.execute(
+                select(schema.enqueue_compensations)
+                .where(
+                    and_(
+                        schema.enqueue_compensations.c.item_id
+                        == candidate["item_id"],
+                        schema.enqueue_compensations.c.attempt
+                        == candidate["attempt"],
+                        schema.enqueue_compensations.c.claim_id
+                        == candidate["claim_id"],
+                    )
+                )
+                .with_for_update()
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if compensation is None:
+            now = _database_now(connection)
+            connection.execute(
+                insert(schema.enqueue_compensations).values(
+                    item_id=candidate["item_id"],
+                    attempt=candidate["attempt"],
+                    claim_id=candidate["claim_id"],
+                    workflow_id=claim["workflow_id"],
+                    reason=(
+                        EnqueueCompensationReason.INVALIDATED_CALL_STARTED_CLAIM.value
+                    ),
+                    cancel_disposition=EnqueueCompensationDisposition.PENDING.value,
+                    created_at=now,
+                )
+            )
+        else:
+            if compensation["workflow_id"] != claim[
+                "workflow_id"
+            ] or compensation["reason"] != (
+                EnqueueCompensationReason.INVALIDATED_CALL_STARTED_CLAIM.value
+            ):
+                raise CancellationConflictError(
+                    "enqueue compensation replay conflicts"
+                )
+            if compensation["resolved_at"] is not None:
+                return None
+        resolved_sibling = connection.execute(
+            select(schema.enqueue_compensations.c.cancel_disposition)
+            .where(
+                and_(
+                    schema.enqueue_compensations.c.workflow_id
+                    == candidate["workflow_id"],
+                    schema.enqueue_compensations.c.resolved_at.is_not(None),
+                    schema.enqueue_compensations.c.cancel_disposition.in_(
+                        [
+                            EnqueueCompensationDisposition.CANCELLED.value,
+                            EnqueueCompensationDisposition.OBSERVED_TERMINAL.value,
+                        ]
+                    ),
+                    or_(
+                        schema.enqueue_compensations.c.item_id
+                        != candidate["item_id"],
+                        schema.enqueue_compensations.c.attempt
+                        != candidate["attempt"],
+                        schema.enqueue_compensations.c.claim_id
+                        != candidate["claim_id"],
+                    ),
+                )
+            )
+            .order_by(schema.enqueue_compensations.c.created_at)
+            .limit(1)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if resolved_sibling is not None:
+            _resolve_compensation(
+                connection,
+                schema=schema,
+                candidate=candidate,
+                disposition=EnqueueCompensationDisposition(resolved_sibling),
+                failure=None,
+            )
+            return None
+        if _has_other_reference(
+            connection,
+            schema=schema,
+            workflow_id=str(candidate["workflow_id"]),
+            item_id=str(candidate["item_id"]),
+        ):
+            _resolve_compensation(
+                connection,
+                schema=schema,
+                candidate=candidate,
+                disposition=EnqueueCompensationDisposition.SKIPPED_SHARED,
+                failure=None,
+            )
+            return None
+        # The attempt lock above is intentionally only a topology guard.  A
+        # terminal Attempt is immutable and is never changed by compensation.
+        if (candidate["item_id"], candidate["attempt"]) not in attempts:
+            raise CancellationConflictError("compensation Attempt disappeared")
+        return True
+
+
+def _perform_compensation_cancel(
+    *, canceller: WorkflowCanceller, workflow_id: str
+) -> tuple[EnqueueCompensationDisposition | None, FailureSnapshot | None]:
+    """Do the DBOS work after releasing all kernel row locks."""
+    try:
+        inspection = canceller.inspect(workflow_id=workflow_id)
+        if inspection.workflow_id != workflow_id:
+            raise CancellationConflictError(
+                "inspector changed workflow identity"
+            )
+        if inspection.has_children:
+            raise CancellationConflictError("workflow topology drift")
+        if inspection.disposition is CancellationInspectionDisposition.ABSENT:
+            return None, None
+        if inspection.disposition in {
+            CancellationInspectionDisposition.SUCCEEDED,
+            CancellationInspectionDisposition.ERROR,
+        }:
+            return EnqueueCompensationDisposition.OBSERVED_TERMINAL, None
+        if (
+            inspection.disposition
+            is CancellationInspectionDisposition.CANCELLED
+        ):
+            return EnqueueCompensationDisposition.CANCELLED, None
+        canceller.cancel_workflow(
+            workflow_id=workflow_id, cancel_children=False
+        )
+        return EnqueueCompensationDisposition.CANCELLED, None  # noqa: TRY300
+    except CancellationConflictError:
+        raise
+    except Exception as error:  # external boundary; persist safe failure only
+        return (
+            EnqueueCompensationDisposition.FAILED,
+            FailureSnapshot(
+                failure_class=FailureClass.UNKNOWN,
+                error_type="CompensationCancellationFailed",
+                underlying_exception_type=type(error).__name__,
+                message="late-enqueue compensation cancellation failed",
+            ),
+        )
+
+
+def _finalize_compensation_repair(
+    *,
+    engine: Engine,
+    schema: PlatformSchema,
+    candidate: Mapping[str, Any],
+    disposition: EnqueueCompensationDisposition | None,
+    failure: FailureSnapshot | None,
+) -> None:
+    # ``None`` is the fail-closed absent-workflow result: no bounded durable
+    # observation ledger exists in the frozen schema, so it stays pending.
+    if disposition is None:
+        return
+    with engine.begin() as connection:
+        _acquire_export_writer_lock(connection)
+        _lock_cancellation_hierarchy(
+            connection,
+            schema=schema,
+            operation_key=str(candidate["operation_key"]),
+            candidates=[candidate],
+        )
+        _lock_claims(connection, schema=schema, rows=[candidate])
+        compensation = (
+            connection.execute(
+                select(schema.enqueue_compensations)
+                .where(
+                    and_(
+                        schema.enqueue_compensations.c.item_id
+                        == candidate["item_id"],
+                        schema.enqueue_compensations.c.attempt
+                        == candidate["attempt"],
+                        schema.enqueue_compensations.c.claim_id
+                        == candidate["claim_id"],
+                    )
+                )
+                .with_for_update()
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if compensation is None:
+            raise CancellationConflictError("compensation row disappeared")
+        if compensation["workflow_id"] != candidate["workflow_id"]:
+            raise CancellationConflictError(
+                "compensation workflow identity changed"
+            )
+        if compensation["resolved_at"] is None:
+            _resolve_compensation(
+                connection,
+                schema=schema,
+                candidate=candidate,
+                disposition=disposition,
+                failure=failure,
+            )
+
+
+def _resolve_compensation(
+    connection: Connection,
+    *,
+    schema: PlatformSchema,
+    candidate: Mapping[str, Any],
+    disposition: EnqueueCompensationDisposition,
+    failure: FailureSnapshot | None,
+) -> None:
+    now = _database_now(connection)
+    values: dict[str, Any] = {
+        "cancel_disposition": disposition.value,
+        "resolved_at": (
+            None
+            if disposition is EnqueueCompensationDisposition.FAILED
+            else now
+        ),
+        "failure": failure.model_dump(mode="json") if failure else null(),
+    }
+    connection.execute(
+        update(schema.enqueue_compensations)
+        .where(
+            and_(
+                schema.enqueue_compensations.c.item_id == candidate["item_id"],
+                schema.enqueue_compensations.c.attempt == candidate["attempt"],
+                schema.enqueue_compensations.c.claim_id
+                == candidate["claim_id"],
+                schema.enqueue_compensations.c.resolved_at.is_(None),
+            )
+        )
+        .values(**values)
     )

@@ -9,6 +9,7 @@ from dr_platform.cancellation import (
     CancellationResult,
     WorkflowCanceller,
     cancel_operation,
+    repair_late_enqueue_compensations,
 )
 from dr_platform.db import PlatformSchema, upgrade_platform_schema
 from dr_platform.dbos_config import (
@@ -119,6 +120,7 @@ __all__ = [
     "build_platform_dbos_config",
     "cancel_operation",
     "reconcile",
+    "repair_late_enqueue_compensations",
     "request_next_attempt",
     "submit",
     "submit_jsonl",

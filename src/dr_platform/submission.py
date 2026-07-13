@@ -34,6 +34,7 @@ from sqlalchemy import (
     and_,
     func,
     insert,
+    or_,
     select,
     text,
     update,
@@ -53,6 +54,9 @@ from dr_platform.records import ItemRecord, RetryPolicy
 from dr_platform.status import (
     AttemptEnqueueState,
     AttemptExecutionState,
+    CancellationDisposition,
+    EnqueueClaimDisposition,
+    EnqueueCompensationDisposition,
     ItemInsertStatus,
     OperationStatus,
     ServiceClass,
@@ -678,6 +682,11 @@ def _register_page(  # noqa: PLR0913
             lease_id=lease_id,
             now=now,
         )
+        _validate_workflow_reference_guards(
+            connection,
+            schema=schema,
+            workflow_ids=workflow_ids,
+        )
         hook_result = _invoke_registration_hook(
             connection=connection,
             target=target,
@@ -780,6 +789,73 @@ def _register_page(  # noqa: PLR0913
                 "registration cursor CAS lost after page validation"
             )
         return next_cursor
+
+
+def _validate_workflow_reference_guards(
+    connection: Connection,
+    *,
+    schema: PlatformSchema,
+    workflow_ids: list[str],
+) -> None:
+    """Reject links while cancellation or late-enqueue repair is unresolved."""
+    if not workflow_ids:
+        return
+    unresolved_cancellation = connection.execute(
+        select(schema.item_attempts.c.workflow_id)
+        .where(
+            and_(
+                schema.item_attempts.c.workflow_id.in_(workflow_ids),
+                schema.item_attempts.c.cancellation_request_id.is_not(None),
+                or_(
+                    schema.item_attempts.c.cancellation_disposition.is_(None),
+                    schema.item_attempts.c.cancellation_disposition
+                    == CancellationDisposition.FAILED.value,
+                ),
+            )
+        )
+        .limit(1)
+    ).first()
+    if unresolved_cancellation is not None:
+        raise RegistrationConflictError(
+            "workflow has unresolved cancellation intent"
+        )
+    unresolved_compensation = connection.execute(
+        select(schema.enqueue_claims.c.workflow_id)
+        .select_from(schema.enqueue_claims)
+        .outerjoin(
+            schema.enqueue_compensations,
+            and_(
+                schema.enqueue_compensations.c.item_id
+                == schema.enqueue_claims.c.item_id,
+                schema.enqueue_compensations.c.attempt
+                == schema.enqueue_claims.c.attempt,
+                schema.enqueue_compensations.c.claim_id
+                == schema.enqueue_claims.c.claim_id,
+            ),
+        )
+        .where(
+            and_(
+                schema.enqueue_claims.c.workflow_id.in_(workflow_ids),
+                schema.enqueue_claims.c.disposition
+                == EnqueueClaimDisposition.INVALIDATED.value,
+                schema.enqueue_claims.c.enqueue_call_started_at.is_not(None),
+                or_(
+                    schema.enqueue_compensations.c.claim_id.is_(None),
+                    schema.enqueue_compensations.c.cancel_disposition.in_(
+                        [
+                            EnqueueCompensationDisposition.PENDING.value,
+                            EnqueueCompensationDisposition.FAILED.value,
+                        ]
+                    ),
+                ),
+            )
+        )
+        .limit(1)
+    ).first()
+    if unresolved_compensation is not None:
+        raise RegistrationConflictError(
+            "workflow has unresolved late-enqueue compensation"
+        )
 
 
 def _operation_insert_values(  # noqa: PLR0913
