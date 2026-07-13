@@ -1,48 +1,33 @@
 # dr-platform
 
-Conventions on top of [DBOS](https://www.dbos.dev/) for running large
-sweeps of durable work — the batch-submission/platform kernel of the
-`dr-*` library family, extracted from whetstone: stable work-item
-identity, idempotent resumable batch submission, throttle/backoff with
-operator holds, fair ordering, and progress/attempt observability.
+`dr-platform` is a typed durable-execution kernel built on DBOS. It owns
+Operation and Item identity, append-only Attempt lineage, manifest-backed
+registration, kernel-executed enqueue, reconciliation and retry policy,
+reference-aware logical cancellation, inspection, health, and export cuts.
 
-Deliberately **not** an orchestrator: DBOS owns workflow execution and
-recovery; workflows and steps stay app-side. The library accepts
-callables and typed items, never step definitions, and knows nothing
-about any domain (no LM calls, prompts, scoring, or model configs).
+DBOS owns durable workflow and step execution. Applications own workflow
+definitions and domain outcomes. The kernel does not persist prompts, model
+configuration, provider payloads, credentials, or DBOS replay payloads.
 
-## Ecosystem
+The public flow is:
 
-`dr-platform` is the DBOS-backed durable-workflow platform layer for
-batch submission, idempotent resumable work, backoff/holds, fair ordering,
-and progress/attempt observability. Neighbors: `dr-serialize`,
-`dr-providers`, `dr-graph`, `dr-code`, `whetstone-ai`, and `unitbench`.
-It depends on `dr-serialize` and `dr-providers`; the README/source
-identify whetstone as the current extraction/adopter (`whetstone-ai`),
-with no declared `dr-graph`, `dr-code`, or `unitbench` consumer here.
+1. register an immutable execution target;
+2. prepare and submit an Operation manifest;
+3. run bounded reconciliation or `wait_operation`;
+4. inspect typed Operation, Item, Attempt, and health state;
+5. use explicit cancellation or next-Attempt requests for operator actions.
 
-## Status
-
-`main` is a skeleton: an empty typed package (`src/dr_platform/`) plus
-project scaffolding (uv, ruff, ty, pytest, pre-commit). There is no
-library code and there are no tests yet.
-
-The actual library lands with
-[PR #1](https://github.com/danielle-rothermel/dr-platform/pull/1)
-(the whetstone platform extraction). Until it merges, don't build
-against this repo.
+Cancellation is non-recursive and reference-aware. Attempts and enqueue
+Claims are durable history rather than mutable work slots. Optional OTLP
+telemetry is diagnostic and fail-open; no exporter is the normal default.
 
 ## Development
 
-`pyproject.toml` pins `dr-serialize` as an editable **path dependency**
-(`../dr-serialize` — temporary migration wiring, to become a real pin
-before PR #1 merges). A fresh clone's `uv sync` fails unless
-`dr-serialize` is checked out as a sibling directory. With that in
-place:
+Install the locked environment and run the repository checks:
 
 ```bash
 uv sync
 uv run ruff check .
 uv run ty check
-uv run pytest   # collects nothing on main — tests arrive with PR #1
+uv run pytest
 ```

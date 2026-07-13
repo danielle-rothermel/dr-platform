@@ -111,6 +111,8 @@ def test_build_dbos_config_shape() -> None:
     assert dbos_config.build_dbos_config(config, app_name="my-app") == {
         "name": "my-app",
         "system_database_url": "postgresql+psycopg://system/db",
+        "enable_otlp": False,
+        "otel_attribute_format": "semconv",
     }
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from enum import StrEnum
+from typing import Literal
 
 from dbos import DBOS, DBOSConfig
 from dbos._error import (
@@ -16,7 +17,7 @@ from dbos._error import (
     DBOSQueueDeduplicatedError,
     DBOSWorkflowConflictIDError,
 )
-from pydantic import BaseModel, ConfigDict, StrictStr
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 
 DATABASE_URL_ENV = "DATABASE_URL"
 DBOS_SYSTEM_DATABASE_URL_ENV = "DBOS_SYSTEM_DATABASE_URL"
@@ -79,10 +80,13 @@ class PlatformDbosConfig(BaseModel):
     registers queues on its own.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     database_url: StrictStr
     system_database_url: StrictStr
+    enable_otlp: StrictBool = False
+    otlp_traces_endpoints: tuple[StrictStr, ...] = ()
+    otel_attribute_format: Literal["semconv"] = "semconv"
 
 
 def resolve_database_url(
@@ -100,13 +104,15 @@ def resolve_database_url(
     return normalize_postgresql_driver_url(resolved)
 
 
-def build_platform_dbos_config(
+def build_platform_dbos_config(  # noqa: PLR0913 -- explicit bootstrap inputs
     *,
     database_url: str | None,
     system_database_url: str | None = None,
     database_url_env: str = DATABASE_URL_ENV,
     system_database_url_env: str = DBOS_SYSTEM_DATABASE_URL_ENV,
     database_url_error_suffix: str = "",
+    enable_otlp: bool = False,
+    otlp_traces_endpoints: tuple[str, ...] = (),
 ) -> PlatformDbosConfig:
     resolved_database_url = resolve_database_url(
         database_url,
@@ -123,6 +129,8 @@ def build_platform_dbos_config(
         system_database_url=normalize_postgresql_driver_url(
             resolved_system_database_url
         ),
+        enable_otlp=enable_otlp,
+        otlp_traces_endpoints=otlp_traces_endpoints,
     )
 
 
@@ -131,10 +139,17 @@ def build_dbos_config(
     *,
     app_name: str,
 ) -> DBOSConfig:
-    return {
+    result: DBOSConfig = {
         "name": app_name,
         "system_database_url": config.system_database_url,
+        "enable_otlp": config.enable_otlp,
+        "otel_attribute_format": config.otel_attribute_format,
     }
+    if config.otlp_traces_endpoints:
+        result["otlp_traces_endpoints"] = list(
+            config.otlp_traces_endpoints
+        )
+    return result
 
 
 def destroy_dbos_runtime() -> None:
