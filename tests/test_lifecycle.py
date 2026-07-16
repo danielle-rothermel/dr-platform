@@ -31,11 +31,13 @@ from dr_platform import (
     inspect_operation,
     list_attempts,
     list_items,
+    reconcile,
     request_next_attempt,
     submit,
     upgrade_platform_schema,
 )
 from dr_platform.claims import ClaimPageOptions, claim_pending_attempts
+from dr_platform.dbos_config import DbosWorkflowStatus
 from dr_platform.enqueue_runtime import (
     PhysicalEnqueueDisposition,
     PhysicalEnqueueOutcome,
@@ -46,10 +48,17 @@ from dr_platform.manifests import ExecutionRecipeEnvelope
 from dr_platform.reconciliation import ReconciliationConflictError
 from dr_platform.reconciliation_runtime import (
     DbosStepObservation,
+    ReconcileOptions,
     ReconciliationObservation,
     ReconciliationObservationDisposition,
 )
-from dr_platform.status import AttemptExecutionState
+from dr_platform.status import (
+    AttemptEnqueueState,
+    AttemptExecutionState,
+    AttemptRetryReason,
+    CancellationDisposition,
+    RetryDisposition,
+)
 from dr_platform.submission import (
     RegistrationConflictError,
     RegistrationHook,
@@ -114,10 +123,18 @@ class _EnqueueAdapter:
         self.calls: list[PreparedEnqueueCall] = []
 
     def enqueue(self, call: PreparedEnqueueCall) -> PhysicalEnqueueOutcome:
+        disposition = (
+            PhysicalEnqueueDisposition.WORKFLOW_ALREADY_PRESENT
+            if any(
+                existing.workflow_id == call.workflow_id
+                for existing in self.calls
+            )
+            else PhysicalEnqueueDisposition.ENQUEUED
+        )
         self.calls.append(call)
         return PhysicalEnqueueOutcome(
             workflow_id=call.workflow_id,
-            disposition=PhysicalEnqueueDisposition.ENQUEUED,
+            disposition=disposition,
             effective_service_priority=call.service_priority,
         )
 
@@ -131,6 +148,33 @@ class _UncertainLifecycleReader:
                 failure_class=FailureClass.UNKNOWN,
                 error_type="Unavailable",
                 message="lifecycle reader unavailable in test",
+            ),
+        )
+
+    def read_step_history(
+        self,
+        *,
+        workflow_id: str,
+        limit: int = 100,
+    ) -> tuple[DbosStepObservation, ...]:
+        del workflow_id, limit
+        return ()
+
+
+class _RetryableErrorLifecycleReader:
+    def __init__(self, *, workflow_id: str) -> None:
+        self.workflow_id = workflow_id
+
+    def observe(self, *, workflow_id: str) -> ReconciliationObservation:
+        assert workflow_id == self.workflow_id
+        return ReconciliationObservation(
+            workflow_id=workflow_id,
+            disposition=ReconciliationObservationDisposition.ERROR,
+            dbos_status=DbosWorkflowStatus.ERROR,
+            failure=FailureSnapshot(
+                failure_class=FailureClass.TRANSIENT,
+                error_type="RetryableWorkflowError",
+                message="retryable workflow failure in test",
             ),
         )
 
@@ -215,6 +259,18 @@ def _registry(target: ExecutionTarget) -> TargetRegistry:
     registry = TargetRegistry()
     registry.register(target)
     return registry
+
+
+def _shared_target() -> ExecutionTarget:
+    return _target().model_copy(
+        update={
+            "execution_for": lambda item, attempt: ExecutionIdentity(
+                execution_key=f"execution:{item.item_key}:{attempt}",
+                workflow_id=f"workflow:{item.item_key}:{attempt}",
+            ),
+            "args_for": lambda item, attempt: (item.item_key, attempt),
+        }
+    )
 
 
 def _source(count: int) -> _Source:
@@ -534,6 +590,51 @@ def test_request_next_attempt_replay_is_idempotent_and_conflict_checked(
     assert (attempt_count, request_count) == (2, 1)
 
 
+def test_reconcile_persists_retryable_error_and_enqueues_retry(
+    pg_engine: Engine,
+) -> None:
+    schema, _target_value, registry, _source_value, adapter = _submit_enqueued(
+        pg_engine, operation_key="reconcile-retry"
+    )
+    observed = list_attempts(
+        "reconcile-retry", engine=pg_engine, schema=schema
+    )[0].attempt
+
+    result = reconcile(
+        pg_engine,
+        resolver=registry,
+        queue_lookup=_QueueLookup(),
+        options=ReconcileOptions(operation_key="reconcile-retry"),
+        schema=schema,
+        reader=_RetryableErrorLifecycleReader(
+            workflow_id=observed.workflow_id
+        ),
+        enqueue_adapter=adapter,
+    )
+
+    attempts = {
+        inspection.attempt.attempt: inspection.attempt
+        for inspection in list_attempts(
+            "reconcile-retry", engine=pg_engine, schema=schema
+        )
+    }
+    item = list_items("reconcile-retry", engine=pg_engine, schema=schema)[0]
+    source = attempts[0]
+    retry = attempts[1]
+
+    assert result.execution_retry_count == 1
+    assert result.pending_enqueue_count == 1
+    assert source.execution_state is AttemptExecutionState.ERROR
+    assert source.retry_disposition is RetryDisposition.RETRYABLE
+    assert source.failure is not None
+    assert source.failure.failure_class is FailureClass.TRANSIENT
+    assert retry.source_attempt == source.attempt
+    assert retry.source_workflow_id == source.workflow_id
+    assert retry.retry_reason is AttemptRetryReason.AUTOMATIC_EXECUTION_ERROR
+    assert retry.enqueue_state is AttemptEnqueueState.ENQUEUED
+    assert item.current_attempt == retry
+
+
 def test_cancellation_replay_is_idempotent_and_conflict_checked(
     pg_engine: Engine,
 ) -> None:
@@ -575,6 +676,63 @@ def test_cancellation_replay_is_idempotent_and_conflict_checked(
     assert first.complete
     assert len(canceller.cancelled) == 1
     assert state == AttemptExecutionState.CANCELLED.value
+
+
+def test_cancellation_skips_a_workflow_referenced_by_another_operation(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    target = _shared_target()
+    registry = _registry(target)
+    source = _source(1)
+    adapter = _EnqueueAdapter()
+    for operation_key in ("shared-owner", "shared-peer"):
+        submit(
+            operation_key=operation_key,
+            workflow_role=target.workflow_role,
+            group_key="lifecycle-group",
+            target=target,
+            source=source,
+            engine=pg_engine,
+            resolver=registry,
+            schema=schema,
+            queue_lookup=_QueueLookup(),
+            enqueue_adapter=adapter,
+            reconciliation_reader=_UncertainLifecycleReader(),
+        )
+    canceller = _Canceller()
+
+    result = cancel_operation(
+        CancellationRequest(
+            operation_key="shared-owner",
+            request_id="shared-cancel",
+            requested_by="operator",
+        ),
+        engine=pg_engine,
+        schema=schema,
+        canceller=canceller,
+    )
+
+    owner = list_attempts("shared-owner", engine=pg_engine, schema=schema)[
+        0
+    ].attempt
+    peer = list_attempts("shared-peer", engine=pg_engine, schema=schema)[
+        0
+    ].attempt
+    assert result.complete
+    assert (
+        result.results[0].disposition is CancellationDisposition.SKIPPED_SHARED
+    )
+    assert not canceller.cancelled
+    assert owner.execution_state is AttemptExecutionState.CANCELLED
+    assert (
+        owner.cancellation_disposition
+        is CancellationDisposition.SKIPPED_SHARED
+    )
+    assert peer.workflow_id == owner.workflow_id
+    assert peer.enqueue_state is AttemptEnqueueState.WORKFLOW_ALREADY_PRESENT
+    assert peer.execution_state is AttemptExecutionState.NOT_STARTED
+    assert peer.cancellation_request_id is None
 
 
 def test_public_inspection_reads_the_persisted_lifecycle(
