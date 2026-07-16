@@ -93,7 +93,4 @@ _ATTRIBUTE_VALIDATORS = {
     "platform.execution_key": _validate_safe_text,
     "platform.workflow_role": _validate_safe_text,
     "platform.attempt": _validate_counter,
-    "platform.publication.destination_id": _validate_safe_text,
-    "platform.publication.disposition": _validate_safe_text,
-    "platform.publication.snapshot_seq": _validate_counter,
 }

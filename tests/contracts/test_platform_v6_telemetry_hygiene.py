@@ -71,9 +71,6 @@ def test_telemetry_attributes_allow_safe_facts_and_reject_payloads() -> None:
         "platform.execution_key": "execute:sha256",
         "platform.workflow_role": "execute",
         "platform.attempt": 2,
-        "platform.publication.destination_id": "postgres-reporting",
-        "platform.publication.disposition": "PROMOTED",
-        "platform.publication.snapshot_seq": 7,
     }
     assert validated_telemetry_attributes(safe) == safe
 
@@ -88,6 +85,7 @@ def test_telemetry_attributes_allow_safe_facts_and_reject_payloads() -> None:
         {"other.operation_key": "operation-1"},
         {"platform.attempt": True},
         {"platform.attempt": -1},
+        {"platform.publication.destination_id": "removed-subsystem"},
     ):
         with pytest.raises(ValueError, match="telemetry attribute"):
             validated_telemetry_attributes(attributes)
