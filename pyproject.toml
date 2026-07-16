@@ -21,7 +21,6 @@ dependencies = [
     "alembic>=1.16.2",
     "dbos[otel]==2.26.0",
     "dr-serialize>=0.1.0",
-    "duckdb>=1.4,<1.5",
     "pydantic>=2.13.4",
     "sqlalchemy>=2.0.0",
 ]
@@ -108,7 +107,6 @@ select = [
 ignore = ["PLR1711", "S101", "TRY003"]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/platform_v6_preflight.py" = ["S107", "S608"]
 "tests/**/*.py" = ["PLR2004", "PLC0415", "ARG001", "ARG005", "S603", "TC002", "TC003"]
 
 [tool.ty.src]
