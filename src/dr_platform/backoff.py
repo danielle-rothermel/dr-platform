@@ -154,6 +154,14 @@ def record_throttle_failure(  # noqa: PLR0913 -- retained failure surface
     now: datetime,
     schema: PlatformSchema,
 ) -> ThrottleState | None:
+    validated_throttle_key = _validate_non_empty_string(
+        throttle_key, label="throttle key"
+    )
+    validated_error_type = (
+        None
+        if error_type is None
+        else _validate_non_empty_string(error_type, label="error type")
+    )
     validated_metadata = _validate_throttle_metadata(metadata or {})
     if not should_backoff_failure(failure_class):
         return None
@@ -162,7 +170,13 @@ def record_throttle_failure(  # noqa: PLR0913 -- retained failure surface
     count = int(
         connection.execute(
             insert(table)
-            .values(**_fresh(throttle_key, now, consecutive_failures=1))
+            .values(
+                **_fresh(
+                    validated_throttle_key,
+                    now,
+                    consecutive_failures=1,
+                )
+            )
             .on_conflict_do_update(
                 index_elements=["throttle_key"],
                 set_={
@@ -175,25 +189,25 @@ def record_throttle_failure(  # noqa: PLR0913 -- retained failure surface
     )
     connection.execute(
         update(table)
-        .where(table.c.throttle_key == throttle_key)
+        .where(table.c.throttle_key == validated_throttle_key)
         .values(
             blocked_until=now
             + timedelta(
                 seconds=next_backoff_delay_seconds(
-                    throttle_key=throttle_key,
+                    throttle_key=validated_throttle_key,
                     consecutive_failures=count,
                     failure_class=failure_class,
                 )
             ),
             failure_class=failure_class.value,
-            last_error_type=error_type,
+            last_error_type=validated_error_type,
             last_message=message,
             metadata=validated_metadata,
             updated_at=now,
         )
     )
     return load_throttle_backoff_state(
-        connection, throttle_key=throttle_key, schema=schema
+        connection, throttle_key=validated_throttle_key, schema=schema
     )
 
 
@@ -204,10 +218,13 @@ def clear_throttle_backoff(
     now: datetime,
     schema: PlatformSchema,
 ) -> None:
+    validated_throttle_key = _validate_non_empty_string(
+        throttle_key, label="throttle key"
+    )
     _upsert(
         connection,
         schema=schema,
-        throttle_key=throttle_key,
+        throttle_key=validated_throttle_key,
         now=now,
         values={
             "blocked_until": None,
@@ -230,23 +247,29 @@ def set_throttle_hold(  # noqa: PLR0913 -- retained operator surface
     duration_seconds: float | None = None,
     reason: str | None = None,
 ) -> ThrottleState:
+    validated_throttle_key = _validate_non_empty_string(
+        throttle_key, label="throttle key"
+    )
     if (until is None) == (duration_seconds is None) or reason is None:
         raise ValueError(
             "set_throttle_hold requires one deadline and a reason"
         )
+    validated_reason = _validate_non_empty_string(
+        reason, label="throttle hold reason"
+    )
     _upsert(
         connection,
         schema=schema,
-        throttle_key=throttle_key,
+        throttle_key=validated_throttle_key,
         now=now,
         values={
             "hold_until": until
             or now + timedelta(seconds=duration_seconds or 0),
-            "hold_reason": reason,
+            "hold_reason": validated_reason,
         },
     )
     state = load_throttle_backoff_state(
-        connection, throttle_key=throttle_key, schema=schema
+        connection, throttle_key=validated_throttle_key, schema=schema
     )
     assert state is not None
     return state
@@ -259,10 +282,13 @@ def clear_throttle_hold(
     now: datetime,
     schema: PlatformSchema,
 ) -> None:
+    validated_throttle_key = _validate_non_empty_string(
+        throttle_key, label="throttle key"
+    )
     _acquire_export_writer_lock(connection)
     connection.execute(
         update(schema.throttle_state)
-        .where(schema.throttle_state.c.throttle_key == throttle_key)
+        .where(schema.throttle_state.c.throttle_key == validated_throttle_key)
         .values(hold_until=None, hold_reason=None, updated_at=now)
     )
 
@@ -275,11 +301,14 @@ def set_throttle_tags(
     now: datetime,
     schema: PlatformSchema,
 ) -> None:
+    validated_throttle_key = _validate_non_empty_string(
+        throttle_key, label="throttle key"
+    )
     validated_tags = _validate_throttle_tags(tags)
     _upsert(
         connection,
         schema=schema,
-        throttle_key=throttle_key,
+        throttle_key=validated_throttle_key,
         now=now,
         values={"tags": validated_tags},
     )
@@ -313,6 +342,12 @@ def _validate_throttle_metadata(value: object) -> dict[str, Any]:
         )
     _validate_payload_size(value, label="throttle metadata")
     return dict(value)
+
+
+def _validate_non_empty_string(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+    return value
 
 
 def _validate_throttle_tags(value: object) -> dict[str, str]:

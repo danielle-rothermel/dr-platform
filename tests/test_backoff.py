@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import Connection, Engine
 
 from dr_platform.backoff import (
     clear_throttle_backoff,
+    clear_throttle_hold,
     delay_until_unblocked_seconds,
     load_throttle_backoff_state,
     record_throttle_failure,
@@ -21,6 +24,8 @@ from dr_platform.status import FailureClass
 from tests.conftest import engine_dsn
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+ThrottleMutation = Callable[[Connection, PlatformSchema], object]
 
 
 def test_throttle_failure_hold_tags_and_clear_share_v6_state(
@@ -125,3 +130,100 @@ def test_throttle_tags_reject_invalid_payload_before_mutation(
         )
 
     assert state is None
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error_match"),
+    [
+        (
+            lambda connection, schema: record_throttle_failure(
+                connection,
+                throttle_key="",
+                failure_class=FailureClass.RATE_LIMITED,
+                now=NOW,
+                schema=schema,
+            ),
+            "throttle key",
+        ),
+        (
+            lambda connection, schema: set_throttle_hold(
+                connection,
+                throttle_key="",
+                duration_seconds=60,
+                reason="operator",
+                now=NOW,
+                schema=schema,
+            ),
+            "throttle key",
+        ),
+        (
+            lambda connection, schema: clear_throttle_backoff(
+                connection,
+                throttle_key="",
+                now=NOW,
+                schema=schema,
+            ),
+            "throttle key",
+        ),
+        (
+            lambda connection, schema: clear_throttle_hold(
+                connection,
+                throttle_key="",
+                now=NOW,
+                schema=schema,
+            ),
+            "throttle key",
+        ),
+        (
+            lambda connection, schema: set_throttle_tags(
+                connection,
+                throttle_key="",
+                tags={"provider": "test"},
+                now=NOW,
+                schema=schema,
+            ),
+            "throttle key",
+        ),
+        (
+            lambda connection, schema: record_throttle_failure(
+                connection,
+                throttle_key="provider:model",
+                failure_class=FailureClass.RATE_LIMITED,
+                error_type="",
+                now=NOW,
+                schema=schema,
+            ),
+            "error type",
+        ),
+        (
+            lambda connection, schema: set_throttle_hold(
+                connection,
+                throttle_key="provider:model",
+                duration_seconds=60,
+                reason="",
+                now=NOW,
+                schema=schema,
+            ),
+            "throttle hold reason",
+        ),
+    ],
+    ids=(
+        "record-key",
+        "set-hold-key",
+        "clear-backoff-key",
+        "clear-hold-key",
+        "tags-key",
+        "record-error-type",
+        "set-hold-reason",
+    ),
+)
+def test_throttle_mutations_reject_empty_scalars_before_storage_access(
+    mutation: ThrottleMutation,
+    error_match: str,
+) -> None:
+    # These sentinels prove validation finishes before storage is touched.
+    connection = cast("Connection", None)
+    schema = cast("PlatformSchema", None)
+
+    with pytest.raises(ValueError, match=error_match):
+        mutation(connection, schema)
