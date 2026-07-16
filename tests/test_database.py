@@ -69,7 +69,7 @@ def test_upgrade_from_published_baseline_preserves_registration_progress(
                     3, 3, 'manifest-digest', 2, 2, 'recipe-digest',
                     'target', 1, 'target-contract',
                     1, 1, '{"max_attempts": 3, "max_enqueue_tries": 3}',
-                    2, 0, 0, 0, 0, 0, 0, 0, 0,
+                    1, 1, 0, 0, 0, 0, 0, 0, 0,
                     '{}', '{}', now(), now()
                 )
                 """
@@ -92,8 +92,7 @@ def test_upgrade_from_published_baseline_preserves_registration_progress(
         assert (
             connection.execute(
                 text(
-                    "SELECT version_num "
-                    "FROM platform_platform_alembic_version"
+                    "SELECT version_num FROM platform_platform_alembic_version"
                 )
             ).scalar_one()
             == PLATFORM_HEAD_REVISION
