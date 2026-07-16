@@ -58,12 +58,7 @@ from dr_platform.status import (
     OperationStatus,
     ServiceClass,
 )
-from dr_platform.submission import (
-    ManifestSource,
-    SubmitOptions,
-    prepare_manifest,
-    submit,
-)
+from dr_platform.submission import SubmitOptions, submit
 from dr_platform.targets import (
     ExecutionIdentity,
     ExecutionTarget,
@@ -157,20 +152,16 @@ def _register_items(
     options: SubmitOptions | None = None,
 ) -> None:
     target = _target()
-    source: ManifestSource = ClaimTestSource(items=items)
-    manifest = prepare_manifest(
-        operation_key="claim-operation",
-        workflow_role=target.workflow_role,
-        group_key="claim-group",
-        target=target,
-        source=source,
-    )
+    source = ClaimTestSource(items=items)
     registry = TargetRegistry()
     registry.register(target)
     with patch("dr_platform.submission._enqueue_registered_page"):
         submit(
-            manifest,
-            source,
+            operation_key="claim-operation",
+            workflow_role=target.workflow_role,
+            group_key="claim-group",
+            target=target,
+            source=source,
             engine=engine,
             resolver=registry,
             schema=schema,
@@ -1691,20 +1682,16 @@ def test_root_submit_enqueues_and_returns_post_enqueue_aggregate(
             ),
         )
     )
-    manifest = prepare_manifest(
-        operation_key="root-submit-operation",
-        workflow_role=target.workflow_role,
-        group_key="root-submit-group",
-        target=target,
-        source=source,
-    )
     registry = TargetRegistry()
     registry.register(target)
     adapter = CallOutcomeAdapter(PhysicalEnqueueDisposition.ENQUEUED)
 
     result = dr_platform.submit(
-        manifest,
-        source,
+        operation_key="root-submit-operation",
+        workflow_role=target.workflow_role,
+        group_key="root-submit-group",
+        target=target,
+        source=source,
         engine=pg_engine,
         resolver=registry,
         schema=schema,
@@ -1743,20 +1730,16 @@ def test_root_submit_missing_queue_creates_no_claim(
             ),
         )
     )
-    manifest = prepare_manifest(
-        operation_key="missing-queue-operation",
-        workflow_role=target.workflow_role,
-        group_key="missing-queue-group",
-        target=target,
-        source=source,
-    )
     registry = TargetRegistry()
     registry.register(target)
 
     with pytest.raises(QueueConfigurationError):
         dr_platform.submit(
-            manifest,
-            source,
+            operation_key="missing-queue-operation",
+            workflow_role=target.workflow_role,
+            group_key="missing-queue-group",
+            target=target,
+            source=source,
             engine=pg_engine,
             resolver=registry,
             schema=schema,
@@ -1786,13 +1769,6 @@ def test_root_submit_runs_reconcile_before_enqueue_without_cut_bump(
             ),
         )
     )
-    manifest = prepare_manifest(
-        operation_key="ordered-stages-operation",
-        workflow_role=target.workflow_role,
-        group_key="ordered-stages-group",
-        target=target,
-        source=source,
-    )
     registry = TargetRegistry()
     registry.register(target)
     stage_order: list[str] = []
@@ -1816,8 +1792,11 @@ def test_root_submit_runs_reconcile_before_enqueue_without_cut_bump(
         side_effect=stage("reconcile"),
     ):
         dr_platform.submit(
-            manifest,
-            source,
+            operation_key="ordered-stages-operation",
+            workflow_role=target.workflow_role,
+            group_key="ordered-stages-group",
+            target=target,
+            source=source,
             engine=pg_engine,
             resolver=registry,
             schema=schema,
@@ -1829,8 +1808,11 @@ def test_root_submit_runs_reconcile_before_enqueue_without_cut_bump(
             )
         stage_order.append("replay-boundary")
         dr_platform.submit(
-            manifest,
-            source,
+            operation_key="ordered-stages-operation",
+            workflow_role=target.workflow_role,
+            group_key="ordered-stages-group",
+            target=target,
+            source=source,
             engine=pg_engine,
             resolver=registry,
             schema=schema,
@@ -1971,18 +1953,13 @@ def test_exhausted_absence_terminalizes_without_replacement_or_cut_bump(
     assert replay_cut == exhausted_cut
     assert claim_count == 1
 
-    source: ManifestSource = ClaimTestSource(items=source_items)
-    manifest = prepare_manifest(
+    source = ClaimTestSource(items=source_items)
+    result = dr_platform.submit(
         operation_key="claim-operation",
         workflow_role=target.workflow_role,
         group_key="claim-group",
         target=target,
         source=source,
-        options=options,
-    )
-    result = dr_platform.submit(
-        manifest,
-        source,
         engine=pg_engine,
         resolver=registry,
         schema=schema,

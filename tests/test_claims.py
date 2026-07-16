@@ -32,7 +32,7 @@ from dr_platform.status import (
     FailureClass,
     ServiceClass,
 )
-from dr_platform.submission import SubmitOptions, prepare_manifest, submit
+from dr_platform.submission import SubmitOptions, submit
 from dr_platform.targets import (
     ExecutionIdentity,
     ExecutionTarget,
@@ -143,18 +143,13 @@ def _register(
             for index, service_class in enumerate(service_classes)
         )
     )
-    manifest = prepare_manifest(
-        operation_key="operation",
-        workflow_role="generation",
-        group_key="experiment",
-        target=target,
-        source=source,
-        options=SubmitOptions(page_size=2),
-    )
     try:
         submit(
-            manifest,
-            source,
+            operation_key="operation",
+            workflow_role="generation",
+            group_key="experiment",
+            target=target,
+            source=source,
             engine=engine,
             resolver=registry,
             options=SubmitOptions(page_size=2),
