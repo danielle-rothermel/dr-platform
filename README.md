@@ -11,13 +11,45 @@ application configuration, external-service payloads, credentials, or DBOS
 replay payloads. It validates workflow arguments only for serialization and
 does not log or emit them as telemetry; applications own their secret policy.
 
-The public flow is:
+The supported root-package flow is:
 
-1. register an immutable execution target;
-2. submit an Operation from one caller-owned source;
-3. run bounded reconciliation or `wait_operation`;
-4. inspect typed Operation, Item, Attempt, and health state;
-5. use explicit cancellation or next-Attempt requests for operator actions.
+1. build the platform DBOS configuration, initialize the runtime, and upgrade
+   the platform schema;
+2. register an immutable `ExecutionTarget` in a `TargetRegistry`;
+3. call `submit` with a caller-owned `SubmissionSource`, or call
+   `submit_jsonl` for a JSONL file;
+4. run bounded `reconcile` calls or `wait_operation`;
+5. use `inspect_operation`, the bounded `list_*` readers, and `health_report`;
+6. call `cancel_operation` or `request_next_attempt` for explicit operator
+   actions.
+
+The root `dr_platform` package exposes these verbs, the direct input and result
+types needed to call them, and the `TargetResolver` and `WorkflowCanceller`
+contracts required at application boundaries. For example, once an application
+has constructed its target and source:
+
+```python
+from dr_platform import TargetRegistry, inspect_operation, reconcile, submit
+
+registry = TargetRegistry()
+target = registry.register(application_target)
+
+receipt = submit(
+    operation_key="daily-import-2026-07-15",
+    workflow_role="import-item",
+    group_key="2026-07-15",
+    target=target,
+    source=application_source,
+    engine=engine,
+    resolver=registry,
+)
+reconcile(engine=engine, resolver=registry)
+operation = inspect_operation(receipt.operation_key, engine=engine)
+```
+
+Advanced storage, enqueue recovery, throttling/backoff, cancellation repair,
+and scheduling APIs remain importable from their responsibility modules; they
+are not part of the supported root facade.
 
 Cancellation is non-recursive and reference-aware. Attempts and enqueue
 Claims are durable history rather than mutable work slots. Optional OTLP
