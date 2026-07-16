@@ -1,4 +1,4 @@
-"""Frozen manifest and execution-recipe registration contracts."""
+"""Execution-target and recipe registration contracts."""
 
 from __future__ import annotations
 
@@ -19,10 +19,8 @@ from dr_platform.status import WorkflowTopology
 if TYPE_CHECKING:
     from dr_platform.items import SubmittableItem
 
-MANIFEST_FORMAT_VERSION = 3
 EXECUTION_RECIPE_FORMAT_VERSION = 1
 NonEmptyStr = Annotated[StrictStr, Field(min_length=1)]
-NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
 
 
@@ -60,74 +58,9 @@ class ExecutionRecipeEnvelope(BaseModel):
         return sha256_json_digest(self.model_dump(mode="json"))
 
 
-class ManifestPage(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    page_index: NonNegativeInt
-    start_index: NonNegativeInt
-    end_index: PositiveInt
-    page_digest: NonEmptyStr
-
-    @model_validator(mode="after")
-    def validate_range(self) -> ManifestPage:
-        if self.end_index <= self.start_index:
-            raise ValueError("manifest pages must be non-empty")
-        return self
-
-
-class OperationManifest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    format_version: PositiveInt = MANIFEST_FORMAT_VERSION
-    operation_key: NonEmptyStr
-    workflow_role: NonEmptyStr
-    group_key: NonEmptyStr
-    target_ref: ExecutionTargetRef
-    operation_execution_recipe_digest: NonEmptyStr
-    item_count: NonNegativeInt
-    page_size: PositiveInt
-    items_digest: NonEmptyStr
-    pages: tuple[ManifestPage, ...]
-    manifest_digest: NonEmptyStr
-
-    @model_validator(mode="after")
-    def validate_manifest(self) -> OperationManifest:
-        if self.format_version != MANIFEST_FORMAT_VERSION:
-            raise ValueError(
-                f"manifest format version must be {MANIFEST_FORMAT_VERSION}"
-            )
-        self._validate_pages()
-        if self.manifest_digest != self.expected_manifest_digest():
-            raise ValueError("manifest_digest does not match manifest content")
-        return self
-
-    def _validate_pages(self) -> None:
-        expected_page_count = (
-            self.item_count + self.page_size - 1
-        ) // self.page_size
-        if len(self.pages) != expected_page_count:
-            raise ValueError("manifest pages do not cover item_count")
-        cursor = 0
-        for expected_page_index, page in enumerate(self.pages):
-            if page.page_index != expected_page_index:
-                raise ValueError("manifest page indexes must be contiguous")
-            if page.start_index != cursor:
-                raise ValueError("manifest page ranges must be contiguous")
-            expected_end = min(cursor + self.page_size, self.item_count)
-            if page.end_index != expected_end:
-                raise ValueError("manifest page has an invalid range")
-            cursor = page.end_index
-        if cursor != self.item_count:
-            raise ValueError("manifest pages do not end at item_count")
-
-    def expected_manifest_digest(self) -> str:
-        payload = self.model_dump(mode="json", exclude={"manifest_digest"})
-        return sha256_json_digest(payload)
-
-
 @runtime_checkable
-class ManifestSource(Protocol):
-    """Re-readable source for the exact ordered Items in a Manifest."""
+class SubmissionSource(Protocol):
+    """Paged source read exactly once by one submission call."""
 
     @property
     def item_count(self) -> int: ...
@@ -138,10 +71,3 @@ class ManifestSource(Protocol):
         start_index: int,
         end_index: int,
     ) -> tuple[SubmittableItem, ...]: ...
-
-
-@runtime_checkable
-class ManifestSourceCutValidator(Protocol):
-    """Optional strong validation for a complete external source cut."""
-
-    def validate_source_cut(self) -> None: ...

@@ -44,11 +44,8 @@ BASELINE_DDL = (
 	workflow_role TEXT NOT NULL,
 	status TEXT NOT NULL,
 	requested_count INTEGER NOT NULL,
-	manifest_version INTEGER NOT NULL,
-	manifest_digest TEXT NOT NULL,
-	manifest_page_size INTEGER NOT NULL,
-	manifest_page_count INTEGER NOT NULL,
-	operation_execution_recipe_digest TEXT NOT NULL,
+	registration_page_size INTEGER NOT NULL,
+	registration_page_count INTEGER NOT NULL,
 	target_key TEXT NOT NULL,
 	target_version INTEGER NOT NULL,
 	target_contract_digest TEXT NOT NULL,
@@ -95,16 +92,16 @@ AND enqueued_count + workflow_already_present_count + enqueue_failed_count
     <= requested_count
 AND active_count + succeeded_count + terminal_failed_count + cancelled_count
     <= requested_count),
-	CONSTRAINT xbase_ck_operations_manifest CHECK (manifest_page_size > 0
-AND manifest_page_count >= 0
+	CONSTRAINT xbase_ck_operations_registration_bounds CHECK (registration_page_size > 0
+AND registration_page_count >= 0
 AND registration_cursor >= 0
-AND registration_cursor <= manifest_page_count
+AND registration_cursor <= registration_page_count
 AND (
-  (requested_count = 0 AND manifest_page_count = 0)
+  (requested_count = 0 AND registration_page_count = 0)
   OR (
     requested_count > 0
-    AND manifest_page_count =
-      (requested_count + manifest_page_size - 1) / manifest_page_size
+    AND registration_page_count =
+      (requested_count + registration_page_size - 1) / registration_page_size
   )
 )),
 	CONSTRAINT xbase_ck_operations_registration_lease CHECK ((
@@ -117,7 +114,7 @@ OR (
 )),
 	CONSTRAINT xbase_ck_operations_registration_completed CHECK (registration_completed_at IS NULL
 OR (
-  registration_cursor = manifest_page_count
+  registration_cursor = registration_page_count
   AND inserted_count + already_present_count = requested_count
   AND registration_lease_id IS NULL
   AND registration_lease_expires_at IS NULL
@@ -137,7 +134,6 @@ OR (
   AND registration_lease_expires_at IS NULL
   AND status = 'failed'
 )),
-	CONSTRAINT xbase_ck_operations_manifest_version CHECK (manifest_version = 3),
 	CONSTRAINT xbase_ck_operations_platform_cut_version CHECK (platform_cut_version > 0),
 	CONSTRAINT xbase_ck_operations_terminal CHECK ((status IN ('succeeded', 'partial', 'failed', 'cancelled')) = (completed_at IS NOT NULL)),
 	CONSTRAINT xbase_ck_operations_registration_completed_time CHECK (registration_completed_at IS NULL OR registration_completed_at >= created_at),
@@ -635,11 +631,8 @@ def _install_lifecycle_guards(prefix: str) -> None:
             NEW.group_key,
             NEW.workflow_role,
             NEW.requested_count,
-            NEW.manifest_version,
-            NEW.manifest_digest,
-            NEW.manifest_page_size,
-            NEW.manifest_page_count,
-            NEW.operation_execution_recipe_digest,
+            NEW.registration_page_size,
+            NEW.registration_page_count,
             NEW.target_key,
             NEW.target_version,
             NEW.target_contract_digest,
@@ -652,11 +645,8 @@ def _install_lifecycle_guards(prefix: str) -> None:
             OLD.group_key,
             OLD.workflow_role,
             OLD.requested_count,
-            OLD.manifest_version,
-            OLD.manifest_digest,
-            OLD.manifest_page_size,
-            OLD.manifest_page_count,
-            OLD.operation_execution_recipe_digest,
+            OLD.registration_page_size,
+            OLD.registration_page_count,
             OLD.target_key,
             OLD.target_version,
             OLD.target_contract_digest,

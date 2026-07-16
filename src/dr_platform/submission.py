@@ -1,4 +1,4 @@
-"""Immutable Manifest preparation and bounded transactional registration."""
+"""Single-read Item submission and bounded transactional registration."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from uuid import uuid4
 
 from dr_serialize import (
     POSTGRES_JSONB_PAYLOAD_MAX_BYTES,
-    Jsonable,
     SerializationError,
     Serializer,
     postgres_jsonb_limits,
@@ -42,13 +41,9 @@ from sqlalchemy import (
 from dr_platform.cancellation_truth import workflow_reference_conflict
 from dr_platform.db import PlatformSchema
 from dr_platform.items import item_id, shuffle_rank
-from dr_platform.manifests import (
-    MANIFEST_FORMAT_VERSION,
+from dr_platform.manifests import (  # noqa: TC001 -- Pydantic resolves these
     ExecutionRecipeEnvelope,
-    ManifestPage,
-    ManifestSource,
-    ManifestSourceCutValidator,
-    OperationManifest,
+    SubmissionSource,
 )
 from dr_platform.records import ItemRecord, RetryPolicy
 from dr_platform.status import (
@@ -112,7 +107,7 @@ class RegistrationAbandonedError(RegistrationError):
 
 
 class RegistrationIntegrityError(RegistrationError):
-    """Source, hook, or cursor accounting violated the Manifest contract."""
+    """Source, hook, or cursor accounting violated registration invariants."""
 
 
 class RegistrationIneligibleError(RegistrationError):
@@ -159,7 +154,6 @@ class RegistrationPageContext(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    manifest_digest: NonEmptyStr
     page_index: NonNegativeInt
     page_count: PositiveInt
     next_registration_cursor: PositiveInt
@@ -268,93 +262,15 @@ class _PreparedPageItem(BaseModel):
     item_id: NonEmptyStr
     execution_recipe: ExecutionRecipeEnvelope
     execution_recipe_digest: NonEmptyStr
-    leaf_digest: NonEmptyStr
 
 
-def prepare_manifest(  # noqa: PLR0913 -- explicit public facade contract
+def submit(  # noqa: PLR0913 -- explicit public facade contract
     *,
     operation_key: str,
     workflow_role: str,
     group_key: str,
     target: ExecutionTarget,
-    source: ManifestSource,
-    options: SubmitOptions | None = None,
-) -> OperationManifest:
-    """Freeze identity for a complete, re-readable ordered Item source."""
-    selected_options = options or SubmitOptions()
-    page_size = selected_options.page_size
-    if source.item_count < 0:
-        raise RegistrationIntegrityError(
-            "source item_count cannot be negative"
-        )
-    if page_size <= 0:
-        raise RegistrationIntegrityError("page_size must be positive")
-    if target.workflow_role != workflow_role:
-        raise RegistrationConflictError(
-            "Manifest workflow_role does not match its execution target"
-        )
-
-    pages: list[ManifestPage] = []
-    leaf_digests: list[Jsonable] = []
-    recipe_digests: list[Jsonable] = []
-    seen_item_keys: set[str] = set()
-    for page_index, start_index in enumerate(
-        range(0, source.item_count, page_size)
-    ):
-        end_index = min(start_index + page_size, source.item_count)
-        prepared = _prepare_source_page(
-            operation_key=operation_key,
-            target=target,
-            source=source,
-            start_index=start_index,
-            end_index=end_index,
-        )
-        _reject_duplicate_item_keys(prepared, seen_item_keys=seen_item_keys)
-        page_leaves: list[Jsonable] = [item.leaf_digest for item in prepared]
-        leaf_digests.extend(page_leaves)
-        recipe_digests.extend(
-            item.execution_recipe_digest for item in prepared
-        )
-        pages.append(
-            ManifestPage(
-                page_index=page_index,
-                start_index=start_index,
-                end_index=end_index,
-                page_digest=sha256_json_digest(page_leaves),
-            )
-        )
-
-    items_digest = sha256_json_digest(leaf_digests)
-    operation_recipe_digest = _operation_recipe_digest(
-        target=target,
-        recipe_digests=recipe_digests,
-    )
-    values: dict[str, Any] = {
-        "format_version": MANIFEST_FORMAT_VERSION,
-        "operation_key": operation_key,
-        "workflow_role": workflow_role,
-        "group_key": group_key,
-        "target_ref": target.ref,
-        "operation_execution_recipe_digest": operation_recipe_digest,
-        "item_count": source.item_count,
-        "page_size": page_size,
-        "items_digest": items_digest,
-        "pages": tuple(pages),
-    }
-    pending = OperationManifest.model_construct(
-        **values,
-        manifest_digest="pending",
-    )
-    return OperationManifest(
-        **values,
-        manifest_digest=pending.expected_manifest_digest(),
-    )
-
-
-def submit(  # noqa: PLR0913 -- explicit public facade contract
-    manifest: OperationManifest,
-    source: ManifestSource,
-    *,
+    source: SubmissionSource,
     engine: Engine,
     resolver: TargetResolver,
     spec: dict[str, Any] | None = None,
@@ -367,13 +283,9 @@ def submit(  # noqa: PLR0913 -- explicit public facade contract
     workflow_observer: WorkflowObserver | None = None,
     reconciliation_reader: LifecycleObservationReader | None = None,
 ) -> SubmitResult:
-    """Register and enqueue one immutable Operation through one pipeline."""
+    """Read, register, and enqueue one Operation through one pipeline."""
     selected_schema = schema or PlatformSchema()
-    selected_options = options or SubmitOptions(page_size=manifest.page_size)
-    if selected_options.page_size != manifest.page_size:
-        raise RegistrationConflictError(
-            "SubmitOptions.page_size must match the frozen Manifest"
-        )
+    selected_options = options or SubmitOptions()
     operation_inputs = _ValidatedOperationInputs(
         spec={} if spec is None else spec,
         metadata={} if metadata is None else metadata,
@@ -381,37 +293,53 @@ def submit(  # noqa: PLR0913 -- explicit public facade contract
     )
     operation_spec = operation_inputs.spec
     operation_metadata = operation_inputs.metadata
-    target = resolver.resolve(manifest.target_ref)
-    _validate_manifest_target(manifest=manifest, target=target)
-    _validate_source(manifest=manifest, source=source, target=target)
+    resolved_target = resolver.resolve(target.ref)
+    _validate_submission_target(
+        requested_target=target,
+        resolved_target=resolved_target,
+        workflow_role=workflow_role,
+    )
+    prepared_pages = _prepare_source(
+        operation_key=operation_key,
+        target=resolved_target,
+        source=source,
+        page_size=selected_options.page_size,
+    )
 
     lease_id = uuid4().hex
     cursor = _create_or_claim_operation(
         engine=engine,
         schema=selected_schema,
-        manifest=manifest,
+        operation_key=operation_key,
+        workflow_role=workflow_role,
+        group_key=group_key,
+        target=resolved_target,
+        requested_count=source.item_count,
+        page_count=len(prepared_pages),
         spec=operation_spec,
         metadata=operation_metadata,
         options=selected_options,
         lease_id=lease_id,
     )
-    if manifest.item_count == 0:
+    if source.item_count == 0:
         return _load_submit_result(
             engine=engine,
             schema=selected_schema,
-            operation_key=manifest.operation_key,
+            operation_key=operation_key,
         )
 
-    while cursor < len(manifest.pages):
+    while cursor < len(prepared_pages):
         cursor = _register_page(
             engine=engine,
             schema=selected_schema,
-            manifest=manifest,
-            source=source,
-            target=target,
+            operation_key=operation_key,
+            workflow_role=workflow_role,
+            target=resolved_target,
             options=selected_options,
             lease_id=lease_id,
-            page=manifest.pages[cursor],
+            page_index=cursor,
+            page_count=len(prepared_pages),
+            prepared=prepared_pages[cursor],
             source_application_version=(
                 operation_inputs.source_application_version
             ),
@@ -431,7 +359,7 @@ def submit(  # noqa: PLR0913 -- explicit public facade contract
     return _load_submit_result(
         engine=engine,
         schema=selected_schema,
-        operation_key=manifest.operation_key,
+        operation_key=operation_key,
     )
 
 
@@ -563,7 +491,12 @@ def _create_or_claim_operation(  # noqa: PLR0913
     *,
     engine: Engine,
     schema: PlatformSchema,
-    manifest: OperationManifest,
+    operation_key: str,
+    workflow_role: str,
+    group_key: str,
+    target: ExecutionTarget,
+    requested_count: int,
+    page_count: int,
     spec: dict[str, Any],
     metadata: dict[str, Any],
     options: SubmitOptions,
@@ -574,12 +507,12 @@ def _create_or_claim_operation(  # noqa: PLR0913
         _acquire_export_writer_lock(connection)
         _acquire_operation_registration_lock(
             connection,
-            manifest.operation_key,
+            operation_key,
         )
         row = (
             connection.execute(
                 select(operations)
-                .where(operations.c.operation_key == manifest.operation_key)
+                .where(operations.c.operation_key == operation_key)
                 .with_for_update()
             )
             .mappings()
@@ -587,11 +520,16 @@ def _create_or_claim_operation(  # noqa: PLR0913
         )
         now = _database_now(connection)
         if row is None:
-            if manifest.item_count == 0:
+            if requested_count == 0:
                 connection.execute(
                     insert(operations).values(
                         **_operation_insert_values(
-                            manifest=manifest,
+                            operation_key=operation_key,
+                            workflow_role=workflow_role,
+                            group_key=group_key,
+                            target=target,
+                            requested_count=requested_count,
+                            page_count=page_count,
                             spec=spec,
                             metadata=metadata,
                             options=options,
@@ -612,7 +550,12 @@ def _create_or_claim_operation(  # noqa: PLR0913
             connection.execute(
                 insert(operations).values(
                     **_operation_insert_values(
-                        manifest=manifest,
+                        operation_key=operation_key,
+                        workflow_role=workflow_role,
+                        group_key=group_key,
+                        target=target,
+                        requested_count=requested_count,
+                        page_count=page_count,
                         spec=spec,
                         metadata=metadata,
                         options=options,
@@ -627,21 +570,26 @@ def _create_or_claim_operation(  # noqa: PLR0913
 
         _validate_exact_replay(
             row=row,
-            manifest=manifest,
+            operation_key=operation_key,
+            workflow_role=workflow_role,
+            group_key=group_key,
+            target=target,
+            requested_count=requested_count,
+            page_count=page_count,
             spec=spec,
             metadata=metadata,
             options=options,
         )
         if row["registration_abandoned_at"] is not None:
             raise RegistrationAbandonedError(
-                f"registration for {manifest.operation_key!r} was abandoned"
+                f"registration for {operation_key!r} was abandoned"
             )
         if row["registration_completed_at"] is not None:
             return int(row["registration_cursor"])
         expires_at = row["registration_lease_expires_at"]
         if expires_at is not None and expires_at > now:
             raise RegistrationLeaseHeldError(
-                operation_key=manifest.operation_key,
+                operation_key=operation_key,
                 expires_at=expires_at,
             )
         new_expiry = now + timedelta(
@@ -651,7 +599,7 @@ def _create_or_claim_operation(  # noqa: PLR0913
             update(operations)
             .where(
                 and_(
-                    operations.c.operation_key == manifest.operation_key,
+                    operations.c.operation_key == operation_key,
                     operations.c.registration_completed_at.is_(None),
                     operations.c.registration_abandoned_at.is_(None),
                     operations.c.registration_lease_expires_at <= now,
@@ -670,22 +618,18 @@ def _register_page(  # noqa: PLR0913
     *,
     engine: Engine,
     schema: PlatformSchema,
-    manifest: OperationManifest,
-    source: ManifestSource,
+    operation_key: str,
+    workflow_role: str,
     target: ExecutionTarget,
     options: SubmitOptions,
     lease_id: str,
-    page: ManifestPage,
+    page_index: int,
+    page_count: int,
+    prepared: tuple[_PreparedPageItem, ...],
     source_application_version: str,
 ) -> int:
-    prepared = _prepare_and_validate_page(
-        manifest=manifest,
-        source=source,
-        target=target,
-        page=page,
-    )
     candidate_items = _registration_items(
-        manifest=manifest,
+        operation_key=operation_key,
         target=target,
         prepared=prepared,
     )
@@ -697,7 +641,7 @@ def _register_page(  # noqa: PLR0913
         row = (
             connection.execute(
                 select(operations)
-                .where(operations.c.operation_key == manifest.operation_key)
+                .where(operations.c.operation_key == operation_key)
                 .with_for_update()
             )
             .mappings()
@@ -706,8 +650,8 @@ def _register_page(  # noqa: PLR0913
         now = _database_now(connection)
         _validate_page_authority(
             row=row,
-            manifest=manifest,
-            page=page,
+            operation_key=operation_key,
+            page_index=page_index,
             lease_id=lease_id,
             now=now,
         )
@@ -716,17 +660,16 @@ def _register_page(  # noqa: PLR0913
             schema=schema,
             workflow_ids=workflow_ids,
         )
-        next_cursor = page.page_index + 1
-        is_final = next_cursor == len(manifest.pages)
+        next_cursor = page_index + 1
+        is_final = next_cursor == page_count
         hook_result = _invoke_registration_hook(
             connection=connection,
             target=target,
-            operation_key=manifest.operation_key,
+            operation_key=operation_key,
             items=candidate_items,
             page=RegistrationPageContext(
-                manifest_digest=manifest.manifest_digest,
-                page_index=page.page_index,
-                page_count=len(manifest.pages),
+                page_index=page_index,
+                page_count=page_count,
                 next_registration_cursor=next_cursor,
                 is_final_page=is_final,
             ),
@@ -735,8 +678,8 @@ def _register_page(  # noqa: PLR0913
         now = _database_now(connection)
         _validate_page_authority(
             row=row,
-            manifest=manifest,
-            page=page,
+            operation_key=operation_key,
+            page_index=page_index,
             lease_id=lease_id,
             now=now,
         )
@@ -766,7 +709,7 @@ def _register_page(  # noqa: PLR0913
                 insert(schema.item_attempts).values(
                     item_id=item.item_id,
                     attempt=0,
-                    workflow_role=manifest.workflow_role,
+                    workflow_role=workflow_role,
                     execution_key=item.execution_key,
                     workflow_id=item.workflow_id,
                     execution_recipe_digest=item.execution_recipe_digest,
@@ -810,9 +753,8 @@ def _register_page(  # noqa: PLR0913
             update(operations)
             .where(
                 and_(
-                    operations.c.operation_key == manifest.operation_key,
-                    operations.c.manifest_digest == manifest.manifest_digest,
-                    operations.c.registration_cursor == page.page_index,
+                    operations.c.operation_key == operation_key,
+                    operations.c.registration_cursor == page_index,
                     operations.c.registration_lease_id == lease_id,
                     operations.c.registration_lease_expires_at
                     > func.clock_timestamp(),
@@ -843,7 +785,12 @@ def _validate_workflow_reference_guards(
 
 def _operation_insert_values(  # noqa: PLR0913
     *,
-    manifest: OperationManifest,
+    operation_key: str,
+    workflow_role: str,
+    group_key: str,
+    target: ExecutionTarget,
+    requested_count: int,
+    page_count: int,
     spec: dict[str, Any],
     metadata: dict[str, Any],
     options: SubmitOptions,
@@ -856,21 +803,16 @@ def _operation_insert_values(  # noqa: PLR0913
     terminal_reason: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "operation_key": manifest.operation_key,
-        "group_key": manifest.group_key,
-        "workflow_role": manifest.workflow_role,
+        "operation_key": operation_key,
+        "group_key": group_key,
+        "workflow_role": workflow_role,
         "status": status.value,
-        "requested_count": manifest.item_count,
-        "manifest_version": manifest.format_version,
-        "manifest_digest": manifest.manifest_digest,
-        "manifest_page_size": manifest.page_size,
-        "manifest_page_count": len(manifest.pages),
-        "operation_execution_recipe_digest": (
-            manifest.operation_execution_recipe_digest
-        ),
-        "target_key": manifest.target_ref.target_key,
-        "target_version": manifest.target_ref.target_version,
-        "target_contract_digest": (manifest.target_ref.target_contract_digest),
+        "requested_count": requested_count,
+        "registration_page_size": options.page_size,
+        "registration_page_count": page_count,
+        "target_key": target.ref.target_key,
+        "target_version": target.ref.target_version,
+        "target_contract_digest": target.ref.target_contract_digest,
         "platform_cut_version": 1,
         "registration_cursor": 0,
         "registration_lease_id": lease_id,
@@ -895,28 +837,29 @@ def _operation_insert_values(  # noqa: PLR0913
     }
 
 
-def _validate_exact_replay(
+def _validate_exact_replay(  # noqa: PLR0913
     *,
     row: Any,
-    manifest: OperationManifest,
+    operation_key: str,
+    workflow_role: str,
+    group_key: str,
+    target: ExecutionTarget,
+    requested_count: int,
+    page_count: int,
     spec: dict[str, Any],
     metadata: dict[str, Any],
     options: SubmitOptions,
 ) -> None:
     expected = {
-        "group_key": manifest.group_key,
-        "workflow_role": manifest.workflow_role,
-        "requested_count": manifest.item_count,
-        "manifest_version": manifest.format_version,
-        "manifest_digest": manifest.manifest_digest,
-        "manifest_page_size": manifest.page_size,
-        "manifest_page_count": len(manifest.pages),
-        "operation_execution_recipe_digest": (
-            manifest.operation_execution_recipe_digest
-        ),
-        "target_key": manifest.target_ref.target_key,
-        "target_version": manifest.target_ref.target_version,
-        "target_contract_digest": (manifest.target_ref.target_contract_digest),
+        "operation_key": operation_key,
+        "group_key": group_key,
+        "workflow_role": workflow_role,
+        "requested_count": requested_count,
+        "registration_page_size": options.page_size,
+        "registration_page_count": page_count,
+        "target_key": target.ref.target_key,
+        "target_version": target.ref.target_version,
+        "target_contract_digest": target.ref.target_contract_digest,
         "retry_policy": options.retry_policy.model_dump(mode="json"),
         "spec": spec,
         "metadata": metadata,
@@ -938,95 +881,53 @@ def _validate_exact_replay(
         )
 
 
-def _validate_manifest_target(
-    *, manifest: OperationManifest, target: ExecutionTarget
-) -> None:
-    if target.ref != manifest.target_ref:
-        raise RegistrationConflictError(
-            "resolved execution target does not match Manifest target_ref"
-        )
-    if target.workflow_role != manifest.workflow_role:
-        raise RegistrationConflictError(
-            "resolved target workflow_role does not match Manifest"
-        )
-
-
-def _validate_source(
+def _validate_submission_target(
     *,
-    manifest: OperationManifest,
-    source: ManifestSource,
-    target: ExecutionTarget,
+    requested_target: ExecutionTarget,
+    resolved_target: ExecutionTarget,
+    workflow_role: str,
 ) -> None:
-    _validate_complete_source_cut(source)
-    try:
-        if source.item_count != manifest.item_count:
-            raise RegistrationConflictError(
-                "Manifest source count changed after preparation"
-            )
-        leaves: list[Jsonable] = []
-        recipes: list[Jsonable] = []
-        seen_item_keys: set[str] = set()
-        for page in manifest.pages:
-            prepared = _prepare_and_validate_page(
-                manifest=manifest,
-                source=source,
-                target=target,
-                page=page,
-            )
-            _reject_duplicate_item_keys(
-                prepared,
-                seen_item_keys=seen_item_keys,
-            )
-            leaves.extend(item.leaf_digest for item in prepared)
-            recipes.extend(item.execution_recipe_digest for item in prepared)
-        if sha256_json_digest(leaves) != manifest.items_digest:
-            raise RegistrationConflictError(
-                "Manifest source items_digest changed"
-            )
-        if (
-            _operation_recipe_digest(target=target, recipe_digests=recipes)
-            != manifest.operation_execution_recipe_digest
-        ):
-            raise RegistrationConflictError(
-                "Manifest source operation recipe digest changed"
-            )
-    finally:
-        _validate_complete_source_cut(source)
-
-
-def _validate_complete_source_cut(source: ManifestSource) -> None:
-    if isinstance(source, ManifestSourceCutValidator):
-        source.validate_source_cut()
-
-
-def _prepare_and_validate_page(
-    *,
-    manifest: OperationManifest,
-    source: ManifestSource,
-    target: ExecutionTarget,
-    page: ManifestPage,
-) -> tuple[_PreparedPageItem, ...]:
-    prepared = _prepare_source_page(
-        operation_key=manifest.operation_key,
-        target=target,
-        source=source,
-        start_index=page.start_index,
-        end_index=page.end_index,
-    )
-    page_leaves: list[Jsonable] = [item.leaf_digest for item in prepared]
-    digest = sha256_json_digest(page_leaves)
-    if digest != page.page_digest:
+    if resolved_target.ref != requested_target.ref:
         raise RegistrationConflictError(
-            f"Manifest source page {page.page_index} changed"
+            "resolved execution target does not match the requested target"
         )
-    return prepared
+    if resolved_target.workflow_role != workflow_role:
+        raise RegistrationConflictError(
+            "submission workflow_role does not match its execution target"
+        )
+
+
+def _prepare_source(
+    *,
+    operation_key: str,
+    target: ExecutionTarget,
+    source: SubmissionSource,
+    page_size: int,
+) -> tuple[tuple[_PreparedPageItem, ...], ...]:
+    if source.item_count < 0:
+        raise RegistrationIntegrityError(
+            "source item_count cannot be negative"
+        )
+    pages: list[tuple[_PreparedPageItem, ...]] = []
+    seen_item_keys: set[str] = set()
+    for start_index in range(0, source.item_count, page_size):
+        prepared = _prepare_source_page(
+            operation_key=operation_key,
+            target=target,
+            source=source,
+            start_index=start_index,
+            end_index=min(start_index + page_size, source.item_count),
+        )
+        _reject_duplicate_item_keys(prepared, seen_item_keys=seen_item_keys)
+        pages.append(prepared)
+    return tuple(pages)
 
 
 def _prepare_source_page(
     *,
     operation_key: str,
     target: ExecutionTarget,
-    source: ManifestSource,
+    source: SubmissionSource,
     start_index: int,
     end_index: int,
 ) -> tuple[_PreparedPageItem, ...]:
@@ -1037,7 +938,7 @@ def _prepare_source_page(
     expected_count = end_index - start_index
     if len(source_items) != expected_count:
         raise RegistrationIntegrityError(
-            "ManifestSource returned the wrong number of Items for a page"
+            "SubmissionSource returned the wrong number of Items for a page"
         )
     prepared: list[_PreparedPageItem] = []
     for offset, raw_source_item in enumerate(source_items):
@@ -1050,15 +951,6 @@ def _prepare_source_page(
         recipe = target.recipe_for(source_item)
         _validate_recipe_target(recipe=recipe, target=target)
         recipe_digest = recipe.digest()
-        leaf_digest = sha256_json_digest(
-            {
-                "item_index": item_index,
-                "item_key": source_item.item_key,
-                "service_class": source_item.service_class.value,
-                "spec": source_item.spec,
-                "execution_recipe_digest": recipe_digest,
-            }
-        )
         prepared.append(
             _PreparedPageItem(
                 source_item=source_item,
@@ -1069,7 +961,6 @@ def _prepare_source_page(
                 ),
                 execution_recipe=recipe,
                 execution_recipe_digest=recipe_digest,
-                leaf_digest=leaf_digest,
             )
         )
     return tuple(prepared)
@@ -1077,7 +968,7 @@ def _prepare_source_page(
 
 def _registration_items(
     *,
-    manifest: OperationManifest,
+    operation_key: str,
     target: ExecutionTarget,
     prepared: tuple[_PreparedPageItem, ...],
 ) -> tuple[RegistrationItem, ...]:
@@ -1086,7 +977,7 @@ def _registration_items(
         source_item = prepared_item.source_item
         candidate = ItemRecord(
             item_id=prepared_item.item_id,
-            operation_key=manifest.operation_key,
+            operation_key=operation_key,
             item_key=source_item.item_key,
             item_index=prepared_item.item_index,
             shuffle_rank=shuffle_rank(item_id=prepared_item.item_id),
@@ -1103,7 +994,7 @@ def _registration_items(
         items.append(
             RegistrationItem(
                 item_id=prepared_item.item_id,
-                operation_key=manifest.operation_key,
+                operation_key=operation_key,
                 item_key=source_item.item_key,
                 item_index=prepared_item.item_index,
                 service_class=source_item.service_class,
@@ -1178,18 +1069,16 @@ def _validate_hook_result(
 def _validate_page_authority(
     *,
     row: Any,
-    manifest: OperationManifest,
-    page: ManifestPage,
+    operation_key: str,
+    page_index: int,
     lease_id: str,
     now: datetime,
 ) -> None:
     if row["registration_abandoned_at"] is not None:
         raise RegistrationAbandonedError(
-            f"registration for {manifest.operation_key!r} was abandoned"
+            f"registration for {operation_key!r} was abandoned"
         )
-    if row["manifest_digest"] != manifest.manifest_digest:
-        raise RegistrationConflictError("Operation Manifest digest changed")
-    if row["registration_cursor"] != page.page_index:
+    if row["registration_cursor"] != page_index:
         raise RegistrationIntegrityError("registration cursor CAS is stale")
     if row["registration_lease_id"] != lease_id:
         raise RegistrationIntegrityError("registration Lease ownership lost")
@@ -1207,19 +1096,9 @@ def _reject_duplicate_item_keys(
         item_key = item.source_item.item_key
         if item_key in seen_item_keys:
             raise RegistrationIntegrityError(
-                f"duplicate Manifest item_key {item_key!r}"
+                f"duplicate submission item_key {item_key!r}"
             )
         seen_item_keys.add(item_key)
-
-
-def _operation_recipe_digest(
-    *, target: ExecutionTarget, recipe_digests: list[Jsonable]
-) -> str:
-    payload: Jsonable = {
-        "target_ref": target.ref.model_dump(mode="json"),
-        "execution_recipe_digests": recipe_digests,
-    }
-    return sha256_json_digest(payload)
 
 
 def _validate_recipe_target(
