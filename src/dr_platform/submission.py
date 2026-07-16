@@ -320,6 +320,7 @@ def submit(  # noqa: PLR0913 -- explicit public facade contract
         metadata=operation_metadata,
         options=selected_options,
         lease_id=lease_id,
+        prepared_pages=prepared_pages,
     )
     if source.item_count == 0:
         return _load_submit_result(
@@ -501,6 +502,7 @@ def _create_or_claim_operation(  # noqa: PLR0913
     metadata: dict[str, Any],
     options: SubmitOptions,
     lease_id: str,
+    prepared_pages: tuple[tuple[_PreparedPageItem, ...], ...],
 ) -> int:
     operations = schema.operations
     with engine.begin() as connection:
@@ -579,6 +581,13 @@ def _create_or_claim_operation(  # noqa: PLR0913
             spec=spec,
             metadata=metadata,
             options=options,
+        )
+        _validate_persisted_source_prefix(
+            connection,
+            schema=schema,
+            operation_key=operation_key,
+            registration_cursor=int(row["registration_cursor"]),
+            prepared_pages=prepared_pages,
         )
         if row["registration_abandoned_at"] is not None:
             raise RegistrationAbandonedError(
@@ -878,6 +887,52 @@ def _validate_exact_replay(  # noqa: PLR0913
         raise RegistrationConflictError(
             "Operation exact replay conflict in immutable fields: "
             + ", ".join(sorted(unequal))
+        )
+
+
+def _validate_persisted_source_prefix(
+    connection: Connection,
+    *,
+    schema: PlatformSchema,
+    operation_key: str,
+    registration_cursor: int,
+    prepared_pages: tuple[tuple[_PreparedPageItem, ...], ...],
+) -> None:
+    expected = tuple(
+        item
+        for page in prepared_pages[:registration_cursor]
+        for item in page
+    )
+    persisted = (
+        connection.execute(
+            select(
+                schema.items.c.item_id,
+                schema.items.c.item_index,
+                schema.items.c.item_key,
+                schema.items.c.service_class,
+                schema.items.c.spec,
+            )
+            .where(schema.items.c.operation_key == operation_key)
+            .order_by(schema.items.c.item_index)
+        )
+        .mappings()
+        .all()
+    )
+    if len(persisted) != len(expected):
+        raise RegistrationIntegrityError(
+            "persisted Item count does not match registration cursor"
+        )
+    mismatched = any(
+        row["item_id"] != item.item_id
+        or row["item_index"] != item.item_index
+        or row["item_key"] != item.source_item.item_key
+        or row["service_class"] != item.source_item.service_class
+        or not _canonical_json_equal(row["spec"], item.source_item.spec)
+        for row, item in zip(persisted, expected, strict=True)
+    )
+    if mismatched:
+        raise RegistrationConflictError(
+            "Operation exact replay conflict in persisted source Items"
         )
 
 
