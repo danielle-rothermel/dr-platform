@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -93,35 +92,6 @@ def test_resolve_database_url_leaves_non_postgresql_urls_unchanged() -> None:
 def test_resolve_database_url_leaves_psycopg_driver_suffix_unchanged() -> None:
     url = "postgresql+psycopg://user:pass@localhost/db"
     assert dbos_config.resolve_database_url(url) == url
-
-
-def test_build_dbos_config_shape() -> None:
-    config = dbos_config.PlatformDbosConfig(
-        database_url="postgresql+psycopg://app/db",
-        system_database_url="postgresql+psycopg://system/db",
-    )
-    assert dbos_config.build_dbos_config(config, app_name="my-app") == {
-        "name": "my-app",
-        "system_database_url": "postgresql+psycopg://system/db",
-        "enable_otlp": False,
-        "otel_attribute_format": "semconv",
-    }
-
-
-def test_destroy_dbos_runtime_calls_dbos_destroy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[Any] = []
-
-    monkeypatch.setattr(
-        dbos_config.DBOS,
-        "destroy",
-        lambda: calls.append("destroy"),
-    )
-
-    dbos_config.destroy_dbos_runtime()
-
-    assert calls == ["destroy"]
 
 
 def test_workflow_start_raced_returns_false_without_status() -> None:

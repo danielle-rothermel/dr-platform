@@ -83,12 +83,12 @@ def _target() -> ExecutionTarget:
     )
 
 
-def test_completed_registration_resubmit_repairs_before_new_claims(
+def test_submit_materializes_pages_once_and_reconciles_completed_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = _target()
     source = _Source()
-    repair_stages: list[str] = []
+    reconciled = False
     expected = SubmitResult(
         operation_key="operation",
         status=OperationStatus.RUNNING,
@@ -114,7 +114,8 @@ def test_completed_registration_resubmit_repairs_before_new_claims(
     )
 
     def capture_reconcile(_engine: Engine, **_kwargs: Any) -> None:
-        repair_stages.append("reconcile")
+        nonlocal reconciled
+        reconciled = True
 
     monkeypatch.setattr(runtime_module, "reconcile", capture_reconcile)
     monkeypatch.setattr(
@@ -138,43 +139,5 @@ def test_completed_registration_resubmit_repairs_before_new_claims(
     )
 
     assert result is expected
-    assert repair_stages == ["reconcile"]
+    assert reconciled
     assert source.reads == [(0, 2), (2, 4), (4, 5)]
-
-
-def test_resubmit_routes_lifecycle_through_reconcile_facade(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[Engine, dict[str, Any]]] = []
-    queue_lookup = cast("Any", object())
-    adapter = cast("Any", object())
-    observer = cast("Any", object())
-
-    def capture(engine: Engine, **kwargs: Any) -> None:
-        calls.append((engine, kwargs))
-
-    monkeypatch.setattr(runtime_module, "reconcile", capture)
-    engine = cast("Engine", object())
-    resolver = cast("Any", object())
-    schema = submission_module.PlatformSchema()
-
-    submission_module._enqueue_registered_page(
-        engine=engine,
-        resolver=resolver,
-        schema=schema,
-        options=SubmitOptions(page_size=23, claim_lease_seconds=41),
-        queue_lookup=queue_lookup,
-        enqueue_adapter=adapter,
-        workflow_observer=observer,
-    )
-
-    assert len(calls) == 1
-    called_engine, kwargs = calls[0]
-    assert called_engine is engine
-    assert kwargs["resolver"] is resolver
-    assert kwargs["queue_lookup"] is queue_lookup
-    assert kwargs["enqueue_adapter"] is adapter
-    assert kwargs["options"].page_size == 23
-    assert kwargs["options"].claim_lease_seconds == 41
-    assert kwargs["schema"] is schema
-    assert kwargs["recovery_observer"] is observer

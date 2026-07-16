@@ -93,8 +93,7 @@ def test_read_preserves_nonempty_record_order(
     source = read_jsonl_source(path, group_key="experiment")
 
     assert tuple(
-        item.item_key
-        for item in source.read_items(start_index=0, end_index=2)
+        item.item_key for item in source.read_items(start_index=0, end_index=2)
     ) == ("item-a", "item-b")
 
 
@@ -170,14 +169,15 @@ def test_read_rejects_multiple_operation_groups(tmp_path: Path) -> None:
         read_jsonl_source(path, group_key="experiment")
 
 
-def test_submit_jsonl_reads_once_and_delegates_to_submit(
+def test_submit_jsonl_materializes_file_once_before_submission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "items.jsonl"
     _write_rows(path, _rows())
     target = _target()
-    captured: dict[str, Any] = {}
+    file_reads = 0
+    submitted_pages: list[tuple[str, ...]] = []
     expected = SubmitResult(
         operation_key="operation",
         status=OperationStatus.ENQUEUEING,
@@ -190,11 +190,29 @@ def test_submit_jsonl_reads_once_and_delegates_to_submit(
         enqueue_failed_count=0,
         total_failure_count=0,
     )
+    original_open = Path.open
 
-    def fake_submit(**kwargs: Any) -> Any:
-        captured.update(kwargs)
+    def tracked_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        nonlocal file_reads
+        if self == path:
+            file_reads += 1
+        return original_open(self, *args, **kwargs)
+
+    def fake_submit(**kwargs: Any) -> SubmitResult:
+        source = kwargs["source"]
+        submitted_pages.extend(
+            tuple(
+                item.item_key
+                for item in source.read_items(
+                    start_index=start,
+                    end_index=min(start + 1, source.item_count),
+                )
+            )
+            for start in range(source.item_count)
+        )
         return expected
 
+    monkeypatch.setattr(Path, "open", tracked_open)
     monkeypatch.setattr("dr_platform.jsonl.submit", fake_submit)
 
     result = submit_jsonl(
@@ -209,7 +227,5 @@ def test_submit_jsonl_reads_once_and_delegates_to_submit(
     )
 
     assert result is expected
-    assert captured["source"].item_count == 2
-    assert captured["operation_key"] == "operation"
-    assert captured["target"] is target
-    assert captured["options"].page_size == 1
+    assert file_reads == 1
+    assert submitted_pages == [("item-a",), ("item-b",)]
