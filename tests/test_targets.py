@@ -16,7 +16,6 @@ from dr_platform.targets import (
     ExecutionIdentity,
     ExecutionTarget,
     TargetConflictError,
-    TargetContractDeclaration,
     TargetRegistry,
     TargetResolutionErrorCode,
     TargetUnavailableError,
@@ -58,20 +57,15 @@ def _target(
     managed_workflow_name: str = "generation-workflow-v1",
     workflow: Any = _workflow,
 ) -> ExecutionTarget:
-    declaration = TargetContractDeclaration(
+    return ExecutionTarget(
+        target_key=target_key,
+        target_version=target_version,
         queue_name=queue_name,
         workflow_role="generation",
         managed_workflow_name=managed_workflow_name,
         managed_workflow_version=1,
         argument_recipe_version=1,
         classifier_version=1,
-    )
-    return ExecutionTarget(
-        ref=declaration.target_ref(
-            target_key=target_key,
-            target_version=target_version,
-        ),
-        **declaration.model_dump(),
         workflow=workflow,
         execution_for=_execution_for,
         args_for=_args_for,
@@ -112,6 +106,24 @@ def test_fresh_registry_resolves_a_serialized_persisted_reference() -> None:
     assert restarted_registry.resolve(persisted_ref).ref == persisted_ref
 
 
+def test_target_derives_a_stable_legacy_compatible_reference() -> None:
+    target = _target()
+    expected = ExecutionTargetRef(
+        target_key="generation",
+        target_version=1,
+        target_contract_digest=(
+            "b035c78f822d1fea8ca29f8a9c88373d6228c0c0a84306a1a978da4ad92d6356"
+        ),
+    )
+
+    assert target.ref == expected
+    assert target.ref == target.model_copy().ref
+    assert (
+        target.model_copy(update={"queue_name": "other-queue"}).ref
+        != target.ref
+    )
+
+
 def test_missing_target_fails_with_typed_unavailable_error() -> None:
     target_ref = _target().ref
 
@@ -132,23 +144,6 @@ def test_digest_mismatch_fails_with_typed_conflict_error() -> None:
 
     with pytest.raises(TargetConflictError) as caught:
         registry.resolve(conflicting_ref)
-
-    assert caught.value.code is TargetResolutionErrorCode.TARGET_CONFLICT
-
-
-def test_registration_rejects_ref_that_does_not_match_declaration() -> None:
-    target = _target().model_copy(
-        update={
-            "ref": ExecutionTargetRef(
-                target_key="generation",
-                target_version=1,
-                target_contract_digest="forged-digest",
-            )
-        }
-    )
-
-    with pytest.raises(TargetConflictError) as caught:
-        TargetRegistry().register(target)
 
     assert caught.value.code is TargetResolutionErrorCode.TARGET_CONFLICT
 
