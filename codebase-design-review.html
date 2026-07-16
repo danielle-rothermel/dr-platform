@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dr-platform · Codebase Design Review — Deep Modules</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --card:#ffffff; --ink:#1b2430; --muted:#5b6572; --line:#e3e6ea;
+    --deep:#15803d; --deep-bg:#f0faf3;
+    --mixed:#b45309; --mixed-bg:#fdf7ec;
+    --shallow:#b91c1c; --shallow-bg:#fdf1f1;
+    --vocab:#1d4ed8; --vocab-bg:#f0f4fe;
+    --infra:#7c3aed; --infra-bg:#f7f3fe;
+    --ext:#64748b; --ext-bg:#f5f7f9;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;}
+  .frame{max-width:2500px;margin:0 auto;display:grid;grid-template-columns:288px minmax(0,1fr);gap:0;}
+  /* ---------- nav ---------- */
+  nav{position:sticky;top:0;height:100vh;overflow-y:auto;padding:28px 20px 40px 28px;
+      border-right:1px solid var(--line);background:var(--card);}
+  nav .brand{font-weight:700;font-size:17px;margin-bottom:2px}
+  nav .sub{font-size:12px;color:var(--muted);margin-bottom:20px}
+  nav a{display:block;color:var(--ink);text-decoration:none;font-size:13.5px;
+        padding:5px 10px;border-radius:6px;margin:1px 0}
+  nav a:hover{background:#eef1f5}
+  nav .g{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+         margin:16px 0 4px;font-weight:600}
+  nav .f{padding-left:22px;font-size:12.5px;color:#3c4654}
+  /* ---------- main ---------- */
+  main{padding:34px 44px 120px;min-width:0}
+  header.page h1{font-size:30px;margin:0 0 6px;letter-spacing:-.01em}
+  header.page .meta{color:var(--muted);font-size:13.5px}
+  header.page .meta code{font-family:var(--mono);font-size:12.5px;background:#eef1f5;
+      padding:1px 6px;border-radius:4px}
+  section{margin-top:46px}
+  h2{font-size:21px;margin:0 0 4px;letter-spacing:-.01em}
+  h2 .sec{color:var(--muted);font-weight:600;margin-right:10px;font-variant-numeric:tabular-nums}
+  .lede{color:var(--muted);max-width:1100px;margin:0 0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 24px}
+  /* verdict + scorecard */
+  .verdict{display:grid;grid-template-columns:minmax(480px,1.4fr) repeat(6,minmax(170px,1fr));gap:14px;align-items:stretch}
+  .verdict .headline{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--mixed);
+      border-radius:12px;padding:20px 24px}
+  .verdict .headline b{font-size:17px}
+  .score{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;
+      display:flex;flex-direction:column;gap:4px}
+  .score .grade{font-size:26px;font-weight:800;line-height:1}
+  .score .name{font-size:13px;font-weight:600}
+  .score .why{font-size:12px;color:var(--muted)}
+  .gA{color:var(--deep)} .gB{color:#4d7c0f} .gC{color:var(--mixed)} .gD{color:var(--shallow)}
+  /* badges */
+  .badge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.05em;border-radius:999px;
+      padding:2px 10px;vertical-align:2px}
+  .b-deep{background:var(--deep-bg);color:var(--deep);border:1px solid #bbe3c8}
+  .b-mixed{background:var(--mixed-bg);color:var(--mixed);border:1px solid #f0dcb6}
+  .b-shallow{background:var(--shallow-bg);color:var(--shallow);border:1px solid #f2c6c6}
+  .b-vocab{background:var(--vocab-bg);color:var(--vocab);border:1px solid #c5d4f8}
+  .b-infra{background:var(--infra-bg);color:var(--infra);border:1px solid #ddd0f7}
+  .b-high{background:#fdecec;color:#b91c1c;border:1px solid #f2c6c6}
+  .b-med{background:#fdf4e5;color:#b45309;border:1px solid #f0dcb6}
+  .b-low{background:#eef4fd;color:#1d4ed8;border:1px solid #c5d4f8}
+  .b-str{background:#f0faf3;color:#15803d;border:1px solid #bbe3c8}
+  /* glossary chips */
+  .chips{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+  .chip{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;font-size:13.5px}
+  .chip b{display:block;margin-bottom:2px}
+  .chip .m{color:var(--muted)}
+  /* svg map */
+  .mapwrap{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 10px 8px;overflow-x:auto}
+  svg text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+  .legend{display:flex;gap:22px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin:10px 8px 4px}
+  .legend span{display:inline-flex;align-items:center;gap:7px}
+  .sw{width:14px;height:14px;border-radius:4px;display:inline-block;border:1.5px solid}
+  /* census table */
+  table{border-collapse:collapse;width:100%;font-size:13.5px;background:var(--card);
+        border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  th{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+     text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);background:#fafbfc}
+  td{padding:8px 14px;border-bottom:1px solid #eef0f3;vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  td.mono, .mono{font-family:var(--mono);font-size:12.5px}
+  .bar{height:9px;border-radius:5px;background:#d7dce2;display:inline-block;vertical-align:middle;margin-right:8px}
+  .bar.exp{background:#93b4f2}
+  .num{font-variant-numeric:tabular-nums}
+  /* depth profiles */
+  .profiles{display:flex;gap:26px;align-items:flex-end;flex-wrap:wrap;
+            background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px 28px 18px}
+  .prof{display:flex;flex-direction:column;align-items:center;width:255px}
+  .prof .lid{background:#334155;border-radius:3px 3px 0 0;height:15px}
+  .prof .lid.wide{background:#b91c1c}
+  .prof .lid.mid{background:#b45309}
+  .prof .body{width:225px;border:1.5px solid #94a3b8;border-top:none;background:
+      repeating-linear-gradient(135deg,#f1f5f9 0 8px,#e8edf3 8px 16px);border-radius:0 0 4px 4px}
+  .prof .cap{margin-top:10px;text-align:center;font-size:12.5px}
+  .prof .cap b{font-family:var(--mono);font-size:12.5px}
+  .prof .cap .m{color:var(--muted);display:block;font-size:11.5px}
+  /* findings */
+  .findings{display:grid;grid-template-columns:repeat(auto-fit,minmax(620px,1fr));gap:18px}
+  .finding{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 22px 20px;min-width:0}
+  .finding h3{margin:0 0 8px;font-size:16px}
+  .finding h3 .fid{font-family:var(--mono);color:var(--muted);font-weight:600;margin-right:8px;font-size:13px}
+  .finding p{margin:8px 0;font-size:14px}
+  .finding .move{border-left:3px solid var(--deep);background:var(--deep-bg);
+      padding:8px 14px;border-radius:0 8px 8px 0;font-size:13.5px;margin-top:12px}
+  .finding .move b{color:var(--deep)}
+  /* code */
+  .codeblock{margin:12px 0 4px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .codeblock .path{font-family:var(--mono);font-size:11.5px;color:var(--muted);
+      background:#fafbfc;padding:6px 14px;border-bottom:1px solid var(--line)}
+  pre{margin:0;padding:13px 16px;overflow-x:auto;background:#fdfdfe}
+  pre code{font-family:var(--mono);font-size:12.6px;line-height:1.55;display:block;white-space:pre}
+  .tok-k{color:#a626a4} .tok-s{color:#50a14f} .tok-c{color:#9aa0a8;font-style:italic}
+  .tok-n{color:#986801} .tok-d{color:#4078f2} .tok-b{color:#0184bc} .tok-f{color:#4078f2;font-weight:600}
+  .sidebyside{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
+  @media(max-width:1500px){.sidebyside{grid-template-columns:1fr}}
+  /* strengths */
+  .strengths{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:16px}
+  .strength{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--deep);
+      border-radius:12px;padding:16px 20px;font-size:13.5px}
+  .strength b{display:block;margin-bottom:4px;font-size:14px}
+  .strength .m{color:var(--muted)}
+  /* recs */
+  ol.recs{counter-reset:r;list-style:none;padding:0;margin:0;display:grid;gap:12px;max-width:1500px}
+  ol.recs li{background:var(--card);border:1px solid var(--line);border-radius:12px;
+      padding:16px 20px 16px 66px;position:relative;font-size:14px}
+  ol.recs li::before{counter-increment:r;content:counter(r);position:absolute;left:20px;top:16px;
+      width:30px;height:30px;border-radius:8px;background:#1b2430;color:#fff;font-weight:700;
+      display:flex;align-items:center;justify-content:center;font-size:15px}
+  ol.recs b{font-size:14.5px}
+  footer{margin-top:60px;color:var(--muted);font-size:12.5px;border-top:1px solid var(--line);padding-top:16px}
+  .ref{font-family:var(--mono);font-size:12px;background:#eef1f5;padding:1px 6px;border-radius:4px;white-space:nowrap}
+</style>
+</head>
+<body>
+<div class="frame">
+
+<!-- ══════════════════ NAV ══════════════════ -->
+<nav>
+  <div class="brand">dr-platform</div>
+  <div class="sub">Deep-module design review<br>2026-07-13 · commit <span style="font-family:var(--mono)">3820729</span></div>
+  <a href="#verdict">Verdict &amp; scorecard</a>
+  <a href="#criteria">§1 The yardstick</a>
+  <a href="#map">§2 System map</a>
+  <a href="#census">§3 Depth census</a>
+  <a href="#ports">§4 Seams, ports &amp; adapters</a>
+  <a href="#deps">§5 Dependency categories</a>
+  <div class="g">§6 Findings</div>
+  <a class="f" href="#f1">F1 · 132-name front door</a>
+  <a class="f" href="#f2">F2 · Tests cross below the seam</a>
+  <a class="f" href="#f3">F3 · export ↔ publication tangle</a>
+  <a class="f" href="#f4">F4 · submit()'s 15-param door</a>
+  <a class="f" href="#f5">F5 · ExecutionTarget burden</a>
+  <a class="f" href="#f6">F6 · promote()'s coupled params</a>
+  <a class="f" href="#f7">F7 · Shared lock constant</a>
+  <a class="f" href="#f8">F8 · Ports bypassed at facades</a>
+  <a class="f" href="#f9">F9 · backoff's flat bag</a>
+  <a class="f" href="#f10">F10 · Private cross-imports</a>
+  <div class="g">&nbsp;</div>
+  <a href="#strengths">§7 What's working</a>
+  <a href="#recs">§8 Recommended moves</a>
+  <a href="#method">Method</a>
+</nav>
+
+<!-- ══════════════════ MAIN ══════════════════ -->
+<main>
+
+<header class="page">
+  <h1>Does <span style="font-family:var(--mono)">dr-platform</span> build deep modules?</h1>
+  <div class="meta">
+    Review of <code>~/drotherm/repos/dr-platform</code> (≈16.5k source lines, 22 modules, 27 test files)
+    against <code>codebase-design/SKILL.md</code> — deep modules, seams, ports, adapters, and the
+    interface-is-the-test-surface rule. Single-use reference doc; all excerpts verified against
+    commit <code>3820729</code>.
+  </div>
+</header>
+
+<!-- ─────────── VERDICT ─────────── -->
+<section id="verdict">
+  <div class="verdict">
+    <div class="headline">
+      <b>Mostly yes — the engine rooms are deep and the seams are real, but the front door and the
+      test suite don't match the philosophy.</b>
+      <p style="font-size:13.5px;color:var(--muted);margin:10px 0 0">
+      The core modules (<span class="ref">claims.py</span>, <span class="ref">submission.py</span>,
+      <span class="ref">reconciliation.py</span>, <span class="ref">cancellation.py</span>,
+      <span class="ref">PostgresPublicationFence</span>) hide enormous behaviour behind a handful of
+      functions, nearly every port has both a production and a test adapter, and every dependency
+      category is handled the way the skill prescribes. The deviations are systematic rather than
+      local: a 132-name flat package interface, three facades with very wide doors, a misplaced
+      export↔publication seam, and a test suite that reaches past the interface it should be
+      exercising.</p>
+    </div>
+    <div class="score"><span class="grade gA">A</span><span class="name">Dependency categories</span><span class="why">Real Postgres in tests, DBOS behind ports + fakes, deterministic jitter, DB-derived clocks</span></div>
+    <div class="score"><span class="grade gA">A−</span><span class="name">Seams &amp; ports</span><span class="why">12 of 14 ports have two real adapters; 2 single-adapter seams</span></div>
+    <div class="score"><span class="grade gA">A−</span><span class="name">Accept deps / return results</span><span class="why">Engine, clock, sleeper injected everywhere; a few None-returning mutators</span></div>
+    <div class="score"><span class="grade gB">B+</span><span class="name">Module depth</span><span class="why">Cores are genuinely deep; publication surface and backoff are wide and flat</span></div>
+    <div class="score"><span class="grade gB">B−</span><span class="name">Locality</span><span class="why">Lock constant, table naming, and private helpers leak across module seams</span></div>
+    <div class="score"><span class="grade gC">C</span><span class="name">Interface = test surface</span><span class="why">Submodule imports beat root imports 5:1; ~60–70% of asserts read private tables</span></div>
+  </div>
+</section>
+
+<!-- ─────────── CRITERIA ─────────── -->
+<section id="criteria">
+  <h2><span class="sec">§1</span>The yardstick</h2>
+  <p class="lede">The skill asks for <b>deep modules</b> — a lot of behaviour behind a small interface,
+  placed at a clean seam, testable through that interface. The specific tests applied below:</p>
+  <div class="chips">
+    <div class="chip"><b>Depth = leverage at the interface</b><span class="m">How much behaviour a caller (or test) exercises per unit of interface learned. Not a line-count ratio.</span></div>
+    <div class="chip"><b>The deletion test</b><span class="m">Delete the module: if complexity vanishes it was a pass-through; if it reappears across N callers it earned its keep.</span></div>
+    <div class="chip"><b>The interface is the test surface</b><span class="m">Callers and tests cross the same seam. Testing past the interface means the module is the wrong shape.</span></div>
+    <div class="chip"><b>Two adapters make a seam real</b><span class="m">One adapter is a hypothetical seam — just indirection. A port needs production + test adapters to be justified.</span></div>
+    <div class="chip"><b>Dependency categories drive the move</b><span class="m">In-process → merge. Local-substitutable → real stand-in, seam stays internal. Remote/external → port + injected adapter.</span></div>
+    <div class="chip"><b>Accept dependencies, return results</b><span class="m">Don't construct collaborators inline; don't communicate through side effects.</span></div>
+  </div>
+</section>
+
+<!-- ─────────── SYSTEM MAP ─────────── -->
+<section id="map">
+  <h2><span class="sec">§2</span>System map — where the depth lives and where the seams leak</h2>
+  <p class="lede">Every module placed by role. Green = deep, amber = mixed, red = shallow/wide,
+  blue = shared vocabulary (in-process, correctly merged), purple = infrastructure quarantine.
+  Red dashed edges are seam violations discussed in §6.</p>
+  <div class="mapwrap">
+  <svg viewBox="0 0 2210 700" width="100%" style="min-width:1700px">
+    <defs>
+      <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#b91c1c"/></marker>
+      <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker>
+    </defs>
+    <style>
+      .band{fill:#f8f9fb;stroke:#eceef2}
+      .bl{font-size:11px;letter-spacing:.09em;fill:#8a93a0;font-weight:700}
+      .bx{rx:9;stroke-width:1.6}
+      .deepB{fill:#f0faf3;stroke:#15803d} .mixB{fill:#fdf7ec;stroke:#b45309}
+      .shaB{fill:#fdf1f1;stroke:#b91c1c} .vocB{fill:#f0f4fe;stroke:#1d4ed8}
+      .infB{fill:#f7f3fe;stroke:#7c3aed} .extB{fill:#f5f7f9;stroke:#94a3b8;stroke-dasharray:5 4}
+      .t1{font-size:13.5px;font-weight:700;fill:#1b2430}
+      .t2{font-size:11.5px;fill:#5b6572}
+      .edge{stroke:#b91c1c;stroke-width:1.8;fill:none;stroke-dasharray:7 5}
+      .gedge{stroke:#94a3b8;stroke-width:1.6;fill:none}
+      .el{font-size:11.5px;fill:#b91c1c;font-weight:600}
+      .gl{font-size:11.5px;fill:#64748b}
+    </style>
+
+    <!-- bands -->
+    <rect class="band" x="8" y="8" width="2194" height="100" rx="10"/>
+    <text class="bl" x="22" y="26">CALLERS &amp; PACKAGE ROOT</text>
+    <rect class="band" x="8" y="122" width="2194" height="100" rx="10"/>
+    <text class="bl" x="22" y="140">PUBLIC FACADES — THE SEAMS CALLERS CROSS</text>
+    <rect class="band" x="8" y="236" width="2194" height="140" rx="10"/>
+    <text class="bl" x="22" y="254">DEEP ENGINES — IMPLEMENTATION MASS</text>
+    <rect class="band" x="8" y="452" width="2194" height="96" rx="10"/>
+    <text class="bl" x="22" y="470">SHARED VOCABULARY — IN-PROCESS, CORRECTLY MERGED</text>
+    <rect class="band" x="8" y="562" width="2194" height="96" rx="10"/>
+    <text class="bl" x="22" y="580">INFRASTRUCTURE QUARANTINE · EXTERNAL SYSTEMS</text>
+
+    <!-- band 1 -->
+    <rect class="bx extB" x="40" y="38" width="290" height="56"/>
+    <text class="t1" x="55" y="62">Application code</text>
+    <text class="t2" x="55" y="80">owns workflows &amp; domain outcomes</text>
+    <rect class="bx shaB" x="370" y="38" width="1190" height="56"/>
+    <text class="t1" x="385" y="62">dr_platform/__init__.py — 132 flat exports</text>
+    <text class="t2" x="385" y="80">F1: shallow front door — no grouping; simultaneously missing the port types its own facades accept</text>
+    <rect class="bx extB" x="1600" y="38" width="570" height="56"/>
+    <text class="t1" x="1615" y="62">Not exported at root</text>
+    <text class="t2" x="1615" y="80">enqueue_runtime ports · claims · cancellation_truth · telemetry</text>
+
+    <!-- band 2 facades -->
+    <rect class="bx mixB" x="40" y="152" width="250" height="56"/>
+    <text class="t1" x="55" y="176">submit() / submit_jsonl()</text>
+    <text class="t2" x="55" y="194">15 params, duplicated — F4</text>
+    <rect class="bx deepB" x="320" y="152" width="250" height="56"/>
+    <text class="t1" x="335" y="176">request_next_attempt()</text>
+    <text class="t2" x="335" y="194">3 root names / 1,451 ln behind</text>
+    <rect class="bx deepB" x="600" y="152" width="200" height="56"/>
+    <text class="t1" x="615" y="176">reconcile()</text>
+    <text class="t2" x="615" y="194">1 root name / whole runtime</text>
+    <rect class="bx deepB" x="830" y="152" width="230" height="56"/>
+    <text class="t1" x="845" y="176">cancel_operation()</text>
+    <text class="t2" x="845" y="194">ordering hidden inside — good</text>
+    <rect class="bx deepB" x="1090" y="152" width="290" height="56"/>
+    <text class="t1" x="1105" y="176">inspect / list / wait / health</text>
+    <text class="t2" x="1105" y="194">13 names · the read seam tests skip (F2)</text>
+    <rect class="bx mixB" x="1410" y="152" width="170" height="56"/>
+    <text class="t1" x="1425" y="176">export()</text>
+    <text class="t2" x="1425" y="194">5 params, deep body</text>
+    <rect class="bx mixB" x="1610" y="152" width="230" height="56"/>
+    <text class="t1" x="1625" y="176">backoff operations</text>
+    <text class="t2" x="1625" y="194">14 flat names — F9</text>
+    <rect class="bx shaB" x="1870" y="152" width="300" height="56"/>
+    <text class="t1" x="1885" y="176">publication surface</text>
+    <text class="t2" x="1885" y="194">26 names: models + free fns — F3</text>
+
+    <!-- band 3 engines -->
+    <rect class="bx deepB" x="40" y="272" width="250" height="66"/>
+    <text class="t1" x="55" y="296">submission.py core</text>
+    <text class="t2" x="55" y="314">1,331 ln · registration state machine,</text>
+    <text class="t2" x="55" y="329">leases, replay CAS, hook fencing</text>
+    <rect class="bx deepB" x="320" y="272" width="250" height="66"/>
+    <text class="t1" x="335" y="296">claims.py</text>
+    <text class="t2" x="335" y="314">1,784 ln · deepest module · advisory-lock</text>
+    <text class="t2" x="335" y="329">ordering, CAS, compensation (root-internal)</text>
+    <rect class="bx deepB" x="600" y="272" width="230" height="66"/>
+    <text class="t1" x="615" y="296">reconciliation.py</text>
+    <text class="t2" x="615" y="314">1,451 ln · persistence core,</text>
+    <text class="t2" x="615" y="329">observation CAS, lifecycle refresh</text>
+    <rect class="bx deepB" x="860" y="272" width="240" height="66"/>
+    <text class="t1" x="875" y="296">cancellation.py + _truth</text>
+    <text class="t2" x="875" y="314">1,517 + 248 ln · durable intent</text>
+    <text class="t2" x="875" y="329">before physical cancel</text>
+    <rect class="bx deepB" x="1130" y="272" width="250" height="66"/>
+    <text class="t1" x="1145" y="296">enqueue_runtime.py</text>
+    <text class="t2" x="1145" y="314">892 ln · DBOS adapters, 5 ports,</text>
+    <text class="t2" x="1145" y="329">uncertainty reconciliation</text>
+    <rect class="bx deepB" x="1410" y="272" width="200" height="66"/>
+    <text class="t1" x="1425" y="296">export.py internals</text>
+    <text class="t2" x="1425" y="314">2,277 ln · ~50 private</text>
+    <text class="t2" x="1425" y="329">helpers, fenced promote</text>
+    <rect class="bx deepB" x="1640" y="272" width="200" height="66"/>
+    <text class="t1" x="1655" y="296">reconciliation_runtime</text>
+    <text class="t2" x="1655" y="314">601 ln · DBOS-SDK side,</text>
+    <text class="t2" x="1655" y="329">DbosLifecycleReader</text>
+    <rect class="bx deepB" x="1870" y="272" width="300" height="66"/>
+    <text class="t1" x="1885" y="296">PostgresPublicationFence</text>
+    <text class="t2" x="1885" y="314">~2,500 ln class inside publication.py ·</text>
+    <text class="t2" x="1885" y="329">lease / stage / promote / cleanup</text>
+
+    <!-- band 4 vocabulary -->
+    <rect class="bx vocB" x="40" y="482" width="280" height="56"/>
+    <text class="t1" x="55" y="506">records.py — 10 frozen models</text>
+    <text class="t2" x="55" y="524">validators make invalid states unconstructible</text>
+    <rect class="bx vocB" x="350" y="482" width="210" height="56"/>
+    <text class="t1" x="365" y="506">status.py</text>
+    <text class="t2" x="365" y="524">closed StrEnums, pinned priorities</text>
+    <rect class="bx vocB" x="590" y="482" width="230" height="56"/>
+    <text class="t1" x="605" y="506">manifests.py</text>
+    <text class="t2" x="605" y="524">self-validating pages + digest</text>
+    <rect class="bx vocB" x="850" y="482" width="130" height="56"/>
+    <text class="t1" x="865" y="506">items.py</text>
+    <text class="t2" x="865" y="524">identity fns</text>
+    <rect class="bx vocB" x="1010" y="482" width="140" height="56"/>
+    <text class="t1" x="1025" y="506">cut.py</text>
+    <text class="t2" x="1025" y="524">lock + compare</text>
+    <rect class="bx vocB" x="1180" y="482" width="310" height="56"/>
+    <text class="t1" x="1195" y="506">cancellation_truth.py (internal)</text>
+    <text class="t2" x="1195" y="524">shared unresolved-work predicates · 4 consumers</text>
+
+    <!-- band 5 infra + externals -->
+    <rect class="bx infB" x="40" y="592" width="310" height="56"/>
+    <text class="t1" x="55" y="616">dbos_config.py — DBOS quarantine</text>
+    <text class="t2" x="55" y="634">sole home of dbos._private imports</text>
+    <rect class="bx infB" x="380" y="592" width="230" height="56"/>
+    <text class="t1" x="395" y="616">telemetry.py</text>
+    <text class="t2" x="395" y="634">fail-open OTLP, credential scan</text>
+    <rect class="bx infB" x="640" y="592" width="260" height="56"/>
+    <text class="t1" x="655" y="616">db/schema.py + alembic</text>
+    <text class="t2" x="655" y="634">1,125 ln table definitions</text>
+    <rect class="bx extB" x="1180" y="592" width="200" height="56"/>
+    <text class="t1" x="1195" y="616">PostgreSQL</text>
+    <text class="t2" x="1195" y="634">Engine injected everywhere</text>
+    <rect class="bx extB" x="1410" y="592" width="180" height="56"/>
+    <text class="t1" x="1425" y="616">DBOS SDK 2.26</text>
+    <text class="t2" x="1425" y="634">behind ports + fakes</text>
+    <rect class="bx extB" x="1620" y="592" width="170" height="56"/>
+    <text class="t1" x="1635" y="616">DuckDB</text>
+    <text class="t2" x="1635" y="634">connect() inline</text>
+    <rect class="bx extB" x="1820" y="592" width="170" height="56"/>
+    <text class="t1" x="1835" y="616">Filesystem</text>
+    <text class="t2" x="1835" y="634">behind ManifestSource</text>
+    <rect class="bx extB" x="2020" y="592" width="150" height="56"/>
+    <text class="t1" x="2035" y="616">OpenSSL</text>
+    <text class="t2" x="2035" y="634">real in tests</text>
+
+    <!-- red seam-violation edges -->
+    <path class="edge" d="M 230 272 C 330 236, 520 224, 640 210" marker-end="url(#ar)"/>
+    <text class="el" x="300" y="238">submit → reconcile via lazy import (hidden hop)</text>
+    <path class="edge" d="M 830 262 C 1100 240, 1400 240, 1660 264" marker-start="url(#ar)" marker-end="url(#ar)"/>
+    <text class="el" x="1030" y="244">bidirectional lazy imports — cycle (F10)</text>
+    <path class="edge" d="M 400 338 C 350 372, 230 372, 180 340" marker-end="url(#ar)"/>
+    <text class="el" x="205" y="384">EXPORT_BARRIER_ADVISORY_KEY shared lock constant (F7)</text>
+    <path class="edge" d="M 1610 320 L 1862 320" marker-start="url(#ar)" marker-end="url(#ar)"/>
+    <text class="el" x="1618" y="360">cycle + duplicated publish skeletons (F3)</text>
+    <path class="edge" d="M 860 296 L 838 296" marker-end="url(#ar)"/>
+    <text class="el" x="668" y="352">_refresh_operation_lifecycle</text>
+    <text class="el" x="668" y="367">private cross-import (F10)</text>
+
+    <!-- gray dependency edges -->
+    <path class="gedge" d="M 715 338 C 800 470, 1080 560, 1240 590" marker-end="url(#ag)"/>
+    <text class="gl" x="905" y="568">injected Engine (local-substitutable ✓)</text>
+    <path class="gedge" d="M 1255 338 C 1330 470, 1430 540, 1490 590" marker-end="url(#ag)"/>
+    <text class="gl" x="1362" y="500">ports + adapters ✓</text>
+    <path class="gedge" d="M 1510 338 C 1560 470, 1640 540, 1695 590" marker-end="url(#ag)"/>
+    <text class="gl" x="1575" y="560">duckdb.connect() hardwired</text>
+  </svg>
+  <div class="legend">
+    <span><span class="sw" style="background:#f0faf3;border-color:#15803d"></span>deep module</span>
+    <span><span class="sw" style="background:#fdf7ec;border-color:#b45309"></span>mixed — deep body, wide door</span>
+    <span><span class="sw" style="background:#fdf1f1;border-color:#b91c1c"></span>shallow / wide surface</span>
+    <span><span class="sw" style="background:#f0f4fe;border-color:#1d4ed8"></span>shared vocabulary</span>
+    <span><span class="sw" style="background:#f7f3fe;border-color:#7c3aed"></span>infrastructure quarantine</span>
+    <span><span class="sw" style="background:#f5f7f9;border-color:#94a3b8;border-style:dashed"></span>external / not root-exported</span>
+    <span style="color:#b91c1c">— — red dashed = seam violation (§6)</span>
+  </div>
+  </div>
+</section>
+
+<!-- ─────────── CENSUS ─────────── -->
+<section id="census">
+  <h2><span class="sec">§3</span>Depth census</h2>
+  <p class="lede">Interface width (root exports a caller must learn) versus implementation mass
+  (lines hidden behind it), per the skill's deep/shallow box picture. Tall + narrow lid = deep.
+  Wide lid on a short box = shallow.</p>
+
+  <div class="profiles">
+    <div class="prof"><div class="lid" style="width:20px"></div><div class="body" style="height:160px"></div>
+      <div class="cap"><b>claims.py</b><span class="m">0 root exports · ~10 internal names · 1,784 ln — deepest module in the repo</span></div></div>
+    <div class="prof"><div class="lid" style="width:42px"></div><div class="body" style="height:130px"></div>
+      <div class="cap"><b>reconciliation.py</b><span class="m">3 root names · 1,451 ln</span></div></div>
+    <div class="prof"><div class="lid" style="width:110px"></div><div class="body" style="height:136px"></div>
+      <div class="cap"><b>cancellation.py</b><span class="m">12 root names (mostly result models) · 1,517 ln</span></div></div>
+    <div class="prof"><div class="lid mid" style="width:150px"></div><div class="body" style="height:120px"></div>
+      <div class="cap"><b>submission.py</b><span class="m">7 root names but a 15-parameter door · 1,331 ln</span></div></div>
+    <div class="prof"><div class="lid mid" style="width:150px"></div><div class="body" style="height:205px"></div>
+      <div class="cap"><b>export.py</b><span class="m">14 root names · 2,277 ln · deep entry on a wide data surface</span></div></div>
+    <div class="prof"><div class="lid wide" style="width:225px"></div><div class="body" style="height:320px"></div>
+      <div class="cap"><b>publication.py</b><span class="m">26 root names · 3,584 ln · one deep class + ~24 shallow co-located pieces</span></div></div>
+    <div class="prof"><div class="lid wide" style="width:170px"></div><div class="body" style="height:32px"></div>
+      <div class="cap"><b>backoff.py</b><span class="m">14 root names · 338 ln · flat bag of one-statement table ops</span></div></div>
+  </div>
+
+  <table style="margin-top:20px">
+    <thead><tr>
+      <th style="width:210px">Module</th><th style="width:290px">Lines</th>
+      <th style="width:190px">Root exports</th><th style="width:150px">Verdict</th><th>Depth assessment</th>
+    </tr></thead>
+    <tbody>
+      <tr><td class="mono">claims.py</td><td><span class="bar" style="width:178px"></span><span class="num">1,784</span></td><td><span class="num">0</span> (submodule-only)</td><td><span class="badge b-deep">DEEP</span></td>
+        <td>5 functions + 1 store class hide advisory-lock ordering, hierarchical <span class="ref">FOR UPDATE</span>, every CAS-loss path, compensation bookkeeping, aggregate refresh. Highest leverage in the repo.</td></tr>
+      <tr><td class="mono">submission.py</td><td><span class="bar" style="width:133px"></span><span class="num">1,331</span></td><td><span class="num">7</span></td><td><span class="badge b-deep">DEEP</span> <span class="badge b-mixed">WIDE DOOR</span></td>
+        <td>3 functions hide the whole registration state machine — but <span class="ref">submit()</span> takes 15 parameters (F4).</td></tr>
+      <tr><td class="mono">reconciliation.py</td><td><span class="bar" style="width:145px"></span><span class="num">1,451</span></td><td><span class="num">3</span></td><td><span class="badge b-deep">DEEP</span></td>
+        <td>~20 functions, 3 public names. <span class="ref">request_next_attempt()</span> = 4 params over idempotent CAS replay + lifecycle refresh.</td></tr>
+      <tr><td class="mono">reconciliation_runtime.py</td><td><span class="bar" style="width:60px"></span><span class="num">601</span></td><td><span class="num">1</span></td><td><span class="badge b-deep">DEEP</span></td>
+        <td>One name, <span class="ref">reconcile()</span>, orchestrating recovery → observe → persist → enqueue within a page budget. Real vendor-quarantine seam vs <span class="ref">reconciliation.py</span>, though held together by bidirectional lazy imports (F10).</td></tr>
+      <tr><td class="mono">cancellation.py + _truth.py</td><td><span class="bar" style="width:176px"></span><span class="num">1,765</span></td><td><span class="num">12</span></td><td><span class="badge b-deep">DEEP</span></td>
+        <td>2 entry functions; intent-before-physical ordering hidden inside. <span class="ref">cancellation_truth</span> is a textbook extraction: pure predicates, 4 consumers, zero back-imports.</td></tr>
+      <tr><td class="mono">enqueue_runtime.py</td><td><span class="bar" style="width:89px"></span><span class="num">892</span></td><td><span class="num">0</span> (submodule-only)</td><td><span class="badge b-deep">DEEP</span> <span class="badge b-mixed">FACADE DUPLICATION</span></td>
+        <td>DBOS uncertainty reconciliation is exemplary depth; the three near-identical page facades hardwire the Postgres store (F8).</td></tr>
+      <tr><td class="mono">publication.py</td><td><span class="bar" style="width:290px"></span><span class="num">3,584</span></td><td><span class="num">26</span></td><td><span class="badge b-shallow">BAG OF PIECES</span></td>
+        <td>One deep class (<span class="ref">PostgresPublicationFence</span>, ~2,500 ln) plus ~24 shallow models, signers, and free functions sharing a file and the root namespace (F3, F6).</td></tr>
+      <tr><td class="mono">export.py</td><td><span class="bar" style="width:207px"></span><span class="num">2,277</span></td><td><span class="num">14</span></td><td><span class="badge b-mixed">MIXED</span></td>
+        <td><span class="ref">export()</span> is 5 params over ~1,900 lines — deep. The surrounding result/projection models and the test-only helpers are shallow surface (F3).</td></tr>
+      <tr><td class="mono">inspection.py</td><td><span class="bar" style="width:83px"></span><span class="num">826</span></td><td><span class="num">13</span></td><td><span class="badge b-deep">DEEP</span></td>
+        <td>Keyset pagination, fail-closed cursors, 230-line health aggregation, reconcile-poll wait — behind 6 read functions. This is the seam tests should cross but mostly don't (F2).</td></tr>
+      <tr><td class="mono">records.py</td><td><span class="bar" style="width:76px"></span><span class="num">756</span></td><td><span class="num">10</span></td><td><span class="badge b-vocab">VOCABULARY</span> <span class="badge b-deep">DEEP</span></td>
+        <td>Frozen models whose validators encode cross-field durable invariants — an invalid <span class="ref">AttemptRecord</span> cannot be constructed. Caveat: ~15 optional co-varying fields whose grouping semantics callers must learn.</td></tr>
+      <tr><td class="mono">targets.py</td><td><span class="bar" style="width:35px"></span><span class="num">346</span></td><td><span class="num">4</span></td><td><span class="badge b-deep">DEEP</span> <span class="badge b-mixed">HEAVY CONFIG</span></td>
+        <td>Copy-on-write transactional registry is deep; <span class="ref">ExecutionTarget</span>'s 18 fields / 6 callables push a big construction burden onto callers (F5).</td></tr>
+      <tr><td class="mono">jsonl.py</td><td><span class="bar" style="width:44px"></span><span class="num">435</span></td><td><span class="num">1</span></td><td><span class="badge b-deep">DEEP ADAPTER</span></td>
+        <td>Filesystem adapter behind the <span class="ref">ManifestSource</span> port: fingerprinting, drift detection, byte-offset paging. <span class="ref">submit_jsonl()</span> re-declares submit's wide signature (F4).</td></tr>
+      <tr><td class="mono">backoff.py</td><td><span class="bar" style="width:34px"></span><span class="num">338</span></td><td><span class="num">14</span></td><td><span class="badge b-shallow">FLAT BAG</span></td>
+        <td>12 mostly one-statement functions over one table; interface nearly as large as the behaviour. Honestly scoped, but wide (F9).</td></tr>
+      <tr><td class="mono">dbos_config.py</td><td><span class="bar" style="width:22px"></span><span class="num">219</span></td><td><span class="num">4</span></td><td><span class="badge b-infra">QUARANTINE</span> <span class="badge b-deep">DEEP</span></td>
+        <td>Deliberate single home for <span class="ref">dbos._private</span> shims; fail-open OTLP orchestration behind one function with injected initializers.</td></tr>
+      <tr><td class="mono">manifests / items / cut / status / telemetry</td><td><span class="bar" style="width:59px"></span><span class="num">590</span></td><td><span class="num">11</span></td><td><span class="badge b-vocab">VOCABULARY</span> <span class="badge b-deep">DEEP-SMALL</span></td>
+        <td>Small surfaces, real invariants: self-validating manifests, deterministic identity, lexical-order cut locking, closed enums, credential-safe telemetry.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ─────────── PORTS ─────────── -->
+<section id="ports">
+  <h2><span class="sec">§4</span>Seams, ports &amp; adapters — the two-adapter rule</h2>
+  <p class="lede">The strongest part of the design. 14 ports were found; 12 have both a production
+  adapter and a hand-written test fake — real seams by the skill's rule. Two fail it.</p>
+  <table>
+    <thead><tr><th>Port</th><th>Defined at</th><th>Production adapter</th><th>Test adapter</th><th style="width:210px">Seam status</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">TargetResolver</td><td class="mono">targets.py:197</td><td class="mono">TargetRegistry</td><td>test resolvers</td><td><span class="badge b-str">REAL — 2+</span></td></tr>
+      <tr><td class="mono">ManifestSource</td><td class="mono">manifests.py:129</td><td class="mono">JsonlManifestSource</td><td>in-memory sources</td><td><span class="badge b-str">REAL — 2+</span></td></tr>
+      <tr><td class="mono">RegistrationHook</td><td class="mono">submission.py:169</td><td>app-supplied</td><td>test hooks</td><td><span class="badge b-str">REAL</span></td></tr>
+      <tr><td class="mono">QueueLookup</td><td class="mono">enqueue_runtime.py:235</td><td>DBOS queue registry</td><td class="mono">_QueueLookup</td><td><span class="badge b-str">REAL — 2+</span></td></tr>
+      <tr><td class="mono">PhysicalEnqueueAdapter</td><td class="mono">enqueue_runtime.py:272</td><td class="mono">DbosEnqueueAdapter</td><td class="mono">_Adapter</td><td><span class="badge b-str">REAL — 2+</span></td></tr>
+      <tr><td class="mono">WorkflowObserver</td><td class="mono">enqueue_runtime.py:277</td><td class="mono">DbosWorkflowObserver</td><td class="mono">_Observer</td><td><span class="badge b-str">REAL — 2+</span></td></tr>
+      <tr><td class="mono">ClaimTransitionStore</td><td class="mono">enqueue_runtime.py:240</td><td class="mono">PostgresClaimTransitionStore</td><td class="mono">_Store</td><td><span class="badge b-str">REAL — 2+</span> <span class="badge b-med">bypassed at facades (F8)</span></td></tr>
+      <tr><td class="mono">RecoveryClaimTransitionStore</td><td class="mono">enqueue_runtime.py:262</td><td class="mono">PostgresClaimTransitionStore</td><td class="mono">_RecoveryStore</td><td><span class="badge b-str">REAL — 2+</span></td></tr>
+      <tr><td class="mono">WorkflowCanceller</td><td class="mono">cancellation.py:159</td><td>DBOS-backed (app layer)</td><td>fakes</td><td><span class="badge b-str">REAL</span></td></tr>
+      <tr><td class="mono">LifecycleObservationReader</td><td class="mono">reconciliation_runtime.py:172</td><td class="mono">DbosLifecycleReader</td><td class="mono">_StepReader</td><td><span class="badge b-str">REAL — 2+</span></td></tr>
+      <tr><td class="mono">WorkflowMetadataReader</td><td class="mono">reconciliation_runtime.py:214</td><td class="mono">DbosLifecycleReader</td><td class="mono">_WorkflowMetadataReader</td><td><span class="badge b-str">REAL — 2+</span></td></tr>
+      <tr><td class="mono">QueueHealthProbe</td><td class="mono">inspection.py:161</td><td>app-owned</td><td class="mono">_QueueHealth</td><td><span class="badge b-str">REAL</span></td></tr>
+      <tr><td class="mono">BundleIntegritySigner</td><td class="mono">publication.py:450 / export.py:158</td><td class="mono">OpenSslEd25519Signer</td><td>none — tests use the real OpenSSL signer</td><td><span class="badge b-med">SINGLE ADAPTER</span></td></tr>
+      <tr><td class="mono">remote destinations (unnamed)</td><td class="mono">export.py:300 — <span class="ref">Sequence[Any]</span></td><td class="mono">PostgresPublicationFence</td><td>none — <span class="ref">isinstance</span>-guarded</td><td><span class="badge b-high">HYPOTHETICAL (F3)</span></td></tr>
+    </tbody>
+  </table>
+  <p class="lede" style="margin-top:14px">Note the asymmetry: the signer's single adapter is arguably fine
+  (OpenSSL is cheap to run in tests, so no fake is needed — like Postgres, it behaves as
+  local-substitutable in practice). The unnamed <span class="ref">Sequence[Any]</span> destination seam
+  is not: it pretends to be polymorphic while a runtime <span class="ref">isinstance</span> check collapses
+  it to exactly one type.</p>
+</section>
+
+<!-- ─────────── DEPENDENCY CATEGORIES ─────────── -->
+<section id="deps">
+  <h2><span class="sec">§5</span>Dependency categories — textbook handling</h2>
+  <p class="lede">Measured against the skill's category table. This dimension is the repo's best.</p>
+  <table>
+    <thead><tr><th style="width:220px">Dependency</th><th style="width:170px">Skill category</th><th>How dr-platform handles it</th><th style="width:120px">Verdict</th></tr></thead>
+    <tbody>
+      <tr><td>Records, enums, manifests, identity math</td><td>In-process</td><td>Merged into vocabulary modules; no adapters, no needless seams. Validators run at construction.</td><td><span class="badge b-str">CORRECT</span></td></tr>
+      <tr><td>PostgreSQL</td><td>Local-substitutable</td><td>An injected <span class="ref">Engine</span> is the first parameter of essentially every function; never constructed inline. Tests run against a real local Postgres (<span class="ref">conftest.py</span>), CI runs a <span class="ref">postgres:16</span> service container and forbids skips. No DB port pollutes the interface.</td><td><span class="badge b-str">CORRECT</span></td></tr>
+      <tr><td>DuckDB</td><td>Local-substitutable</td><td>Real DuckDB in tests — correct — but <span class="ref">duckdb.connect()</span> is called inline at 6 sites with no substitutable factory. Acceptable per the category; the repetition is the smell, not the seam.</td><td><span class="badge b-med">MINOR</span></td></tr>
+      <tr><td>DBOS SDK</td><td>True external</td><td>Ports (<span class="ref">PhysicalEnqueueAdapter</span>, <span class="ref">LifecycleObservationReader</span>, <span class="ref">WorkflowCanceller</span>…) with hand-written fakes in tests; private-API shims quarantined in <span class="ref">dbos_config.py</span> by explicit design.</td><td><span class="badge b-str">CORRECT</span></td></tr>
+      <tr><td>Filesystem (JSONL sources)</td><td>True external</td><td>Behind the <span class="ref">ManifestSource</span> port; <span class="ref">JsonlManifestSource</span> is the production adapter, in-memory sources the test adapters.</td><td><span class="badge b-str">CORRECT</span></td></tr>
+      <tr><td>Clock &amp; randomness</td><td>—</td><td><span class="ref">now: datetime</span> is a required keyword on every write path; cancellation derives time from the database itself; wait loops inject <span class="ref">clock</span>/<span class="ref">sleeper</span> callables; jitter is <i>deterministic</i> (sha256), eliminating the randomness seam entirely.</td><td><span class="badge b-str">EXEMPLARY</span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ─────────── FINDINGS ─────────── -->
+<section id="findings">
+  <h2><span class="sec">§6</span>Findings</h2>
+  <p class="lede">Ordered by how much they undermine the skill's goals — leverage for callers,
+  locality for maintainers, testability through the interface.</p>
+
+  <div class="findings">
+
+  <div class="finding" id="f1">
+    <h3><span class="fid">F1</span>The package root is a 132-name flat namespace — a shallow front door on deep rooms <span class="badge b-high">HIGH</span></h3>
+    <p>The README promises a five-step flow (register → submit → reconcile/wait → inspect → cancel),
+    which needs perhaps 15–20 names. <span class="ref">__init__.py</span> exports 132, dominated by
+    <span class="ref">publication</span> (26), <span class="ref">backoff</span> (14), and
+    <span class="ref">export</span> (14). Depth is a property of the interface — and the package-level
+    interface is nearly as wide as the sum of its parts, so the leverage the deep cores earn is spent
+    at the door.</p>
+    <p>The same door is also <i>incomplete</i>: <span class="ref">submit()</span> accepts
+    <span class="ref">QueueLookup</span>, <span class="ref">PhysicalEnqueueAdapter</span>,
+    <span class="ref">WorkflowObserver</span>, and <span class="ref">LifecycleObservationReader</span>
+    parameters, yet none of those types are exported at the root — a caller who wants to inject must
+    reach into <span class="ref">dr_platform.enqueue_runtime</span> and
+    <span class="ref">dr_platform.reconciliation_runtime</span>. The root is simultaneously too wide
+    and too narrow.</p>
+    <div class="move"><b>Deepening move:</b> curate the root to the README's flow (the verbs plus their
+    option/result types and the ports the verbs accept); leave the rest importable from submodules.
+    The vocabulary contract test already guards <span class="ref">__all__</span>, so shrinking it is a
+    mechanical, test-enforced refactor.</div>
+  </div>
+
+  <div class="finding" id="f2">
+    <h3><span class="fid">F2</span>Tests cross below the interface, pervasively <span class="badge b-high">HIGH</span></h3>
+    <p>“The interface is the test surface” is the skill's sharpest rule, and it is the one this repo
+    breaks most. Submodule imports outnumber root-package imports roughly 5:1;
+    there are ~143 <span class="ref">monkeypatch</span>/<span class="ref">patch(</span> uses, many
+    swapping module-level functions of the module under test; and an estimated 60–70% of DB assertions
+    query the kernel's <i>private tables</i> directly rather than using the exported readers
+    (<span class="ref">inspect_operation</span>, <span class="ref">list_attempts</span>,
+    <span class="ref">health_report</span>) that exist precisely to be that seam. One test imports a
+    private exception class outright:</p>
+    <div class="codeblock"><div class="path">tests/test_publication.py:46 · tests/test_claims.py:451–462</div>
+<pre><code class="py">from dr_platform.publication import _StalePromotionError
+
+# ...and the dominant assertion pattern across the suite:
+with pg_engine.connect() as connection:
+    attempt_row = (
+        connection.execute(select(schema.item_attempts)).mappings().one()
+    )
+    claim_row = (
+        connection.execute(select(schema.enqueue_claims)).mappings().one()
+    )
+assert attempt_row["enqueue_state"] == "enqueued"
+assert claim_row["disposition"] == "outcome_recorded"</code></pre></div>
+    <p>Two caveats keep this from being worse than it looks: asserting on the <i>export destination's</i>
+    tables is legitimate (that output is the product), and the DBOS fakes assert behaviour at a real
+    seam. But per the skill, tests that must change when internals change are testing past the
+    interface — and most of these would.</p>
+    <div class="move"><b>Deepening move:</b> migrate internal-table asserts to the inspection readers;
+    where a fact is unreachable through any reader, treat that as an interface gap in
+    <span class="ref">inspection.py</span> rather than a reason to query the table. Then apply
+    “replace, don't layer”: delete the absorbed low-level tests.</div>
+  </div>
+
+  <div class="finding" id="f3">
+    <h3><span class="fid">F3</span>The export ↔ publication seam is drawn in the wrong place <span class="badge b-high">HIGH</span></h3>
+    <p><span class="ref">publication.py</span> is one deep class
+    (<span class="ref">PostgresPublicationFence</span>, ~2,500 lines) surrounded by ~24 shallow models,
+    signers, and free functions that all ride into the root namespace. Meanwhile
+    <span class="ref">export.py</span> contains two near-duplicate ~180-line publish skeletons
+    (<span class="ref">_publish_kernel_remotes</span> / <span class="ref">_publish_application_remotes</span>:
+    same ensure_schema → acquire_lease → stage → promote → result shape), both reaching back into
+    publication via <span class="ref"># noqa: PLC0415 -- import cycle</span> lazy imports. The
+    destination seam itself is untyped:</p>
+    <div class="codeblock"><div class="path">src/dr_platform/export.py:1778–1782 — a Sequence[Any] seam collapsed at runtime</div>
+<pre><code class="py">    for fence in destinations:
+        if not isinstance(fence, PostgresPublicationFence):
+            raise TypeError(
+                "remote destinations must be PostgresPublicationFence"
+            )</code></pre></div>
+    <p>Physical layout also leaks across the seam: callers must construct
+    <span class="ref">RemoteBundleMember.table_name</span> values that exactly match
+    <span class="ref">fence.stage_table_name(...)</span> or <span class="ref">prepare_stage</span>
+    rejects them — the fence's internal naming scheme is part of export's code. By the deletion test,
+    the duplicated skeletons are complexity that would reappear in every caller; they belong inside
+    the module.</p>
+    <div class="move"><b>Deepening move:</b> define a named destination port (the methods the duplicated
+    skeletons already duck-type on), move the publish skeleton behind it once, and make table naming an
+    internal detail the fence resolves itself. The import cycle disappears with the seam redrawn.</div>
+  </div>
+
+  <div class="finding" id="f4">
+    <h3><span class="fid">F4</span>submit() is a 15-parameter door, duplicated verbatim in submit_jsonl() <span class="badge b-med">MEDIUM</span></h3>
+    <p>The behaviour behind it is genuinely deep, but the interface is not small — 8 of the 15 are
+    optional injected collaborators, and <span class="ref">jsonl.py</span> re-declares nearly the whole
+    list, so every widening happens twice. The <span class="ref">noqa</span> waiver acknowledges the
+    shape:</p>
+    <div class="codeblock"><div class="path">src/dr_platform/submission.py:354–369</div>
+<pre><code class="py">def submit(  # noqa: PLR0913 -- explicit public facade contract
+    manifest: OperationManifest,
+    source: ManifestSource,
+    *,
+    engine: Engine,
+    resolver: TargetResolver,
+    spec: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    options: SubmitOptions | None = None,
+    source_application_version: str = SOURCE_APPLICATION_VERSION_DEFAULT,
+    schema: PlatformSchema | None = None,
+    queue_lookup: QueueLookup | None = None,
+    enqueue_adapter: PhysicalEnqueueAdapter | None = None,
+    workflow_observer: WorkflowObserver | None = None,
+    reconciliation_reader: LifecycleObservationReader | None = None,
+) -> SubmitResult:</code></pre></div>
+    <p>The repo already knows the fix — <span class="ref">export()</span> bundles its six collaborators
+    into <span class="ref">ExportReconciliationDependencies</span>, a single frozen dataclass with its
+    own invariant check. Applying the same shape here collapses the door to ~5 parameters and
+    de-duplicates <span class="ref">submit_jsonl</span> for free.</p>
+    <div class="move"><b>Deepening move:</b> a <span class="ref">KernelRuntime</span>-style dependencies
+    object (engine, resolver, schema, injected ports) passed to submit / reconcile / cancel / export
+    alike — one thing to learn, constructed once.</div>
+  </div>
+
+  <div class="finding" id="f5">
+    <h3><span class="fid">F5</span>ExecutionTarget pushes an 18-field, 6-callable construction burden onto every application <span class="badge b-med">MEDIUM</span></h3>
+    <div class="codeblock"><div class="path">src/dr_platform/targets.py:103–131 (abridged by two config lines)</div>
+<pre><code class="py">class ExecutionTarget(BaseModel):
+    """Runtime-only behavior registered under an immutable target reference."""
+
+    ref: ExecutionTargetRef
+    queue_name: NonEmptyStr
+    workflow_role: NonEmptyStr
+    managed_workflow_name: NonEmptyStr
+    managed_workflow_version: PositiveInt
+    topology: WorkflowTopology = WorkflowTopology.TOP_LEVEL_ONLY
+    argument_recipe_version: PositiveInt
+    recipe_envelope_version: PositiveInt = EXECUTION_RECIPE_FORMAT_VERSION
+    classifier_version: PositiveInt
+    registration_hook_name: NonEmptyStr | None = None
+    registration_hook_version: PositiveInt | None = None
+    workflow: WorkflowCallable = Field(exclude=True)
+    execution_for: ExecutionIdentityCallable = Field(exclude=True)
+    args_for: ArgumentsCallable = Field(exclude=True)
+    recipe_for: RecipeCallable = Field(exclude=True)
+    classify_error: ErrorClassifier = Field(exclude=True)
+    registration_hook: RegistrationHook | None = Field(default=None, exclude=True)</code></pre></div>
+    <p>The caller supplies five behaviours plus a hook and must keep them consistent with a separate
+    <span class="ref">TargetContractDeclaration</span> whose digest must match
+    <span class="ref">ref.target_contract_digest</span>. Validators do catch inconsistency — but only
+    after the caller has assembled all 18 fields. The interface includes everything a caller must know,
+    and here that is a lot.</p>
+    <div class="move"><b>Deepening move:</b> a builder or <span class="ref">define_target(...)</span>
+    constructor that derives the declaration and digest from the supplied callables, so consistency is
+    produced rather than checked.</div>
+  </div>
+
+  <div class="finding" id="f6">
+    <h3><span class="fid">F6</span>PostgresPublicationFence.promote() exposes staging internals through 11 coupled parameters <span class="badge b-med">MEDIUM</span></h3>
+    <div class="codeblock"><div class="path">src/dr_platform/publication.py:1224–1238</div>
+<pre><code class="py">    def promote(  # noqa: PLR0911 -- legacy and operation terminal outcomes
+        self,
+        *,
+        bundle_key: str,
+        run_id: str,
+        fencing_token: int,
+        snapshot_seq: int,
+        bundle_id: str,
+        cursors: Mapping[str, int],
+        source_coordinates: tuple[SourceCoordinate, ...],
+        source_families: tuple[Literal["application", "dbos"], ...],
+        stage: Callable[..., RemoteBundleManifest],
+        operation_identity: PublicationOperationIdentity | None = None,
+        stage_plan: RemoteBundleManifest | None = None,
+    ) -> RemotePromotionResult:</code></pre></div>
+    <p>Hidden couplings ride in the signature: if <span class="ref">operation_identity</span> is set,
+    <span class="ref">stage_plan</span> must be non-None and <span class="ref">attempt_id</span> must
+    equal <span class="ref">run_id</span>. The caller also supplies the <span class="ref">stage</span>
+    callback — the fence's own staging step, externalized. Combined with the required call order
+    (<span class="ref">ensure_schema → acquire_lease → prepare_stage → promote</span>), a large share of
+    the fence's internal protocol is part of its interface.</p>
+    <div class="move"><b>Deepening move:</b> make <span class="ref">prepare_stage</span> return a token
+    that <span class="ref">promote</span> consumes, folding the mutually-dependent optionals and the
+    stage callback into state the fence already owns.</div>
+  </div>
+
+  <div class="finding" id="f7">
+    <h3><span class="fid">F7</span>A correctness-critical lock constant is shared across the submission ↔ claims seam <span class="badge b-med">MEDIUM</span></h3>
+    <div class="codeblock"><div class="path">src/dr_platform/claims.py:32</div>
+<pre><code class="py">from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY</code></pre></div>
+    <p>Both modules also carry near-identical private
+    <span class="ref">_acquire_export_writer_lock</span> helpers. Advisory-lock correctness now depends
+    on two modules independently agreeing on a key and an acquisition pattern — the opposite of
+    locality: a change to the barrier protocol must be verified in two places (three counting
+    <span class="ref">export.py</span>'s reader side).</p>
+    <div class="move"><b>Deepening move:</b> one internal module owns the barrier (key + acquire/release
+    functions); submission, claims, and export call it. The invariant then lives where it can be fixed
+    once.</div>
+  </div>
+
+  <div class="finding" id="f8">
+    <h3><span class="fid">F8</span>The enqueue page facades bypass their own ports <span class="badge b-low">LOW–MED</span></h3>
+    <div class="codeblock"><div class="path">src/dr_platform/enqueue_runtime.py:355–369 and 409–424</div>
+<pre><code class="py">def execute_enqueue_claim(
+    *,
+    claim: EnqueueClaimRecord,
+    call: PreparedEnqueueCall,
+    store: ClaimTransitionStore,
+    adapter: PhysicalEnqueueAdapter | None = None,
+) -> EnqueueClaimExecutionResult:
+    """Cross DBOS only after the exact Claim's call-start CAS commits."""
+    _validate_claim_call(claim=claim, call=call)
+    if not store.mark_enqueue_call_started(claim=claim):
+        return EnqueueClaimExecutionResult(
+            disposition=EnqueueClaimExecutionDisposition.LOST_AUTHORITY,
+        )
+
+    runtime = adapter or DbosEnqueueAdapter()
+
+# ...while one level up, the page facades hardwire the store:
+    from dr_platform.claims import (  # noqa: PLC0415 -- avoids module cycle
+        PostgresClaimTransitionStore,
+        claim_pending_attempts,
+    )
+    ...
+    store = PostgresClaimTransitionStore(engine, schema=schema)</code></pre></div>
+    <p>The inner layer honors the <span class="ref">ClaimTransitionStore</span> port (which has two real
+    adapters), but the three near-identical page facades construct the Postgres store inline and offer
+    no way to substitute it — a two-adapter seam reduced to a single-adapter path at the level callers
+    actually use. Importing the module also imports the DBOS SDK unconditionally.</p>
+    <div class="move"><b>Deepening move:</b> either accept the store at the facades, or — since the three
+    facades share their whole skeleton — collapse them into one parameterized page runner where the
+    wiring lives once.</div>
+  </div>
+
+  <div class="finding" id="f9">
+    <h3><span class="fid">F9</span>backoff.py is a wide flat bag — 14 root exports over 338 lines <span class="badge b-low">LOW</span></h3>
+    <div class="codeblock"><div class="path">src/dr_platform/backoff.py:113–128 — representative one-statement wrappers</div>
+<pre><code class="py">def throttle_delay_seconds(
+    connection: Connection,
+    *,
+    throttle_key: str,
+    now: datetime,
+    schema: PlatformSchema,
+) -> float:
+    return delay_until_unblocked_seconds(
+        load_throttle_backoff_state(
+            connection, throttle_key=throttle_key, schema=schema
+        ),
+        now=now,
+    )</code></pre></div>
+    <p>No leaked privates — each export is a genuine operation on the throttle table, and the truly
+    internal helpers stay internal. But the interface is nearly as large as the behaviour: callers must
+    learn the throttle-key scheme and the block-vs-hold distinction across 12 functions, plus a
+    redundant alias (<span class="ref">ThrottleBackoffState = ThrottleState</span>). A shallow module
+    that is at least honestly scoped.</p>
+    <div class="move"><b>Deepening move:</b> if callers typically compose these (record → compute →
+    hold), a <span class="ref">ThrottleGate</span> with 3–4 methods would absorb the composition;
+    otherwise, at minimum drop most of them from the package root (see F1).</div>
+  </div>
+
+  <div class="finding" id="f10">
+    <h3><span class="fid">F10</span>Module cycles held together by lazy imports, and privates crossing seams <span class="badge b-low">LOW</span></h3>
+    <div class="codeblock"><div class="path">reconciliation_runtime.py:384 · reconciliation.py:447 · cancellation.py:39</div>
+<pre><code class="py">    from dr_platform.reconciliation import (  # noqa: PLC0415 -- cycle boundary
+        apply_reconciliation_observations,
+        load_missing_reobservation_page,
+        load_reconciliation_page,
+    )
+# ...and in the other direction:
+    from dr_platform.reconciliation_runtime import (  # noqa: PLC0415
+        ReconciliationCandidate,
+    )
+# ...and a private helper crossing a module seam:
+from dr_platform.reconciliation import _refresh_operation_lifecycle</code></pre></div>
+    <p>The reconciliation split itself is a <i>real</i> seam — persistence core vs DBOS-SDK side, same
+    quarantine intent as <span class="ref">dbos_config.py</span>, and public consumers touch only one
+    side. But the bidirectional lazy imports show the cut isn't clean, and
+    <span class="ref">cancellation.py</span> importing an underscore-prefixed function makes
+    reconciliation's internals part of its de-facto interface. Same pattern at
+    submission → reconciliation_runtime (the hidden enqueue hop) and export ↔ publication (F3).</p>
+    <div class="move"><b>Deepening move:</b> promote the genuinely shared pieces
+    (<span class="ref">ReconciliationCandidate</span>, <span class="ref">_refresh_operation_lifecycle</span>)
+    into a leaf module both sides import — the <span class="ref">cancellation_truth.py</span> pattern,
+    which already proves the shape works here.</div>
+  </div>
+
+  </div>
+</section>
+
+<!-- ─────────── STRENGTHS ─────────── -->
+<section id="strengths">
+  <h2><span class="sec">§7</span>What's working — patterns worth protecting</h2>
+  <p class="lede">These are the places where the repo doesn't just comply with the skill but
+  illustrates it. Several would make good excerpts <i>for</i> the skill doc.</p>
+  <div class="strengths">
+    <div class="strength"><b>Two-adapter discipline is the norm, not the exception</b>
+      12 of 14 ports have production + hand-written test adapters — real seams by the skill's own rule.
+      The fakes are small classes recording events, not mock-library constructs, so tests read as
+      behaviour at the seam.</div>
+    <div class="strength"><b>DBOS uncertainty reconciliation is depth done right</b>
+      <span class="ref">DbosEnqueueAdapter._exception_outcome</span> (enqueue_runtime.py:696) turns
+      "enqueue threw" into an authoritative-status re-lookup with race classification — a page of
+      hard-won distributed-systems knowledge callers never see.</div>
+    <div class="strength"><b>The vendor quarantine is explicit and enforced by shape</b>
+      <span class="ref">dbos_config.py</span> declares itself the single home of
+      <span class="ref">dbos._private</span> shims and injects its initializers; the
+      reconciliation split isolates the SDK the same way. When DBOS breaks compatibility, the blast
+      radius is one small module.</div>
+    <div class="strength"><b>Invalid states are unconstructible</b>
+      <span class="ref">records.py</span> validators enforce cross-field durable invariants
+      (retry provenance, enqueue/priority coupling, cancellation-origin coupling) at construction.
+      The interface is field names; the implementation is hundreds of lines of invariant law.</div>
+    <div class="strength"><b>cancellation_truth.py is the extraction pattern to copy</b>
+      Pure read-only predicates, four consumers, zero back-imports, not exported at the root.
+      Exactly what F7 and F10's shared pieces should become.</div>
+    <div class="strength"><b>The vocabulary contract test guards the interface itself</b>
+      <span class="ref">test_platform_v6_vocabulary.py</span> pins closed enums, frozen strict models,
+      required exports, and — unusually — <i>removed</i> legacy exports that must stay gone. It is the
+      one test that truly treats <span class="ref">import dr_platform</span> as the seam, and the lever
+      that makes F1's cleanup safe.</div>
+    <div class="strength"><b>Dangerous orderings are hidden behind facades</b>
+      <span class="ref">cancel_operation</span> commits durable intent before any physical DBOS cancel;
+      <span class="ref">reconcile</span> sequences recovery → observe → persist → enqueue within a page
+      budget. Callers get one verb; the load-bearing order stays internal.</div>
+    <div class="strength"><b>Time and randomness never became test problems</b>
+      <span class="ref">now</span> is a required parameter or derived from the database; wait loops
+      inject <span class="ref">clock</span>/<span class="ref">sleeper</span>; jitter is deterministic
+      via sha256. Whole categories of seams other codebases need simply don't exist here.</div>
+    <div class="strength"><b>CI closes the escape hatches</b>
+      A real <span class="ref">postgres:16</span> service container, connectivity verified before the
+      run, and <span class="ref">check_skip_budget.py</span> failing the build on any unbudgeted skip —
+      including "zero tests ran." The local-substitutable strategy can't silently degrade.</div>
+    <div class="strength"><b>No module-level mutable state, anywhere</b>
+      Every module-level binding across the kernel is an immutable constant. Combined with frozen
+      models, locality of state is structural, not conventional.</div>
+  </div>
+</section>
+
+<!-- ─────────── RECOMMENDATIONS ─────────── -->
+<section id="recs">
+  <h2><span class="sec">§8</span>Recommended moves, ranked by leverage</h2>
+  <ol class="recs">
+    <li><b>Curate the root interface to the README's flow (F1).</b> ~15–20 names: the verbs
+      (<span class="ref">submit</span>, <span class="ref">reconcile</span>, <span class="ref">wait_operation</span>,
+      <span class="ref">inspect_*</span>, <span class="ref">cancel_operation</span>, <span class="ref">export</span>,
+      <span class="ref">request_next_attempt</span>), their option/result types, and the ports those verbs
+      accept. Update the vocabulary contract test in the same change — it's the enforcement mechanism.</li>
+    <li><b>Point the test suite at the interface (F2).</b> Replace private-table asserts with the
+      inspection readers; treat unreachable facts as gaps in <span class="ref">inspection.py</span>;
+      delete absorbed tests per "replace, don't layer." This is the change that makes every future
+      internal refactor cheap.</li>
+    <li><b>Redraw the export ↔ publication seam (F3).</b> Name the destination port the duplicated
+      skeletons already duck-type on, move the publish skeleton behind it once, internalize
+      <span class="ref">stage_table_name</span>. The import cycle and the
+      <span class="ref">isinstance</span> guard both dissolve.</li>
+    <li><b>Bundle the facade collaborators (F4, F8).</b> One dependencies object in the style of
+      <span class="ref">ExportReconciliationDependencies</span>, shared by submit / reconcile / cancel;
+      accept the store at the enqueue page facades or merge them into one runner.</li>
+    <li><b>Give the export barrier one owner (F7).</b> A leaf module holding the advisory key and its
+      acquire/release helpers, imported by submission, claims, and export.</li>
+    <li><b>Smaller shape fixes as they're touched (F5, F6, F9, F10).</b> A target builder that derives
+      declarations; a stage token consumed by <span class="ref">promote</span>; a
+      <span class="ref">ThrottleGate</span> if backoff calls actually compose; promote shared
+      reconciliation pieces into a leaf module.</li>
+  </ol>
+</section>
+
+<!-- ─────────── METHOD ─────────── -->
+<footer id="method">
+  <p><b>Method.</b> Criteria taken verbatim from
+  <span class="ref">../dotfiles/agents/skills/codebase-design/SKILL.md</span> (deep modules, seams,
+  ports/adapters, dependency categories, interface-as-test-surface). Four parallel analyses covered the
+  submission pipeline, publication/export, reconciliation/cancellation/vocabulary, and the test suite;
+  all quoted code and line numbers were re-verified against the working tree at commit
+  <span class="ref">3820729</span> on 2026-07-13. Counts: 132 <span class="ref">__all__</span> entries
+  (AST-derived); root exports per module from <span class="ref">__init__.py</span> imports; line counts
+  via <span class="ref">wc -l</span>; test-seam ratios via grep across <span class="ref">tests/</span>
+  and <span class="ref">tests/contracts/</span>. Generated as a single-use reference document.</p>
+</footer>
+
+</main>
+</div>
+
+<script>
+/* Minimal Python syntax highlighter for the embedded excerpts (no network). */
+(function(){
+  var KW = new Set(("def class return if else elif for while with as import from raise try except "+
+    "finally lambda yield not and or in is pass assert del global nonlocal async await match case").split(" "));
+  var CONST = new Set(["None","True","False","self","cls"]);
+  var re = /("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|#[^\n]*|@[\w.]+|\b\d[\d_.]*\b|\b[A-Za-z_]\w*\b)/g;
+  function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+  document.querySelectorAll("pre code.py").forEach(function(el){
+    var src = el.textContent;
+    var out = src.replace(re, function(m){
+      if (m[0]==="#") return '\x01c\x02'+m+'\x03';
+      if (m[0]==='"'||m[0]==="'") return '\x01s\x02'+m+'\x03';
+      if (m[0]==="@") return '\x01d\x02'+m+'\x03';
+      if (/^\d/.test(m)) return '\x01n\x02'+m+'\x03';
+      if (KW.has(m)) return '\x01k\x02'+m+'\x03';
+      if (CONST.has(m)) return '\x01b\x02'+m+'\x03';
+      return m;
+    });
+    out = esc(out)
+      .replace(/\x01(\w)\x02/g,'<span class="tok-$1">')
+      .replace(/\x03/g,'</span>');
+    out = out.replace(/(<span class="tok-k">(?:def|class)<\/span>)(\s+)([A-Za-z_]\w*)/g,
+      '$1$2<span class="tok-f">$3</span>');
+    el.innerHTML = out;
+  });
+})();
+</script>
+</body>
+</html>

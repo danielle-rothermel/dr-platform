@@ -1,0 +1,1173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dr-platform · Distributed-Systems Playground</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --card:#ffffff; --ink:#1b2430; --muted:#5b6572; --line:#e3e6ea;
+    --deep:#15803d; --deep-bg:#f0faf3;
+    --mixed:#b45309; --mixed-bg:#fdf7ec;
+    --shallow:#b91c1c; --shallow-bg:#fdf1f1;
+    --vocab:#1d4ed8; --vocab-bg:#f0f4fe;
+    --infra:#7c3aed; --infra-bg:#f7f3fe;
+    --ext:#64748b; --ext-bg:#f5f7f9;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;}
+  .frame{max-width:2500px;margin:0 auto;display:grid;grid-template-columns:288px minmax(0,1fr);gap:0;}
+  nav{position:sticky;top:0;height:100vh;overflow-y:auto;padding:28px 20px 40px 28px;
+      border-right:1px solid var(--line);background:var(--card);}
+  nav .brand{font-weight:700;font-size:17px;margin-bottom:2px}
+  nav .sub{font-size:12px;color:var(--muted);margin-bottom:20px}
+  nav a{display:block;color:var(--ink);text-decoration:none;font-size:13.5px;
+        padding:5px 10px;border-radius:6px;margin:1px 0}
+  nav a:hover{background:#eef1f5}
+  nav .g{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+         margin:16px 0 4px;font-weight:600}
+  nav .f{padding-left:22px;font-size:12.5px;color:#3c4654}
+  main{padding:34px 44px 120px;min-width:0}
+  header.page h1{font-size:30px;margin:0 0 6px;letter-spacing:-.01em}
+  header.page .meta{color:var(--muted);font-size:13.5px}
+  header.page .meta code{font-family:var(--mono);font-size:12.5px;background:#eef1f5;padding:1px 6px;border-radius:4px}
+  section{margin-top:46px}
+  h2{font-size:21px;margin:0 0 4px;letter-spacing:-.01em}
+  h2 .sec{color:var(--muted);font-weight:600;margin-right:10px;font-variant-numeric:tabular-nums}
+  h3{font-size:16px;margin:0 0 8px}
+  .lede{color:var(--muted);max-width:1200px;margin:0 0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 24px}
+  .ref{font-family:var(--mono);font-size:12px;background:#eef1f5;padding:1px 6px;border-radius:4px;white-space:nowrap}
+  .k{color:var(--vocab);font-weight:600}
+  .badge{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.05em;border-radius:999px;padding:2px 10px;vertical-align:2px}
+  .b-ok{background:var(--deep-bg);color:var(--deep);border:1px solid #bbe3c8}
+  .b-warn{background:var(--mixed-bg);color:var(--mixed);border:1px solid #f0dcb6}
+  .b-risk{background:var(--shallow-bg);color:var(--shallow);border:1px solid #f2c6c6}
+  .b-info{background:var(--vocab-bg);color:var(--vocab);border:1px solid #c5d4f8}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;background:var(--card);
+        border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  th{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+     text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);background:#fafbfc}
+  td{padding:8px 14px;border-bottom:1px solid #eef0f3;vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.mono,.mono{font-family:var(--mono);font-size:12.5px}
+  .mapwrap{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 10px 8px;overflow-x:auto}
+  svg text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+  .legend{display:flex;gap:22px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin:10px 8px 4px}
+  .legend span{display:inline-flex;align-items:center;gap:7px}
+  .sw{width:14px;height:14px;border-radius:4px;display:inline-block;border:1.5px solid}
+
+  /* state machines */
+  .machines{display:grid;grid-template-columns:repeat(auto-fit,minmax(560px,1fr));gap:18px}
+  .machine{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px 10px;min-width:0}
+  .machine h3 .ref{font-size:11px}
+  .machine svg{width:100%;height:auto;display:block}
+  .mnode{cursor:pointer}
+  .mnode rect{fill:#f5f7f9;stroke:#94a3b8;stroke-width:1.4;rx:8}
+  .mnode.term rect{fill:#f0faf3;stroke:#15803d}
+  .mnode.err rect{fill:#fdf1f1;stroke:#b91c1c}
+  .mnode.hot rect{fill:#fdf7ec;stroke:#b45309}
+  .mnode.sel rect{stroke-width:3}
+  .mnode text{font-size:12px;font-weight:600;fill:#1b2430;pointer-events:none}
+  .medge{stroke:#94a3b8;stroke-width:1.5;fill:none}
+  .melabel{font-size:10.5px;fill:#5b6572}
+  .mdetail{border-top:1px solid var(--line);margin-top:8px;padding:10px 2px 6px;font-size:13px;min-height:74px;color:var(--muted)}
+  .mdetail b{color:var(--ink)}
+
+  /* ══════ scenario player ══════ */
+  .player{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px 20px}
+  .scpick{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+  .scpick button{border:1px solid var(--line);background:#fafbfc;border-radius:999px;padding:6px 14px;
+      font-size:13px;font-weight:600;cursor:pointer;color:#3c4654}
+  .scpick button:hover{background:#eef1f5}
+  .scpick button.on{background:#1b2430;color:#fff;border-color:#1b2430}
+  .controls{display:flex;align-items:center;gap:10px;margin:4px 0 14px}
+  .controls button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 16px;
+      font-size:13.5px;font-weight:600;cursor:pointer}
+  .controls button:hover{background:#eef1f5}
+  .controls button.primary{background:#1b2430;color:#fff;border-color:#1b2430}
+  .controls button:disabled{opacity:.4;cursor:default}
+  .controls .pos{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;margin-left:4px}
+  .stagegrid{display:grid;grid-template-columns:minmax(430px,1.05fr) minmax(0,1.6fr);gap:18px;align-items:start}
+  @media(max-width:1500px){.stagegrid{grid-template-columns:1fr}}
+  .narr{border:1px solid var(--line);border-left:5px solid var(--vocab);background:var(--vocab-bg);
+      border-radius:10px;padding:12px 16px;font-size:14px;margin-bottom:12px;min-height:66px}
+  .narr .st{font-weight:700;display:block;margin-bottom:3px}
+  .actors{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+  .actor{display:inline-flex;align-items:center;gap:6px;border-radius:999px;border:1.5px solid var(--line);
+      padding:3px 12px;font-size:12.5px;font-weight:600;color:var(--muted);background:#fafbfc;transition:all .15s}
+  .actor .dot{width:9px;height:9px;border-radius:50%;background:#cbd2da}
+  .actor.lit{color:var(--ink);background:#fff;box-shadow:0 1px 4px rgba(20,30,50,.12)}
+  .evlog{border:1px solid var(--line);border-radius:10px;background:#fdfdfe;max-height:430px;overflow-y:auto;padding:6px 0}
+  .ev{display:flex;gap:10px;align-items:baseline;padding:5px 14px;font-size:13px;opacity:.5}
+  .ev.cur{opacity:1;background:#f5f8ff}
+  .ev .who{flex:0 0 auto;font-size:11px;font-weight:700;border-radius:5px;padding:1px 8px;color:#fff}
+  .ev .txt{min-width:0}
+  .ev .txt code{font-family:var(--mono);font-size:11.5px;background:#eef1f5;padding:0 5px;border-radius:4px}
+  .lockbar{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+  .lock{border:1.5px dashed #cbd2da;border-radius:8px;padding:5px 12px;font-size:12px;color:var(--muted);background:#fafbfc}
+  .lock b{font-family:var(--mono);font-size:11.5px;font-weight:600}
+  .lock.held{border-style:solid;color:var(--ink)}
+  .lock.held.sh{border-color:var(--deep);background:var(--deep-bg)}
+  .lock.held.ex{border-color:var(--shallow);background:var(--shallow-bg)}
+  .lock.held.wf{border-color:var(--infra);background:var(--infra-bg)}
+  .lock.held.row{border-color:var(--vocab);background:var(--vocab-bg)}
+  .dbtables h4{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 6px}
+  .dbtables h4:first-child{margin-top:0}
+  .dbtables table{font-size:12.5px}
+  .dbtables td,.dbtables th{padding:5px 10px}
+  .dbtables td{font-family:var(--mono);font-size:11.8px;white-space:nowrap}
+  td.chg{background:#fff3d6;border-radius:4px;animation:flash .5s}
+  @keyframes flash{from{background:#ffe29a}}
+  .pill{display:inline-block;border-radius:5px;padding:0 7px;font-weight:600}
+  .pv-pending,.pv-not_started,.pv-registering,.pv-planned{background:#eef1f5;color:#5b6572}
+  .pv-claiming,.pv-claimed,.pv-enqueuing,.pv-staging,.pv-call_started,.pv-active,.pv-running{background:var(--vocab-bg);color:var(--vocab)}
+  .pv-enqueued,.pv-succeeded,.pv-outcome_recorded,.pv-inserted,.pv-promoted,.pv-workflow_already_present{background:var(--deep-bg);color:var(--deep)}
+  .pv-enqueue_error,.pv-error,.pv-failed,.pv-invalidated,.pv-missing,.pv-recovery_exhausted{background:var(--shallow-bg);color:var(--shallow)}
+  .pv-cancel_requested,.pv-cancelling,.pv-expired,.pv-replaced,.pv-pending_comp,.pv-superseded,.pv-partial{background:var(--mixed-bg);color:var(--mixed)}
+  .pv-cancelled,.pv-skipped_shared,.pv-observed_terminal,.pv-dbos_cancelled{background:var(--infra-bg);color:var(--infra)}
+
+  /* races + concerns */
+  .races{display:grid;grid-template-columns:repeat(auto-fit,minmax(560px,1fr));gap:16px}
+  .race{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 20px;min-width:0}
+  .race h3{font-size:14.5px;margin-bottom:6px}
+  .race p{font-size:13.5px;margin:6px 0}
+  .race .win{border-left:3px solid var(--shallow);background:var(--shallow-bg);padding:7px 12px;border-radius:0 8px 8px 0;font-size:13px;margin:8px 0}
+  .race .fix{border-left:3px solid var(--deep);background:var(--deep-bg);padding:7px 12px;border-radius:0 8px 8px 0;font-size:13px;margin:8px 0}
+  .race .fix b{color:var(--deep)} .race .win b{color:var(--shallow)}
+  .concerns{display:grid;grid-template-columns:repeat(auto-fit,minmax(680px,1fr));gap:18px}
+  .concern{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--mixed);border-radius:12px;padding:18px 22px;min-width:0}
+  .concern.red{border-left-color:var(--shallow)}
+  .concern h3{font-size:15.5px}
+  .concern p{font-size:13.5px;margin:7px 0}
+  .concern .relief{border-left:3px solid var(--vocab);background:var(--vocab-bg);padding:7px 12px;border-radius:0 8px 8px 0;font-size:13px;margin-top:10px}
+  .concern svg{display:block;margin:10px 0 4px;max-width:100%}
+  footer{margin-top:60px;color:var(--muted);font-size:12.5px;border-top:1px solid var(--line);padding-top:16px}
+</style>
+</head>
+<body>
+<div class="frame">
+
+<nav>
+  <div class="brand">dr-platform</div>
+  <div class="sub">Distributed-systems playground<br>2026-07-13</div>
+  <a href="#map">§1 The machine at a glance</a>
+  <a href="#machines">§2 Three state machines</a>
+  <a href="#player">§3 Scenario player</a>
+  <div class="g">§4 Race gallery</div>
+  <a class="f" href="#races">Every window &amp; its lock</a>
+  <a href="#locks">§5 The lock ledger</a>
+  <div class="g">§6 Concerns</div>
+  <a class="f" href="#c1">C1 · Global claim funnel</a>
+  <a class="f" href="#c2">C2 · Export stalls all writers</a>
+  <a class="f" href="#c3">C3 · O(N²) rollups</a>
+  <a class="f" href="#c4">C4 · Throttle isn't wired in</a>
+  <a class="f" href="#c5">C5 · No retry pacing</a>
+  <a class="f" href="#c6">C6 · Hook-vs-lease livelock</a>
+  <a href="#method">Method</a>
+</nav>
+
+<main>
+
+<header class="page">
+  <h1>How <span style="font-family:var(--mono)">dr-platform</span> lets many workers write one truth</h1>
+  <div class="meta">
+    An interactive tour of the kernel's submission, enqueue, worker, reconciliation, cancellation, and export
+    flows — the race windows each one opens, and the exact mechanism that closes each window.
+    Built from a full read of <code>src/dr_platform/</code>; every claim cites a file. Companion to the
+    <a href="codebase-design-review.html">deep-modules design review</a>.
+  </div>
+</header>
+
+<!-- ═══════════ §1 MAP ═══════════ -->
+<section id="map">
+  <h2><span class="sec">§1</span>The machine at a glance — every write funnels through claims, every read through cuts</h2>
+  <p class="lede">The kernel's core bet: <span class="k">Attempts and Claims are append-only history</span>, never mutable
+  work slots. A worker never "takes a job" — it appends a leased <span class="k">Claim</span>, commits a
+  <span class="k">call-start fact</span> before touching DBOS, and records the outcome with a compare-and-set.
+  Anything uncertain stays uncertain until DBOS is <span class="k">observed authoritatively</span>. Consumers see only
+  the numbered flow below; everything in the middle band is what they don't have to think about.</p>
+  <div class="mapwrap">
+  <svg viewBox="0 0 2210 640" width="100%" style="min-width:1700px">
+    <defs>
+      <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+      <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#b45309"/></marker>
+    </defs>
+    <style>
+      .band{fill:#f8f9fb;stroke:#eceef2}
+      .bl{font-size:11px;letter-spacing:.09em;fill:#8a93a0;font-weight:700}
+      .bx{rx:9;stroke-width:1.6}
+      .okB{fill:#f0faf3;stroke:#15803d}.blB{fill:#f0f4fe;stroke:#1d4ed8}
+      .amB{fill:#fdf7ec;stroke:#b45309}.puB{fill:#f7f3fe;stroke:#7c3aed}
+      .exB{fill:#f5f7f9;stroke:#94a3b8;stroke-dasharray:5 4}
+      .t1{font-size:13.5px;font-weight:700;fill:#1b2430}
+      .t2{font-size:11.5px;fill:#5b6572}
+      .fl{stroke:#64748b;stroke-width:1.7;fill:none}
+      .fl2{stroke:#b45309;stroke-width:1.7;fill:none;stroke-dasharray:6 5}
+      .fll{font-size:11.5px;fill:#475569;font-weight:600}
+      .fl2l{font-size:11.5px;fill:#b45309;font-weight:600}
+      .num{font-size:12px;font-weight:800;fill:#fff}
+    </style>
+
+    <rect class="band" x="8" y="8" width="2194" height="96" rx="10"/>
+    <text class="bl" x="22" y="26">CONSUMER — WHAT AN APPLICATION ACTUALLY CALLS</text>
+    <rect class="band" x="8" y="118" width="2194" height="240" rx="10"/>
+    <text class="bl" x="22" y="136">KERNEL WRITE PATHS — WHERE THE RACES ARE FOUGHT (any process may run any of these, concurrently)</text>
+    <rect class="band" x="8" y="372" width="2194" height="120" rx="10"/>
+    <text class="bl" x="22" y="390">ONE POSTGRES TRUTH — APPEND-ONLY LINEAGE + CHECK-CONSTRAINED STATES (db/schema.py)</text>
+    <rect class="band" x="8" y="506" width="2194" height="112" rx="10"/>
+    <text class="bl" x="22" y="524">OUTSIDE THE KERNEL</text>
+
+    <!-- consumer band -->
+    <g><circle cx="58" cy="66" r="11" fill="#1b2430"/><text class="num" x="54" y="70">1</text></g>
+    <rect class="bx blB" x="78" y="40" width="270" height="52"/>
+    <text class="t1" x="92" y="62">prepare_manifest → submit()</text>
+    <text class="t2" x="92" y="80">freeze identity, register, enqueue</text>
+    <g><circle cx="392" cy="66" r="11" fill="#1b2430"/><text class="num" x="388" y="70">2</text></g>
+    <rect class="bx blB" x="412" y="40" width="300" height="52"/>
+    <text class="t1" x="426" y="62">reconcile() / wait_operation()</text>
+    <text class="t2" x="426" y="80">bounded pages until the aggregate is terminal</text>
+    <g><circle cx="756" cy="66" r="11" fill="#1b2430"/><text class="num" x="752" y="70">3</text></g>
+    <rect class="bx blB" x="776" y="40" width="290" height="52"/>
+    <text class="t1" x="790" y="62">inspect / list / health_report</text>
+    <text class="t2" x="790" y="80">typed reads over the same tables</text>
+    <g><circle cx="1110" cy="66" r="11" fill="#1b2430"/><text class="num" x="1106" y="70">4</text></g>
+    <rect class="bx blB" x="1130" y="40" width="330" height="52"/>
+    <text class="t1" x="1144" y="62">cancel_operation / request_next_attempt</text>
+    <text class="t2" x="1144" y="80">operator actions, replay-exact</text>
+    <g><circle cx="1504" cy="66" r="11" fill="#1b2430"/><text class="num" x="1500" y="70">5</text></g>
+    <rect class="bx blB" x="1524" y="40" width="250" height="52"/>
+    <text class="t1" x="1538" y="62">export() → publish</text>
+    <text class="t2" x="1538" y="80">consistent cuts, fenced promotion</text>
+    <rect class="bx exB" x="1830" y="40" width="340" height="52"/>
+    <text class="t1" x="1844" y="62">Application workflows</text>
+    <text class="t2" x="1844" y="80">own domain logic + outcomes; kernel never sees payloads</text>
+
+    <!-- kernel band -->
+    <rect class="bx okB" x="40" y="152" width="330" height="76"/>
+    <text class="t1" x="55" y="174">Registration (submission.py)</text>
+    <text class="t2" x="55" y="192">lease + page-cursor CAS · digest-frozen manifest</text>
+    <text class="t2" x="55" y="207">exact replay or reject · hook runs in-txn</text>
+    <rect class="bx okB" x="40" y="252" width="330" height="88"/>
+    <text class="t1" x="55" y="274">Claim selection (claims.py)</text>
+    <text class="t2" x="55" y="292">global advisory lock · scheduling order</text>
+    <text class="t2" x="55" y="307">(priority, shuffle_rank) · lease 60s</text>
+    <text class="t2" x="55" y="322">CAS: PENDING + no claim + NOT_STARTED</text>
+
+    <rect class="bx amB" x="430" y="152" width="360" height="76"/>
+    <text class="t1" x="445" y="174">Call-start fact (claims.py / enqueue_runtime.py)</text>
+    <text class="t2" x="445" y="192">enqueue_call_started_at commits BEFORE the DBOS call</text>
+    <text class="t2" x="445" y="207">crash after this ⇒ recovery must observe, never re-fire blind</text>
+    <rect class="bx okB" x="430" y="252" width="360" height="88"/>
+    <text class="t1" x="445" y="274">Outcome recording (claims.py)</text>
+    <text class="t2" x="445" y="292">CAS on (CLAIMING, this claim, CALL_STARTED)</text>
+    <text class="t2" x="445" y="307">win → enqueued / already_present / enqueue_error</text>
+    <text class="t2" x="445" y="322">lose after physical success → compensation row</text>
+
+    <rect class="bx okB" x="850" y="152" width="360" height="76"/>
+    <text class="t1" x="865" y="174">Reconciliation (reconciliation*.py)</text>
+    <text class="t2" x="865" y="192">observe DBOS → CAS one Attempt per txn</text>
+    <text class="t2" x="865" y="207">uncertain = guaranteed no-op · terminal is immutable</text>
+    <rect class="bx okB" x="850" y="252" width="360" height="88"/>
+    <text class="t1" x="865" y="274">Retry &amp; next Attempts</text>
+    <text class="t2" x="865" y="292">error → classify → new Attempt N+1 (append)</text>
+    <text class="t2" x="865" y="307">items.current_attempt pointer CAS = single successor</text>
+    <text class="t2" x="865" y="322">missing needs 3 observations + 60s grace</text>
+
+    <rect class="bx okB" x="1270" y="152" width="360" height="76"/>
+    <text class="t1" x="1285" y="174">Cancellation (cancellation*.py)</text>
+    <text class="t2" x="1285" y="192">durable intent first, DBOS second · non-recursive</text>
+    <text class="t2" x="1285" y="207">shared workflow → skipped_shared · terminal wins races</text>
+    <rect class="bx amB" x="1270" y="252" width="360" height="88"/>
+    <text class="t1" x="1285" y="274">Late-enqueue repair</text>
+    <text class="t2" x="1285" y="292">invalidated CALL_STARTED claim may still land a workflow</text>
+    <text class="t2" x="1285" y="307">compensation ledger + bounded hazard successor</text>
+    <text class="t2" x="1285" y="322">absence proof: 3 observations past grace</text>
+
+    <rect class="bx puB" x="1690" y="152" width="480" height="76"/>
+    <text class="t1" x="1705" y="174">Export capture (export.py)</text>
+    <text class="t2" x="1705" y="192">exclusive advisory barrier vs every writer's shared lock</text>
+    <text class="t2" x="1705" y="207">REPEATABLE READ + change_seq high-water mark H</text>
+    <rect class="bx puB" x="1690" y="252" width="480" height="88"/>
+    <text class="t1" x="1705" y="274">Publication fence (publication.py)</text>
+    <text class="t2" x="1705" y="292">lease + fencing token · every txn re-CASes the gate</text>
+    <text class="t2" x="1705" y="307">stage → promote pointer · idempotent replay · signed</text>
+    <text class="t2" x="1705" y="322">recovery plans · losers get SUPERSEDED, never a receipt</text>
+
+    <!-- truth band -->
+    <rect class="bx blB" x="40" y="404" width="290" height="66"/>
+    <text class="t1" x="55" y="426">operations</text>
+    <text class="t2" x="55" y="444">status rollup · registration lease · counts</text>
+    <text class="t2" x="55" y="459">platform_cut_version (optimistic pin)</text>
+    <rect class="bx blB" x="360" y="404" width="230" height="66"/>
+    <text class="t1" x="375" y="426">items</text>
+    <text class="t2" x="375" y="444">current_attempt pointer</text>
+    <text class="t2" x="375" y="459">(the CAS everyone fights over)</text>
+    <rect class="bx blB" x="620" y="404" width="330" height="66"/>
+    <text class="t1" x="635" y="426">item_attempts (append-only lineage)</text>
+    <text class="t2" x="635" y="444">enqueue_state ⊥ execution_state · 19 CHECKs</text>
+    <text class="t2" x="635" y="459">source_attempt = attempt − 1 enforced in SQL</text>
+    <rect class="bx blB" x="980" y="404" width="330" height="66"/>
+    <text class="t1" x="995" y="426">enqueue_claims (append-only)</text>
+    <text class="t2" x="995" y="444">lease_expires_at · call-start is one-way</text>
+    <text class="t2" x="995" y="459">replaced claims chain via replacement_claim_id</text>
+    <rect class="bx blB" x="1340" y="404" width="360" height="66"/>
+    <text class="t1" x="1355" y="426">compensations · hazards · next_attempt_requests</text>
+    <text class="t2" x="1355" y="444">every "we might have leaked a workflow" fact is a row</text>
+    <text class="t2" x="1355" y="459">idempotent by unique keys, replay-validated</text>
+    <rect class="bx blB" x="1730" y="404" width="200" height="66"/>
+    <text class="t1" x="1745" y="426">throttle_state</text>
+    <text class="t2" x="1745" y="444">backoff primitives</text>
+    <text class="t2" x="1745" y="459">(not self-enforcing → C4)</text>
+    <rect class="bx blB" x="1960" y="404" width="210" height="66"/>
+    <text class="t1" x="1975" y="426">change_seq sequence</text>
+    <text class="t2" x="1975" y="444">every row stamps it; export's</text>
+    <text class="t2" x="1975" y="459">high-water mark comes from here</text>
+
+    <!-- outside band -->
+    <rect class="bx exB" x="430" y="536" width="420" height="56"/>
+    <text class="t1" x="445" y="558">DBOS — durable queue + workflow execution</text>
+    <text class="t2" x="445" y="576">SetWorkflowID makes double-enqueue idempotent · status API is the authority</text>
+    <rect class="bx exB" x="1690" y="536" width="480" height="56"/>
+    <text class="t1" x="1705" y="558">DuckDB / MotherDuck / Neon destinations</text>
+    <text class="t2" x="1705" y="576">immutable promoted bundles · readers pin, never chase the mutable pointer</text>
+
+    <!-- flows -->
+    <path class="fl" d="M 210 92 L 210 150" marker-end="url(#a1)"/>
+    <path class="fl" d="M 205 228 L 205 250" marker-end="url(#a1)"/>
+    <path class="fl" d="M 370 280 L 428 280" marker-end="url(#a1)"/>
+    <text class="fll" x="374" y="272">page of claims</text>
+    <path class="fl" d="M 610 228 L 610 250" marker-end="url(#a1)"/>
+    <path class="fl2" d="M 640 228 C 640 300, 640 480, 640 534" marker-end="url(#a2)"/>
+    <text class="fl2l" x="652" y="500">the un-fenceable hop: DBOS.enqueue_workflow()</text>
+    <path class="fl" d="M 850 560 L 855 560 M 852 562 C 960 540, 1010 420, 1020 340" stroke="#64748b" stroke-width="1.7" fill="none" marker-end="url(#a1)"/>
+    <text class="fll" x="912" y="520">observe status (authoritative)</text>
+    <path class="fl" d="M 555 92 C 700 110, 950 120, 1020 150" marker-end="url(#a1)"/>
+    <path class="fl" d="M 1030 228 L 1030 250" marker-end="url(#a1)"/>
+    <path class="fl" d="M 1450 92 L 1450 150" marker-end="url(#a1)"/>
+    <path class="fl" d="M 1445 228 L 1445 250" marker-end="url(#a1)"/>
+    <path class="fl" d="M 1649 92 C 1780 108, 1880 120, 1920 150" marker-end="url(#a1)"/>
+    <path class="fl" d="M 1930 228 L 1930 250" marker-end="url(#a1)"/>
+    <path class="fl" d="M 1930 340 L 1930 402" marker-end="url(#a1)"/>
+    <path class="fl" d="M 1930 470 L 1930 534" marker-end="url(#a1)"/>
+    <text class="fll" x="1942" y="505">immutable bundles</text>
+  </svg>
+  <div class="legend">
+    <span><span class="sw" style="background:#f0f4fe;border-color:#1d4ed8"></span>consumer surface / durable tables</span>
+    <span><span class="sw" style="background:#f0faf3;border-color:#15803d"></span>fully fenced write path</span>
+    <span><span class="sw" style="background:#fdf7ec;border-color:#b45309"></span>uncertainty boundary — where two-generals lives</span>
+    <span><span class="sw" style="background:#f7f3fe;border-color:#7c3aed"></span>snapshot / publication machinery</span>
+    <span><span class="sw" style="background:#f5f7f9;border-color:#94a3b8;border-style:dashed"></span>external system</span>
+  </div>
+  </div>
+</section>
+
+<!-- ═══════════ §2 STATE MACHINES ═══════════ -->
+<section id="machines">
+  <h2><span class="sec">§2</span>Three interlocking state machines — click any state to see what pins it</h2>
+  <p class="lede">One Attempt carries <b>two orthogonal machines</b>: <span class="k">enqueue_state</span> (did the work
+  reach DBOS?) and <span class="k">execution_state</span> (what did DBOS do with it?). A third machine,
+  the <span class="k">Claim disposition</span>, mediates who is allowed to move the first one. All three are closed
+  enums with SQL <span class="ref">CHECK</span> constraints tying them to their evidence columns — an Attempt
+  physically cannot be <span class="ref">claiming</span> without a claim, terminal without <span class="ref">terminal_at</span>,
+  or errored without a failure snapshot (<span class="ref">db/schema.py:148-207</span>).</p>
+  <div class="machines">
+    <div class="machine">
+      <h3>enqueue_state <span class="ref">AttemptEnqueueState</span> — who may talk to DBOS</h3>
+      <svg viewBox="0 0 560 210" id="sm-enq"></svg>
+      <div class="mdetail" id="det-enq">Click a state.</div>
+    </div>
+    <div class="machine">
+      <h3>execution_state <span class="ref">AttemptExecutionState</span> — what DBOS did</h3>
+      <svg viewBox="0 0 560 230" id="sm-exec"></svg>
+      <div class="mdetail" id="det-exec">Click a state.</div>
+    </div>
+    <div class="machine">
+      <h3>Claim disposition <span class="ref">EnqueueClaimDisposition</span> — the authority token</h3>
+      <svg viewBox="0 0 560 210" id="sm-claim"></svg>
+      <div class="mdetail" id="det-claim">Click a state.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ §3 PLAYER ═══════════ -->
+<section id="player">
+  <h2><span class="sec">§3</span>Scenario player — step through the flows and watch the locks and rows move</h2>
+  <p class="lede">Each scenario is a real interleaving the code defends against, reconstructed from the write paths and
+  the contract tests. Step through it: the <span class="k">event ledger</span> shows who acts, the
+  <span class="k">lock bar</span> shows what serializes them, and the <span class="k">kernel tables</span> update exactly
+  as the SQL would — changed cells flash. Enum strings are the real persisted values.</p>
+  <div class="player">
+    <div class="scpick" id="scpick"></div>
+    <div class="controls">
+      <button id="btn-reset">⟲ Reset</button>
+      <button id="btn-back">← Back</button>
+      <button id="btn-next" class="primary">Step →</button>
+      <button id="btn-play">▶ Play</button>
+      <span class="pos" id="pos"></span>
+    </div>
+    <div class="narr" id="narr"></div>
+    <div class="stagegrid">
+      <div>
+        <div class="actors" id="actors"></div>
+        <div class="evlog" id="evlog"></div>
+      </div>
+      <div>
+        <div class="lockbar" id="lockbar"></div>
+        <div class="dbtables" id="dbtables"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ §4 RACES ═══════════ -->
+<section id="races">
+  <h2><span class="sec">§4</span>Race gallery — every window the design opens, and the mechanism that closes it</h2>
+  <p class="lede">The kernel's stance is consistent: <span class="k">pessimistic locks establish order</span>,
+  <span class="k">CAS predicates re-verify under lock</span>, and <span class="k">uncertainty is persisted, not guessed away</span>.
+  Candidates are always loaded from an unlocked snapshot and re-validated after locking — the load-then-lock TOCTOU
+  window is deliberate and closed by the re-check, never by hoping.</p>
+  <div class="races">
+
+    <div class="race"><h3>Two submitters replay one operation_key <span class="badge b-ok">CLOSED</span></h3>
+      <div class="win"><b>Window:</b> the same key submitted twice with drifted inputs would fork one Operation's identity.</div>
+      <div class="fix"><b>Mechanism:</b> the manifest digest freezes items + recipes before any write; a replay must match
+      every immutable field byte-for-byte (<span class="ref">_validate_exact_replay</span>, submission.py:898) or raise
+      <span class="ref">RegistrationConflictError</span>. Equal replays are welcome — they resume.</div></div>
+
+    <div class="race"><h3>Two registrars race the same page <span class="badge b-ok">CLOSED</span></h3>
+      <div class="win"><b>Window:</b> a crashed submitter's successor could double-insert page items while the original limps on.</div>
+      <div class="fix"><b>Mechanism:</b> a <span class="k">registration lease</span> (60s, renewed per page) plus a
+      <span class="k">cursor CAS</span> — the page commit requires <span class="ref">registration_cursor == page_index AND
+      lease_id == mine AND lease unexpired</span> (submission.py:809-827). The lease is re-checked <i>after</i> the
+      registration hook runs, so a stale registrar's whole page rolls back.</div></div>
+
+    <div class="race"><h3>Two workers claim one pending Attempt <span class="badge b-ok">CLOSED</span></h3>
+      <div class="win"><b>Window:</b> both would enqueue the same workflow and fight over the outcome.</div>
+      <div class="fix"><b>Mechanism:</b> claim selection holds a <span class="k">global exclusive advisory lock</span>
+      (<span class="ref">CLAIM_SELECTION_ADVISORY_KEY</span>, claims.py:1769) so pages never interleave, and the attempt
+      CAS requires <span class="ref">enqueue_state='pending' AND current_claim_id IS NULL</span> (claims.py:196-225).
+      Losing the CAS after holding the locks is treated as corruption, not retry.</div></div>
+
+    <div class="race"><h3>Claim expires while its owner is mid-flight <span class="badge b-ok">CLOSED</span></h3>
+      <div class="win"><b>Window:</b> a replacer steals the claim just as the slow owner finally calls DBOS → two live enqueuers.</div>
+      <div class="fix"><b>Mechanism:</b> the owner must first win the <span class="k">call-start CAS</span>, which requires
+      <span class="ref">disposition='claimed' AND lease_expires_at &gt; now</span> (claims.py:485-506); replacement requires
+      <span class="ref">enqueue_call_started_at IS NULL</span> (claims.py:312-336). Exactly one of the two CAS predicates
+      can be true. A replaced owner gets <span class="ref">LOST_AUTHORITY</span> and stops.</div></div>
+
+    <div class="race"><h3>Crash between call-start and outcome — two generals <span class="badge b-ok">CLOSED</span></h3>
+      <div class="win"><b>Window:</b> did the DBOS call land? Re-enqueue blindly and you may run the work twice; give up and it never runs.</div>
+      <div class="fix"><b>Mechanism:</b> the claim is stranded at <span class="ref">call_started</span>; recovery
+      <span class="k">observes DBOS by workflow_id</span> (enqueue_runtime.py:468-591). EXISTING → adopt as
+      <span class="ref">workflow_already_present</span>. ABSENT → replace the claim and re-fire; the deterministic
+      <span class="ref">SetWorkflowID</span> makes even a wrong ABSENT verdict idempotent. UNCERTAIN → stay put, retry later.</div></div>
+
+    <div class="race"><h3>Outcome lands but authority was lost — the leaked workflow <span class="badge b-ok">CLOSED</span></h3>
+      <div class="win"><b>Window:</b> cancellation invalidates a <span class="ref">call_started</span> claim, but the in-flight DBOS call
+      still creates the workflow: real work is running that the kernel decided shouldn't.</div>
+      <div class="fix"><b>Mechanism:</b> the claimant that discovers its success can't be recorded writes an
+      <span class="k">enqueue_compensations</span> row (claims.py:741-855); <span class="ref">repair_late_enqueue_compensations</span>
+      cancels or observes the leaked workflow, needs 3 absence observations past a grace window to say "no workflow",
+      and appends a single bounded <span class="k">hazard successor</span> if it appears even later (cancellation.py:256-427).</div></div>
+
+    <div class="race"><h3>Two reconcilers create the retry Attempt <span class="badge b-ok">CLOSED</span></h3>
+      <div class="win"><b>Window:</b> both observe the same <span class="ref">error</span>, both insert Attempt N+1 → forked lineage.</div>
+      <div class="fix"><b>Mechanism:</b> both take the same per-workflow advisory locks (source <i>and</i> successor,
+      sorted) before any row lock; then the <span class="k">Item pointer CAS</span>
+      <span class="ref">UPDATE items SET current_attempt=N+1 WHERE current_attempt=N</span> admits exactly one
+      (reconciliation.py:1102-1113). Contract test proves outcomes <span class="ref">[0,1]</span>.</div></div>
+
+    <div class="race"><h3>Cancel races the finish line <span class="badge b-ok">CLOSED</span></h3>
+      <div class="win"><b>Window:</b> operator cancels as the worker succeeds — which truth wins?</div>
+      <div class="fix"><b>Mechanism:</b> <span class="k">terminal wins, and terminal is immutable</span>. Cancel re-inspects
+      before firing; a SUCCEEDED/ERROR observation becomes disposition <span class="ref">observed_terminal</span> and the
+      real result is kept (cancellation.py:594-605). Conversely a cancelled Attempt is sticky — a late SUCCEEDED
+      observation is a no-op (reconciliation.py:808).</div></div>
+
+    <div class="race"><h3>Cancelling a workflow someone else still needs <span class="badge b-ok">CLOSED</span></h3>
+      <div class="win"><b>Window:</b> two Operations link the same workflow_id; cancelling one would kill the other's live work.</div>
+      <div class="fix"><b>Mechanism:</b> <span class="k">reference-aware skip</span> — before the physical cancel,
+      <span class="ref">_has_other_reference</span> scans for any other non-terminal current Attempt on that workflow;
+      if found, the local Attempt finalizes <span class="ref">skipped_shared</span> and DBOS is never called
+      (cancellation.py:1043-1077). Cancels are also non-recursive: child topology drift fails closed.</div></div>
+
+    <div class="race"><h3>Workflow looks gone but is only slow <span class="badge b-ok">CLOSED</span></h3>
+      <div class="win"><b>Window:</b> one ABSENT status read during a DBOS hiccup would tombstone live work as MISSING.</div>
+      <div class="fix"><b>Mechanism:</b> MISSING requires <span class="ref">missing_observation_count ≥ 3</span> <i>and</i>
+      ≥ 60s since the first absence (reconciliation.py:874-892), each observation guarded by an execution-state CAS.
+      Once terminal, MISSING rows rotate through re-observation markers — re-checked forever, rewritten never.</div></div>
+
+    <div class="race"><h3>Export reads while everyone writes <span class="badge b-ok">CLOSED</span> <span class="badge b-warn">COSTLY — C2</span></h3>
+      <div class="win"><b>Window:</b> a snapshot that straddles a claim CAS would show an Attempt in two states across tables.</div>
+      <div class="fix"><b>Mechanism:</b> every writer opens with <span class="ref">pg_advisory_xact_lock_shared(EXPORT_BARRIER)</span>;
+      capture takes the <span class="k">exclusive</span> form, opens REPEATABLE READ, allocates a
+      <span class="ref">change_seq</span> high-water mark H while writers are excluded, reads
+      <span class="ref">WHERE change_seq ≤ H</span> (export.py:785-866). Per-operation pins use
+      <span class="ref">platform_cut_version</span> CAS (cut.py:49).</div></div>
+
+    <div class="race"><h3>Two publishers promote the same bundle slot <span class="badge b-ok">CLOSED</span></h3>
+      <div class="win"><b>Window:</b> a paused old publisher wakes after its lease expired and overwrites the new owner's pointer.</div>
+      <div class="fix"><b>Mechanism:</b> <span class="k">lease + monotonic fencing token</span>; every effecting transaction's
+      first statement is a gate CAS <span class="ref">…WHERE owner=:run AND fencing_token=:token AND lease unexpired
+      RETURNING mutation_epoch</span> (publication.py:1291-1307) — a stale token rolls back everything, even already-staged DDL.
+      Equal-snapshot losers commit truthful <span class="ref">SUPERSEDED</span> and never mint a receipt.</div></div>
+
+  </div>
+</section>
+
+<!-- ═══════════ §5 LOCK LEDGER ═══════════ -->
+<section id="locks">
+  <h2><span class="sec">§5</span>The lock ledger — five layers, one ordering discipline</h2>
+  <p class="lede">Deadlock avoidance is by convention, applied everywhere: advisory locks before row locks; workflow
+  locks sorted and deduplicated; row locks in fixed hierarchy order (operation → item → attempt → claim), each set
+  sorted by key. External I/O (DBOS calls) is never performed while holding kernel row locks
+  (<span class="ref">cancellation.py:1310</span>).</p>
+  <table>
+    <thead><tr><th style="width:280px">Lock</th><th style="width:130px">Kind</th><th style="width:340px">Who takes it</th><th>What it serializes</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">EXPORT_BARRIER_ADVISORY_KEY<br>= 2129927185611267111</td><td>advisory, xact, <b>shared</b></td>
+        <td>first statement of <i>every</i> kernel write transaction (submission, claims, reconciliation, cancellation, backoff)</td>
+        <td>nothing among writers — it exists so export's exclusive acquisition can drain and block them all (§4, C2)</td></tr>
+      <tr><td class="mono">EXPORT_BARRIER (same key)</td><td>advisory, <b>session, exclusive</b></td>
+        <td><span class="ref">_capture_source</span> (export.py:800)</td>
+        <td>the whole kernel vs one snapshot; held from before REPEATABLE READ until after the last member row is read</td></tr>
+      <tr><td class="mono">CLAIM_SELECTION_ADVISORY_KEY<br>= 4592991109185853313</td><td>advisory, xact, exclusive</td>
+        <td><span class="ref">claim_pending_attempts</span>, <span class="ref">replace_expired_unstarted_claims</span> (claims.py:141, 260)</td>
+        <td>all claim-page selection globally — one enqueuer picks work at a time (C1)</td></tr>
+      <tr><td class="mono">hashtextextended(workflow_id, 0)</td><td>advisory, xact, exclusive</td>
+        <td>registration page insert, every claim transition, reconciliation mutation (source + successor), cancellation hierarchy</td>
+        <td>all writers touching one workflow's references, across Operations — the cross-entity spine</td></tr>
+      <tr><td class="mono">hashtextextended(operation_key, 1)</td><td>advisory, xact, exclusive</td>
+        <td><span class="ref">_create_or_claim_operation</span> (submission.py:1273)</td>
+        <td>concurrent creation of the same Operation row</td></tr>
+      <tr><td class="mono">hashtextextended(workflow_id, 1)</td><td>advisory, <b>session</b>, exclusive</td>
+        <td><span class="ref">repair_late_enqueue_compensations</span> (cancellation.py:372)</td>
+        <td>compensation repair per workflow, held across the external DBOS cancel (hence session-level). Note: shares
+        namespace 1 with the operation-key lock above — cross-domain hash collision is possible (false contention only).</td></tr>
+      <tr><td class="mono">SELECT … FOR UPDATE</td><td>row locks</td>
+        <td><span class="ref">_lock_candidate_hierarchy</span> (claims.py:1353), <span class="ref">_lock_cancellation_hierarchy</span>, reconciliation lock helpers</td>
+        <td>the operation → item → attempt → claim rows a transaction will mutate; always after advisory locks, always sorted</td></tr>
+      <tr><td class="mono">registration lease / claim lease / publication lease + fencing_token</td><td>data-level leases</td>
+        <td>submitters, claimants, publishers</td>
+        <td>liveness under crash: expiry transfers authority, and a CAS on the lease fields makes the transfer race-free</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════ §6 CONCERNS ═══════════ -->
+<section id="concerns">
+  <h2><span class="sec">§6</span>Concerns — correctness is bought with serialization; here's where the bill arrives</h2>
+  <p class="lede">Nothing below is a correctness bug — the race gallery closes cleanly. These are places where the
+  chosen mechanisms cap throughput or invite operational surprises as item counts and worker counts grow, plus one
+  primitive that exists but isn't enforced. Severity is about <i>scale behavior</i>, not today's workloads.</p>
+  <div class="concerns">
+
+    <div class="concern red" id="c1">
+      <h3>C1 · Every enqueuer in the fleet funnels through one global lock — with Python callbacks inside it
+        <span class="badge b-risk">THROUGHPUT CEILING</span></h3>
+      <p><span class="ref">claim_pending_attempts</span> takes <span class="ref">CLAIM_SELECTION_ADVISORY_KEY</span>
+      exclusively (claims.py:141), then — still holding it — runs the <span class="ref">admit_targets</span> Python
+      callback (target resolution + DBOS queue validation), acquires one advisory lock per workflow and one
+      <span class="ref">FOR UPDATE</span> query per attempt <i>sequentially</i>, and inserts/CASes up to 500 rows.
+      Adding kernel workers adds zero claim throughput; a slow resolver or a network blip inside the critical section
+      stalls every operation in the system, not just its own.</p>
+      <svg viewBox="0 0 900 120" width="760">
+        <style>.cw{fill:#f5f7f9;stroke:#94a3b8;rx:6}.ct{font-size:12px;fill:#1b2430;font-weight:600}.cs{font-size:11px;fill:#5b6572}</style>
+        <rect class="cw" x="10" y="10" width="120" height="30"/><text class="ct" x="24" y="30">worker A</text>
+        <rect class="cw" x="10" y="46" width="120" height="30"/><text class="ct" x="24" y="66">worker B</text>
+        <rect class="cw" x="10" y="82" width="120" height="30"/><text class="ct" x="24" y="102">worker C…N</text>
+        <path d="M130 25 C 220 25, 240 55, 300 58 M130 61 L 300 61 M130 97 C 220 97, 240 67, 300 64" stroke="#b91c1c" stroke-width="1.6" fill="none"/>
+        <rect x="300" y="42" width="250" height="38" rx="8" fill="#fdf1f1" stroke="#b91c1c" stroke-width="1.6"/>
+        <text class="ct" x="314" y="59">one advisory lock, one at a time</text>
+        <text class="cs" x="314" y="74">+ Python admission + N sequential row locks inside</text>
+        <path d="M550 61 L 630 61" stroke="#64748b" stroke-width="1.6" marker-end="url(#a1)"/>
+        <rect class="cw" x="632" y="42" width="240" height="38"/>
+        <text class="ct" x="646" y="59">claim throughput ≈ 1 / page latency</text>
+        <text class="cs" x="646" y="74">regardless of fleet size</text>
+      </svg>
+      <div class="relief"><b>Relief:</b> the lock exists to keep scheduling order globally fair — but fairness only needs
+      serialization <i>per scheduling domain</i>. Sharding the key (per operation, or per service_class) or moving
+      admission outside the lock (validate targets, then lock, then re-check) preserves the CAS safety story while
+      letting independent operations claim in parallel. <span class="ref">SELECT … FOR UPDATE SKIP LOCKED</span> is the
+      idiomatic Postgres alternative for exactly this shape.</div>
+    </div>
+
+    <div class="concern red" id="c2">
+      <h3>C2 · Export capture holds the exclusive barrier through the entire snapshot read — a stop-the-world pause
+        <span class="badge b-risk">GLOBAL WRITE STALL</span></h3>
+      <p>The comment says the cut is allocated "while writers are excluded" — but the code releases the barrier in
+      <span class="ref">finally</span>, <i>after</i> reading every member table (export.py:800-864). Every kernel write
+      transaction blocks on its shared barrier acquisition for the full duration of the capture. As
+      <span class="ref">item_attempts</span> grows, snapshot reads grow, and the whole fleet's write path pauses
+      proportionally — submissions, claims, reconciliation, cancellations, everything.</p>
+      <svg viewBox="0 0 900 108" width="760">
+        <text x="10" y="22" font-size="12" font-weight="600" fill="#1b2430">export:</text>
+        <rect x="80" y="10" width="60" height="16" fill="#f0f4fe" stroke="#1d4ed8"/><text x="84" y="40" font-size="10.5" fill="#5b6572">lock + pin snapshot + nextval(H)</text>
+        <rect x="140" y="10" width="500" height="16" fill="#fdf1f1" stroke="#b91c1c"/><text x="300" y="22" font-size="11" fill="#b91c1c" font-weight="700">read every member row (grows with data)</text>
+        <rect x="640" y="10" width="24" height="16" fill="#f0faf3" stroke="#15803d"/><text x="668" y="22" font-size="10.5" fill="#5b6572">unlock</text>
+        <text x="10" y="76" font-size="12" font-weight="600" fill="#1b2430">writers:</text>
+        <rect x="80" y="64" width="58" height="16" fill="#f0faf3" stroke="#15803d"/>
+        <rect x="140" y="64" width="500" height="16" fill="#f5f7f9" stroke="#94a3b8" stroke-dasharray="4 3"/>
+        <text x="310" y="76" font-size="11" fill="#64748b" font-weight="600">all blocked</text>
+        <rect x="642" y="64" width="120" height="16" fill="#f0faf3" stroke="#15803d"/>
+        <text x="80" y="100" font-size="10.5" fill="#5b6572">once the REPEATABLE READ snapshot is pinned and H is allocated, later commits (change_seq &gt; H) are invisible to it anyway — the long red hold looks avoidable</text>
+      </svg>
+      <div class="relief"><b>Relief:</b> the barrier's job is done once two things are true: the RR snapshot is pinned
+      and H is allocated with writers drained. Releasing the advisory lock immediately after
+      <span class="ref">nextval</span> (the first reads already pin the snapshot) would shrink the global stall from
+      O(snapshot size) to O(drain + one statement), with the same consistency guarantee. Worth a careful proof, but the
+      ordering argument in the code's own comment supports it.</div>
+    </div>
+
+    <div class="concern" id="c3">
+      <h3>C3 · Operation rollups recompute from scratch on every outcome — O(items²) per phase
+        <span class="badge b-warn">SCALING CLIFF</span></h3>
+      <p><span class="ref">_refresh_operation_enqueue_aggregate</span> (claims.py:1581) re-reads the enqueue state of
+      <i>every</i> current Attempt in the Operation — inside the outcome transaction, holding the operation row lock —
+      each time <i>one</i> outcome is recorded. Reconciliation's <span class="ref">_refresh_operation_lifecycle</span>
+      does the same per observation. A 100k-item Operation performs ~100k × 100k row visits across its enqueue phase,
+      serialized on the operation row lock — so the rollup isn't just slow, it lengthens every claim/outcome
+      transaction's critical section.</p>
+      <div class="relief"><b>Relief:</b> the counts are already columns on <span class="ref">operations</span>;
+      incremental <span class="ref">count = count + 1</span> transitions (the row lock is already held, and every state
+      change knows its from/to) would make each outcome O(1). Keep the full recompute as a repair/audit path rather than
+      the hot path.</div>
+    </div>
+
+    <div class="concern" id="c4">
+      <h3>C4 · The throttle tables exist, but nothing in the kernel enqueue path reads them
+        <span class="badge b-warn">UNENFORCED PRIMITIVE</span></h3>
+      <p><span class="ref">backoff.py</span> maintains <span class="ref">throttle_state</span> with exponential backoff,
+      deterministic jitter, and operator holds — but <span class="ref">_pending_candidates</span> (claims.py:1022) and
+      the reconciliation candidate queries never join it. <span class="ref">blocked_until</span> gates nothing;
+      a rate-limited target keeps getting claimed and re-fired at full speed unless the <i>application</i> remembers to
+      call <span class="ref">delay_until_unblocked_seconds</span> itself. That's exactly the class of "infra consumers
+      shouldn't have to think about" that the rest of the kernel absorbs.</p>
+      <div class="relief"><b>Relief:</b> either wire it in (candidate queries exclude targets whose
+      <span class="ref">blocked_until/hold_until</span> is in the future — one extra join) or document loudly that
+      throttling is an application contract, not a kernel behavior. The half-state is the trap.</div>
+    </div>
+
+    <div class="concern" id="c5">
+      <h3>C5 · Retries have no pacing — a failing target is re-hit as fast as reconcile() loops
+        <span class="badge b-warn">RETRY STORM</span></h3>
+      <p>An <span class="ref">error</span> observation with a retryable class creates Attempt N+1 immediately
+      <span class="ref">pending</span> (reconciliation.py:1060) — no delay, no jitter, no consultation of C4's throttle.
+      Enqueue-error resets are likewise immediate. Bounds are small (<span class="ref">max_attempts=3</span>,
+      <span class="ref">max_enqueue_tries=3</span>) so a single Item can't loop forever, but a 50k-item Operation
+      against a rate-limited provider will burn all its attempts in a tight burst — precisely when the provider needs
+      backoff. And <span class="ref">wait_operation</span> makes every waiting client an extra reconciler driving that
+      burst, all serializing through C1's lock.</p>
+      <div class="relief"><b>Relief:</b> a <span class="ref">not_before</span> timestamp on the successor Attempt
+      (derived from the failure class via the existing backoff math) that candidate selection respects. All the pieces
+      exist; they're just not connected.</div>
+    </div>
+
+    <div class="concern" id="c6">
+      <h3>C6 · A registration hook slower than its lease can never commit — silent livelock
+        <span class="badge b-warn">OPERATIONAL TRAP</span></h3>
+      <p>The caller-owned <span class="ref">RegistrationHook</span> runs inside the page transaction, and page authority
+      is deliberately re-validated <i>after</i> it returns, against a fresh clock (submission.py:735-742, with the CAS
+      predicate re-checking <span class="ref">lease_expires_at &gt; clock_timestamp()</span>). Correct — a stale
+      registrar can't commit. But if a hook consistently takes longer than
+      <span class="ref">registration_lease_seconds</span> (default 60), every attempt does all the work, fails the CAS,
+      rolls back, and the next submitter repeats it: full effort, zero progress, no distinctive error — it surfaces as
+      the generic <span class="ref">"registration cursor CAS lost after page validation"</span>.</p>
+      <div class="relief"><b>Relief:</b> detect the signature (lease expired during hook execution, cursor unmoved) and
+      raise a dedicated "hook exceeded lease — raise registration_lease_seconds or shrink page_size" error. One timing
+      comparison at the failure site turns a livelock into a configuration message.</div>
+    </div>
+
+  </div>
+</section>
+
+<section id="method">
+  <footer>
+    Built 2026-07-13 from direct reads of <span class="ref">schema.py</span>, <span class="ref">submission.py</span>,
+    <span class="ref">claims.py</span>, <span class="ref">enqueue_runtime.py</span>, <span class="ref">cut.py</span>,
+    <span class="ref">status.py</span>, plus deep passes over <span class="ref">reconciliation*.py</span>,
+    <span class="ref">cancellation*.py</span>, <span class="ref">publication.py</span>, <span class="ref">export.py</span>
+    and their contract tests. Scenario steps mirror the transactions in those files; simplifications: timestamps are
+    schematic, one Operation per scenario, and page sizes shrunk to fit a screen.
+  </footer>
+</section>
+
+</main>
+</div>
+
+<script>
+/* ═════════════════ §2 state machines ═════════════════ */
+const MACHINES = {
+  enq: {svg:'sm-enq', det:'det-enq', nodes:[
+    {id:'pending',x:20,y:20,w:96,cls:'',d:'<b>pending</b> — registered, no authority granted. Written at registration (attempt insert, submission.py:766) or by a retryable enqueue-error reset. Selected only when <b>current_claim_id IS NULL</b>.'},
+    {id:'claiming',x:170,y:20,w:100,cls:'hot',d:'<b>claiming</b> — exactly one live Claim holds authority. SQL pins it: <b>(enqueue_state=\'claiming\') = (current_claim_id IS NOT NULL)</b> (schema.py:148). Only claim transitions may leave this state.'},
+    {id:'enqueued',x:330,y:20,w:100,cls:'term',d:'<b>enqueued</b> — this claimant physically created the DBOS workflow. Requires workflow_id + enqueued_at + effective priority (schema.py:152-171). Confirmed state: reconciliation may now observe it.'},
+    {id:'workflow_already_present',x:250,y:105,w:210,cls:'term',d:'<b>workflow_already_present</b> — the workflow existed already (idempotent SetWorkflowID collision, or recovery adopted it). Same confirmed guarantees as enqueued; priority is read back from DBOS (priority_source=linked_existing).'},
+    {id:'enqueue_error',x:20,y:105,w:130,cls:'err',d:'<b>enqueue_error</b> — the call failed with a classified failure (failure JSONB required by CHECK). If the class is retryable and enqueue_try &lt; max_enqueue_tries, reconciliation resets it to pending — same Attempt, no new lineage.'},
+  ], edges:[
+    {f:'pending',t:'claiming',l:'claim CAS'},
+    {f:'claiming',t:'enqueued',l:'outcome recorded'},
+    {f:'claiming',t:'workflow_already_present',l:'observed existing'},
+    {f:'claiming',t:'enqueue_error',l:'classified failure'},
+    {f:'enqueue_error',t:'pending',l:'retryable reset',back:true},
+  ]},
+  exec: {svg:'sm-exec', det:'det-exec', nodes:[
+    {id:'not_started',x:20,y:20,w:110,cls:'',d:'<b>not_started</b> — nothing observed yet. Claims are only grantable here; any other execution state blocks the claim CAS (claims.py:209).'},
+    {id:'active',x:190,y:20,w:80,cls:'hot',d:'<b>active</b> — reconciliation observed the DBOS workflow running (dbos_status recorded). Repeated identical active observations are exact no-ops.'},
+    {id:'cancel_requested',x:320,y:20,w:150,cls:'hot',d:'<b>cancel_requested</b> — durable cancel intent (request_id, requested_by, origin all set together per CHECK, schema.py:194). A non-cancel observation cannot revert this state.'},
+    {id:'succeeded',x:20,y:110,w:100,cls:'term',d:'<b>succeeded</b> — terminal, immutable, terminal_at set. The only state from which a domain_outcome next-Attempt request is eligible.'},
+    {id:'error',x:140,y:110,w:70,cls:'err',d:'<b>error</b> — terminal with mandatory failure snapshot + retry_disposition (retryable/permanent/exhausted). Retryable spawns Attempt N+1 in the same transaction.'},
+    {id:'cancelled',x:230,y:110,w:100,cls:'term',d:'<b>cancelled</b> — terminal and sticky: a late SUCCEEDED observation is ignored. Carries cancellation disposition + origin (local or foreign operation).'},
+    {id:'missing',x:350,y:110,w:90,cls:'err',d:'<b>missing</b> — DBOS has no such workflow after ≥3 absence observations spanning ≥60s grace. Terminal but re-observed forever via rotation markers — never rewritten.'},
+    {id:'recovery_exhausted',x:20,y:180,w:170,cls:'err',d:'<b>recovery_exhausted</b> — DBOS itself gave up recovering the workflow. Terminal; reported as-is.'},
+  ], edges:[
+    {f:'not_started',t:'active',l:'observed'},
+    {f:'active',t:'cancel_requested',l:'cancel intent'},
+    {f:'active',t:'succeeded',l:''},{f:'active',t:'error',l:''},
+    {f:'cancel_requested',t:'cancelled',l:'dbos_cancelled'},
+    {f:'active',t:'missing',l:'3× absent + grace'},
+    {f:'active',t:'recovery_exhausted',l:''},
+  ]},
+  claim: {svg:'sm-claim', det:'det-claim', nodes:[
+    {id:'claimed',x:20,y:20,w:96,cls:'hot',d:'<b>claimed</b> — leased authority (60s) to prepare one DBOS call. Created under the global claim-selection lock. Not yet allowed to touch DBOS.'},
+    {id:'call_started',x:180,y:20,w:120,cls:'hot',d:'<b>call_started</b> — the one-way fact committed BEFORE DBOS.enqueue_workflow. This is the two-generals marker: from here, only authoritative observation resolves what happened.'},
+    {id:'outcome_recorded',x:360,y:20,w:150,cls:'term',d:'<b>outcome_recorded</b> — the outcome CAS won: the Attempt moved to enqueued / already_present / enqueue_error atomically with this claim resolution.'},
+    {id:'expired',x:20,y:110,w:90,cls:'err',d:'<b>expired</b> — a call_started claim whose enqueue-try budget ran out during absence recovery; the Attempt goes to enqueue_error(permanent).'},
+    {id:'replaced',x:150,y:110,w:100,cls:'',d:'<b>replaced</b> — superseded by a fresh claim (replacement_claim_id chains them). Unstarted claims replace on lease expiry; call_started ones only after proven DBOS absence.'},
+    {id:'invalidated',x:290,y:110,w:110,cls:'err',d:'<b>invalidated</b> — cancelled or reset while outstanding. If it was call_started, a compensation row must eventually resolve the possibly-leaked workflow.'},
+  ], edges:[
+    {f:'claimed',t:'call_started',l:'call-start CAS (lease live)'},
+    {f:'call_started',t:'outcome_recorded',l:'outcome CAS'},
+    {f:'claimed',t:'replaced',l:'lease expired, unstarted'},
+    {f:'call_started',t:'replaced',l:'proven absent'},
+    {f:'call_started',t:'expired',l:'tries exhausted'},
+    {f:'claimed',t:'invalidated',l:'cancel'},
+    {f:'call_started',t:'invalidated',l:'cancel → hazard'},
+  ]},
+};
+function drawMachine(m){
+  const svg=document.getElementById(m.svg); const NS='http://www.w3.org/2000/svg';
+  const pos={};
+  m.nodes.forEach(n=>{pos[n.id]={cx:n.x+n.w/2, cy:n.y+16, x:n.x, y:n.y, w:n.w};});
+  m.edges.forEach(e=>{
+    const a=pos[e.f],b=pos[e.t];
+    const p=document.createElementNS(NS,'path');
+    let d;
+    if(Math.abs(a.cy-b.cy)<4){ d=`M ${a.x+a.w} ${a.cy} L ${b.x-4} ${b.cy}`; }
+    else { d=`M ${a.cx} ${a.cy+16} C ${a.cx} ${(a.cy+b.cy)/2}, ${b.cx} ${(a.cy+b.cy)/2}, ${b.cx} ${b.cy-17}`; }
+    if(e.back){ d=`M ${a.cx-20} ${a.y} C ${a.cx-40} ${a.y-14}, ${pos[e.t].cx+40} ${pos[e.t].y+46}, ${pos[e.t].cx+20} ${pos[e.t].y+33}`; }
+    p.setAttribute('d',d); p.setAttribute('class','medge'); p.setAttribute('marker-end','url(#marr)');
+    svg.appendChild(p);
+    if(e.l){ const t=document.createElementNS(NS,'text'); t.setAttribute('class','melabel');
+      t.setAttribute('x',(a.cx+b.cx)/2-28); t.setAttribute('y',(a.cy+b.cy)/2+(Math.abs(a.cy-b.cy)<4?-6:4));
+      t.textContent=e.l; svg.appendChild(t); }
+  });
+  const defs=document.createElementNS(NS,'defs');
+  defs.innerHTML='<marker id="marr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker>';
+  svg.appendChild(defs);
+  m.nodes.forEach(n=>{
+    const g=document.createElementNS(NS,'g'); g.setAttribute('class','mnode '+n.cls);
+    const r=document.createElementNS(NS,'rect');
+    r.setAttribute('x',n.x); r.setAttribute('y',n.y); r.setAttribute('width',n.w); r.setAttribute('height',32); r.setAttribute('rx',8);
+    const t=document.createElementNS(NS,'text');
+    t.setAttribute('x',n.x+n.w/2); t.setAttribute('y',n.y+20); t.setAttribute('text-anchor','middle');
+    t.textContent=n.id;
+    g.appendChild(r); g.appendChild(t);
+    g.addEventListener('click',()=>{
+      svg.querySelectorAll('.mnode').forEach(x=>x.classList.remove('sel'));
+      g.classList.add('sel');
+      document.getElementById(m.det).innerHTML=n.d;
+    });
+    svg.appendChild(g);
+  });
+}
+Object.values(MACHINES).forEach(drawMachine);
+
+/* ═════════════════ §3 scenario player ═════════════════ */
+const ACTOR_COLORS = {app:'#1d4ed8', wA:'#15803d', wB:'#b45309', rec:'#0e7490', rec2:'#0e7490', can:'#7c3aed', exp:'#7c3aed', dbos:'#64748b', pg:'#334155', op:'#b91c1c'};
+const ACTOR_NAMES = {app:'Submitter', wA:'Kernel worker A', wB:'Kernel worker B', rec:'Reconciler', rec2:'Reconciler #2', can:'Canceller', exp:'Exporter', dbos:'DBOS', pg:'Postgres', op:'Operator'};
+
+/* db snapshot helpers: each step patches; renderer diffs vs previous render */
+function deep(o){return JSON.parse(JSON.stringify(o));}
+
+const SCENARIOS = [];
+
+/* ---------- helper to build steps with cumulative db ---------- */
+function scenario(id,name,actors,baseDb,stepDefs){
+  const steps=[]; let db=deep(baseDb);
+  stepDefs.forEach(sd=>{
+    if(sd.db) sd.db(db);
+    steps.push({t:sd.t, n:sd.n, ev:sd.ev||[], locks:sd.locks||{}, db:deep(db)});
+  });
+  SCENARIOS.push({id,name,actors,steps});
+}
+
+const P=(v)=>v; // marker for pill values handled in renderer
+
+/* ───── 1. happy path ───── */
+scenario('happy','1 · Happy path, end to end',['app','wA','dbos','rec','pg'],
+ {op:null, items:[], att:[], claims:[], comps:[]},
+ [
+  {t:'prepare_manifest() — freeze identity before any write',
+   n:'The app reads its item source, and the kernel hashes every page into a <b>manifest digest</b>. Identity (operation_key, item order, execution recipes, workflow_ids) is now immutable — the database hasn\'t been touched yet.',
+   ev:[{a:'app',x:'hashes 2 items into pages; manifest_digest=<code>d41f…</code>'}]},
+  {t:'submit() creates the Operation under a registration lease',
+   n:'One transaction: shared export barrier, per-operation advisory lock, insert the row with <code>status=registering</code> and a 60-second lease. A concurrent duplicate submit would block on the advisory lock, then either resume this registration (exact replay) or be rejected.',
+   ev:[{a:'app',x:'INSERT operations … lease_id=<code>L1</code>, lease 60s',to:'pg'}],
+   locks:{barrier:['app:sh'],other:['op-key advisory (app)']},
+   db:d=>{d.op={key:'op-1',status:'registering',reg:'cursor 0/1 · lease L1',cut:1,counts:'0 ✓ / 0 ✗'};}},
+  {t:'Page 0 registers: items + Attempt 0 rows, then the cursor CAS',
+   n:'Item rows and their <code>attempt=0</code> rows are inserted (<code>pending</code> / <code>not_started</code>), the app\'s registration hook runs <i>inside</i> the same transaction, and the commit is gated on <code>cursor==0 AND lease==L1 AND lease unexpired</code>. Final page → <code>registration_completed_at</code> set, lease cleared, status → <code>enqueuing</code>.',
+   ev:[{a:'app',x:'INSERT 2 items + 2 attempts; hook OK; cursor CAS 0→1',to:'pg'}],
+   locks:{barrier:['app:sh'],wf:['wf-1','wf-2'],rows:['operations op-1']},
+   db:d=>{d.op.status='enqueuing'; d.op.reg='complete'; d.op.cut=2;
+     d.items=[{id:'i-1',cur:0},{id:'i-2',cur:0}];
+     d.att=[{item:'i-1',n:0,enq:'pending',try:0,exec:'not_started',claim:'—',cancel:'—'},
+            {item:'i-2',n:0,enq:'pending',try:0,exec:'not_started',claim:'—',cancel:'—'}];}},
+  {t:'Worker A claims a page — the global funnel',
+   n:'<code>claim_pending_attempts</code> takes the shared barrier <b>and</b> the exclusive global claim-selection lock, orders candidates by <code>(service_priority, shuffle_rank)</code>, locks the op→item→attempt hierarchy, and appends a Claim per attempt with a 60s lease. The attempt CAS flips <code>pending → claiming</code>.',
+   ev:[{a:'wA',x:'global claim lock; claims i-1 (<code>c1</code>) and i-2 (<code>c2</code>), lease 60s',to:'pg'}],
+   locks:{barrier:['wA:sh'],claim:'wA',wf:['wf-1','wf-2'],rows:['op op-1','items i-1,i-2','attempts ×2']},
+   db:d=>{d.att[0].enq='claiming'; d.att[0].try=1; d.att[0].claim='c1';
+          d.att[1].enq='claiming'; d.att[1].try=1; d.att[1].claim='c2'; d.op.cut=3;
+          d.claims=[{id:'c1',item:'i-1',n:0,try:1,disp:'claimed',call:'—',lease:'t+60s'},
+                    {id:'c2',item:'i-2',n:0,try:1,disp:'claimed',call:'—',lease:'t+60s'}];}},
+  {t:'Call-start fact commits BEFORE DBOS is touched',
+   n:'For claim c1, a dedicated transaction CASes <code>claimed → call_started</code> (only if the lease is still live). This one-way fact is the whole crash-safety story: if worker A dies during the next step, recovery knows a DBOS call <i>may</i> have happened.',
+   ev:[{a:'wA',x:'CAS c1: claimed → call_started (lease live ✓)',to:'pg'}],
+   locks:{barrier:['wA:sh'],wf:['wf-1'],rows:['claim c1']},
+   db:d=>{d.claims[0].disp='call_started'; d.claims[0].call='t₀';}},
+  {t:'The un-fenceable hop: DBOS.enqueue_workflow(wf-1)',
+   n:'With <code>SetWorkflowID(wf-1)</code> — the deterministic identity minted at registration — the workflow is enqueued at the item\'s service priority. Because the ID is deterministic, even a duplicate call here is idempotent on the DBOS side.',
+   ev:[{a:'wA',x:'enqueue wf-1, priority 1000',to:'dbos'},{a:'dbos',x:'workflow wf-1 ENQUEUED'}]},
+  {t:'Outcome CAS: claiming → enqueued, claim resolves',
+   n:'One transaction updates both rows: the Attempt (guarded on <code>claiming + current_claim_id=c1</code>) → <code>enqueued</code>, and the claim → <code>outcome_recorded</code>. Then the Operation aggregate recomputes (status stays <code>enqueuing</code> while i-2 is unconfirmed). Same dance for c2.',
+   ev:[{a:'wA',x:'outcome CAS c1 ✓; c2 call-start → enqueue → outcome ✓',to:'pg'}],
+   locks:{barrier:['wA:sh'],wf:['wf-1','wf-2'],rows:['attempts ×2','claims ×2','op op-1']},
+   db:d=>{d.att[0].enq='enqueued'; d.att[0].claim='—'; d.claims[0].disp='outcome_recorded';
+          d.att[1].enq='enqueued'; d.att[1].claim='—'; d.claims[1].disp='outcome_recorded'; d.claims[1].call='t₁';
+          d.op.status='running'; d.op.cut=5; d.op.counts='0 ✓ / 0 ✗ · 2 enqueued';}},
+  {t:'Application workflows run; the kernel is not involved',
+   n:'DBOS workers execute the app\'s workflow functions. The kernel stores no payloads, no prompts, no provider config — it will learn what happened only by observing DBOS status.',
+   ev:[{a:'dbos',x:'wf-1 running… wf-2 running…'}]},
+  {t:'reconcile() observes: both workflows SUCCESS',
+   n:'The reconciler loads a bounded candidate page (confirmed + non-terminal), reads DBOS status per workflow, then commits <b>one transaction per Attempt</b>: workflow advisory lock → row locks → re-validate (<code>current_attempt</code> unchanged, workflow matches) → set <code>succeeded</code>, <code>terminal_at</code>.',
+   ev:[{a:'rec',x:'observe wf-1, wf-2',to:'dbos'},{a:'dbos',x:'both SUCCESS'},{a:'rec',x:'2 × CAS execution_state → succeeded',to:'pg'}],
+   locks:{barrier:['rec:sh'],wf:['wf-1','wf-2'],rows:['op op-1','item i-1','attempt (i-1,0)']},
+   db:d=>{d.att[0].exec='succeeded'; d.att[1].exec='succeeded'; d.op.cut=7; d.op.counts='2 ✓ / 0 ✗';}},
+  {t:'Operation rollup goes terminal: succeeded',
+   n:'<code>_refresh_operation_lifecycle</code> ran inside each observation transaction; on the last one every Item\'s current Attempt is terminal-success, so <code>status=succeeded</code>, <code>completed_at</code> set. A <code>wait_operation()</code> caller\'s poll now returns. Attempts, claims, and counts remain as permanent, exportable history.',
+   ev:[{a:'rec',x:'rollup: 2/2 succeeded → operation terminal',to:'pg'}],
+   db:d=>{d.op.status='succeeded';}},
+ ]);
+
+/* ───── 2. registrar crash ───── */
+scenario('regcrash','2 · Registrar crashes mid-registration',['app','wA','pg','op'],
+ {op:null, items:[], att:[], claims:[], comps:[]},
+ [
+  {t:'Submitter registers page 0 of 2, then dies',
+   n:'A 4-item manifest (2 pages). Page 0 commits — 2 items durable, cursor at 1, lease L1 live for 60s. Then the submitter process is killed. No cleanup runs; the lease is the only tombstone.',
+   ev:[{a:'app',x:'page 0 committed (cursor 1/2, lease L1)…',to:'pg'},{a:'app',x:'💥 process killed'}],
+   db:d=>{d.op={key:'op-1',status:'registering',reg:'cursor 1/2 · lease L1 (t+60s)',cut:2,counts:'—'};
+     d.items=[{id:'i-1',cur:0},{id:'i-2',cur:0}];
+     d.att=[{item:'i-1',n:0,enq:'pending',try:0,exec:'not_started',claim:'—',cancel:'—'},
+            {item:'i-2',n:0,enq:'pending',try:0,exec:'not_started',claim:'—',cancel:'—'}];}},
+  {t:'A retry inside the lease window is refused',
+   n:'A second submit of the same manifest arrives while L1 is unexpired. It validates the exact replay (digests equal ✓), sees a live foreign lease, and raises <code>RegistrationLeaseHeldError</code> with the expiry time. No partial work, no split brain — the dead registrar might still be alive-but-slow, so the kernel waits it out.',
+   ev:[{a:'app',x:'submit(replay) → <code>RegistrationLeaseHeldError</code> until t+60s',to:'pg'}]},
+  {t:'After expiry, the replay adopts the lease and resumes at the cursor',
+   n:'Now the lease CAS (<code>WHERE lease_expires_at &lt;= now</code>) installs lease L2. Registration resumes from <b>cursor 1</b> — page 0 is never re-inserted, because the cursor says it is already durable. The manifest digest guarantees page 1\'s content is identical to what the dead registrar would have written.',
+   ev:[{a:'app',x:'lease CAS L1→L2; register page 1; cursor 1→2 (final)',to:'pg'}],
+   locks:{barrier:['app:sh'],wf:['wf-3','wf-4'],rows:['operations op-1']},
+   db:d=>{d.op.status='enqueuing'; d.op.reg='complete'; d.op.cut=3;
+     d.items.push({id:'i-3',cur:0},{id:'i-4',cur:0});
+     d.att.push({item:'i-3',n:0,enq:'pending',try:0,exec:'not_started',claim:'—',cancel:'—'},
+                {item:'i-4',n:0,enq:'pending',try:0,exec:'not_started',claim:'—',cancel:'—'});}},
+  {t:'Alternative ending: the operator abandons it',
+   n:'If nobody replays, the Operation would sit at <code>registering</code> forever — claims never select from an incomplete registration. The escape hatch is explicit and human: <code>abandon_registration(operator_confirmed=True)</code>, allowed only after lease expiry, flips it to <code>failed / registration_abandoned</code>. Committed items stay as history; nothing is deleted.',
+   ev:[{a:'op',x:'(alternative) abandon_registration → status failed, terminal',to:'pg'}]},
+ ]);
+
+/* ───── 3. two enqueuers ───── */
+scenario('duel','3 · Two workers, one pending Attempt',['wA','wB','dbos','pg'],
+ {op:{key:'op-1',status:'enqueuing',reg:'complete',cut:2,counts:'—'},
+  items:[{id:'i-1',cur:0}],
+  att:[{item:'i-1',n:0,enq:'pending',try:0,exec:'not_started',claim:'—',cancel:'—'}],
+  claims:[], comps:[]},
+ [
+  {t:'Both workers call claim_pending_attempts at once',
+   n:'Worker A and worker B race. Both first take the shared export barrier (compatible), then contend on the <b>exclusive</b> claim-selection advisory lock. B blocks. This is the deliberate funnel: page selection is globally single-flight (see concern C1 for the cost).',
+   ev:[{a:'wA',x:'acquires claim-selection lock'},{a:'wB',x:'blocks on claim-selection lock…'}],
+   locks:{barrier:['wA:sh','wB:sh'],claim:'wA'}},
+  {t:'A claims i-1; B\'s later page finds nothing',
+   n:'A appends claim c1, CASes the attempt to <code>claiming</code>, commits, releasing the lock. B\'s selection then runs — but its candidate query requires <code>current_claim_id IS NULL</code>, so i-1 no longer qualifies. B gets an empty page. No error, no duplicate: the race was resolved by ordering, and the CAS never even had to fire for B.',
+   ev:[{a:'wA',x:'claim c1 + CAS pending→claiming; commit',to:'pg'},{a:'wB',x:'selection: 0 candidates → empty page'}],
+   locks:{barrier:['wB:sh'],claim:'wB'},
+   db:d=>{d.att[0].enq='claiming';d.att[0].try=1;d.att[0].claim='c1';d.op.cut=3;
+     d.claims=[{id:'c1',item:'i-1',n:0,try:1,disp:'claimed',call:'—',lease:'t+60s'}];}},
+  {t:'A stalls (GC pause, network, restart) — the lease runs out',
+   n:'c1 was never advanced to call_started. After <code>lease_expires_at</code>, the attempt is stuck at <code>claiming</code> with a dead claim. Nothing in the system "notices" — until someone runs a replacement page.',
+   ev:[{a:'wA',x:'…silent for 60s…'}],
+   db:d=>{d.claims[0].lease='EXPIRED';}},
+  {t:'B replaces the expired, provably-unstarted claim',
+   n:'<code>replace_expired_unstarted_claims</code>: the replacement CAS requires <code>disposition=claimed AND enqueue_call_started_at IS NULL AND lease expired</code>. Because the call-start fact is committed <i>before</i> any DBOS call, "unstarted" is provable from the row alone — no DBOS lookup needed. c1 → <code>replaced</code> (chained via replacement_claim_id), fresh c2 takes over. Same attempt, same workflow_id, same enqueue_try.',
+   ev:[{a:'wB',x:'c1 → replaced; append c2; attempt pointer c1→c2',to:'pg'}],
+   locks:{barrier:['wB:sh'],claim:'wB',wf:['wf-1'],rows:['op op-1','item i-1','attempt (i-1,0)','claim c1']},
+   db:d=>{d.claims[0].disp='replaced'; d.claims.push({id:'c2',item:'i-1',n:0,try:1,disp:'claimed',call:'—',lease:'t+120s'});
+     d.att[0].claim='c2'; d.op.cut=4;}},
+  {t:'A wakes up and tries to proceed — and is cleanly rejected',
+   n:'A\'s call-start CAS for c1 requires <code>disposition=claimed</code>; c1 is <code>replaced</code>, so the CAS matches zero rows → <code>LOST_AUTHORITY</code>. A stops without side effects. Meanwhile B call-starts c2, enqueues wf-1, records the outcome. Exactly one DBOS call ever happened.',
+   ev:[{a:'wA',x:'call-start CAS on c1 → 0 rows → LOST_AUTHORITY, stop'},{a:'wB',x:'c2: call-start → enqueue → outcome_recorded',to:'dbos'}],
+   locks:{barrier:['wB:sh'],wf:['wf-1'],rows:['claim c2','attempt (i-1,0)']},
+   db:d=>{d.claims[1].disp='outcome_recorded'; d.claims[1].call='t₂'; d.att[0].enq='enqueued'; d.att[0].claim='—'; d.op.status='running'; d.op.cut=5;}},
+ ]);
+
+/* ───── 4. call-started crash / two generals ───── */
+scenario('generals','4 · Crash after call-start — the two-generals seam',['wA','wB','dbos','pg'],
+ {op:{key:'op-1',status:'enqueuing',reg:'complete',cut:3,counts:'—'},
+  items:[{id:'i-1',cur:0}],
+  att:[{item:'i-1',n:0,enq:'claiming',try:1,exec:'not_started',claim:'c1',cancel:'—'}],
+  claims:[{id:'c1',item:'i-1',n:0,try:1,disp:'call_started',call:'t₀',lease:'t+60s'}], comps:[]},
+ [
+  {t:'Worker A commits call-start, fires at DBOS… and dies',
+   n:'The durable state says: "a DBOS call for wf-1 <b>may</b> have been made." Did the packet arrive? The kernel cannot know from its own tables — this is the two-generals problem, and the design\'s answer is to <i>persist the uncertainty</i> instead of resolving it optimistically.',
+   ev:[{a:'wA',x:'call_started committed; DBOS call in flight…',to:'dbos'},{a:'wA',x:'💥 crash'}]},
+  {t:'The claim expires; recovery loads it for observation, not replacement',
+   n:'Expired <code>call_started</code> claims are a separate recovery class from expired <code>claimed</code> ones. <code>recover_call_started_page</code> will not blindly re-enqueue: it must first ask DBOS the authoritative question — <code>get_workflow_status(wf-1)</code>.',
+   ev:[{a:'wB',x:'recovery page: [c1] — needs authoritative observation'}],
+   db:d=>{d.claims[0].lease='EXPIRED';}},
+  {t:'Branch 1 — DBOS says EXISTING: adopt, don\'t re-fire',
+   n:'The workflow row exists and matches identity checks (name, queue, top-level, valid priority). The outcome is recorded as <code>workflow_already_present</code> against the <i>original</i> claim c1 — the dead worker\'s call is honored as this attempt\'s outcome. No second enqueue.',
+   ev:[{a:'wB',x:'observe wf-1',to:'dbos'},{a:'dbos',x:'EXISTING (queue, name, priority ✓)'},{a:'wB',x:'record outcome on c1: workflow_already_present',to:'pg'}],
+   locks:{barrier:['wB:sh'],wf:['wf-1'],rows:['attempt (i-1,0)','claim c1']},
+   db:d=>{d.att[0].enq='workflow_already_present'; d.att[0].claim='—'; d.claims[0].disp='outcome_recorded'; d.op.status='running'; d.op.cut=4;}},
+  {t:'Branch 2 — DBOS says ABSENT: replace and re-fire safely (rewind: suppose it was absent)',
+   n:'Rewinding to the expired claim: if the observation is ABSENT, the call never landed. c1 → <code>replaced</code>, fresh c2 with <code>enqueue_try+1</code> runs the full call-start → enqueue path. Safety net: even if ABSENT was a stale read and the workflow appears a millisecond later, the deterministic <code>SetWorkflowID(wf-1)</code> turns the re-fire into an idempotent collision, reported back as <code>workflow_already_present</code>.',
+   ev:[{a:'wB',x:'(branch) ABSENT → c1 replaced, c2 call-start → enqueue',to:'dbos'}]},
+  {t:'Branch 3 — DBOS lookup fails: stay uncertain',
+   n:'If the status call itself errors or returns a contradictory row (wrong queue, wrong name, unexpected parent), the observation is <code>UNCERTAIN</code> and <b>nothing is written</b>. The claim stays <code>call_started</code>; the next reconcile pass retries the observation. Uncertainty is never converted to a guess — the enqueue-try budget bounds how long this can go on before <code>enqueue_error(permanent)</code>.',
+   ev:[{a:'wB',x:'(branch) status lookup failed → no-op, retry later'}]},
+ ]);
+
+/* ───── 5. error retry + concurrent reconcilers ───── */
+scenario('retry','5 · Worker error → automatic retry; two reconcilers, one successor',['rec','rec2','dbos','pg'],
+ {op:{key:'op-1',status:'running',reg:'complete',cut:5,counts:'0 ✓ / 0 ✗'},
+  items:[{id:'i-1',cur:0}],
+  att:[{item:'i-1',n:0,enq:'enqueued',try:1,exec:'active',claim:'—',cancel:'—'}],
+  claims:[{id:'c1',item:'i-1',n:0,try:1,disp:'outcome_recorded',call:'t₀',lease:'—'}], comps:[]},
+ [
+  {t:'The workflow fails; two reconcilers both observe ERROR',
+   n:'The app\'s <code>classify_error</code> tagged the failure <code>transient</code> — a retryable class under the Operation\'s policy (<code>max_attempts=3</code>). Two reconcile() calls (say, two <code>wait_operation</code> pollers) both load attempt (i-1, 0) as a candidate and both see the same DBOS error status.',
+   ev:[{a:'rec',x:'observe wf-1 → ERROR(transient)',to:'dbos'},{a:'rec2',x:'observe wf-1 → ERROR(transient)',to:'dbos'}]},
+  {t:'Both race to persist; the workflow advisory lock lines them up',
+   n:'Each opens its own transaction and must take <code>pg_advisory_xact_lock(wf-1)</code> — and, because a retry will mint successor workflow wf-1r, <b>both</b> workflow locks, sorted, before any row lock. Reconciler #1 wins; #2 waits at the lock, not at the row.',
+   ev:[{a:'rec',x:'locks wf-1 + wf-1r → rows'},{a:'rec2',x:'blocks on wf-1 lock…'}],
+   locks:{barrier:['rec:sh','rec2:sh'],wf:['wf-1 (rec)','wf-1r (rec)'],rows:['op op-1','item i-1','attempt (i-1,0)']}},
+  {t:'Reconciler #1: terminal ERROR + Attempt 1, one transaction',
+   n:'Attempt 0 → <code>error</code>, <code>retry_disposition=retryable</code>, failure snapshot stored. Then in the same transaction: INSERT Attempt 1 (<code>pending / not_started</code>, <code>retry_reason=automatic_execution_error</code>, <code>source_attempt=0</code>) and the decisive pointer CAS — <code>UPDATE items SET current_attempt=1 WHERE current_attempt=0</code>.',
+   ev:[{a:'rec',x:'attempt 0 → error(retryable); INSERT attempt 1; item pointer CAS 0→1 ✓',to:'pg'}],
+   db:d=>{d.att[0].exec='error'; d.att[0].claim='—';
+     d.att.push({item:'i-1',n:1,enq:'pending',try:0,exec:'not_started',claim:'—',cancel:'—'});
+     d.items[0].cur=1; d.op.cut=6; d.op.counts='0 ✓ / 1 attempt errored';}},
+  {t:'Reconciler #2 unblocks — and becomes a harmless no-op',
+   n:'#2 acquires the lock, re-reads under <code>FOR UPDATE</code>, and its re-validation fails on the first check: <code>items.current_attempt</code> is now 1, not 0. Its observation targets a superseded attempt → return <code>None</code>, write nothing. The contract test pins this exact interleaving: outcomes are always <code>[applied, no-op]</code>, lineage is always 0 → 1, never a fork.',
+   ev:[{a:'rec2',x:'re-validate: current_attempt≠0 → no-op, commit nothing'}],
+   locks:{barrier:['rec2:sh'],wf:['wf-1 (rec2)'],rows:['op op-1','item i-1']}},
+  {t:'Attempt 1 flows through the normal machine and succeeds',
+   n:'The next enqueue page claims Attempt 1 (fresh claim, fresh deterministic workflow_id wf-1r), enqueues, and a later observation lands <code>succeeded</code>. Note what the lineage bought: the failed attempt, its failure class, its claim history — all still queryable. Had this failed twice more, disposition would be <code>exhausted</code> and the Item terminally failed. There is <b>no delay between attempts</b> — see concern C5.',
+   ev:[{a:'rec',x:'attempt 1: claim → enqueue → observe SUCCESS',to:'dbos'}],
+   db:d=>{d.att[1].enq='enqueued'; d.att[1].try=1; d.att[1].exec='succeeded';
+     d.claims.push({id:'c2',item:'i-1',n:1,try:1,disp:'outcome_recorded',call:'t₃',lease:'—'});
+     d.op.status='succeeded'; d.op.cut=8; d.op.counts='1 ✓ / 0 ✗';}},
+ ]);
+
+/* ───── 6. cancellation ───── */
+scenario('cancel','6 · Cancellation mid-flight — intent first, shared references spared',['can','wA','dbos','pg'],
+ {op:{key:'op-1',status:'running',reg:'complete',cut:6,counts:'—'},
+  items:[{id:'i-1',cur:0},{id:'i-2',cur:0},{id:'i-3',cur:0}],
+  att:[{item:'i-1',n:0,enq:'enqueued',try:1,exec:'active',claim:'—',cancel:'—'},
+       {item:'i-2',n:0,enq:'claiming',try:1,exec:'not_started',claim:'c2',cancel:'—'},
+       {item:'i-3',n:0,enq:'enqueued',try:1,exec:'active',claim:'—',cancel:'— (wf-S shared with op-2)'}],
+  claims:[{id:'c2',item:'i-2',n:0,try:1,disp:'call_started',call:'t₀',lease:'t+60s'}], comps:[]},
+ [
+  {t:'cancel_operation(op-1) — phase 1 writes intent, touches no workflow',
+   n:'One transaction, under the full lock spine (barrier → workflow locks for <i>every</i> current reference → op→item→attempt row locks). Every non-terminal current Attempt gets <code>cancellation_request_id / requested_by / origin=local_operation</code> and flips to <code>cancel_requested</code>. Outstanding claims are invalidated — including c2, which had already crossed call-start. Operation → <code>cancelling</code>. DBOS has not been called.',
+   ev:[{a:'can',x:'intent on 3 attempts; invalidate c2; op → cancelling',to:'pg'}],
+   locks:{barrier:['can:sh'],wf:['wf-1','wf-2','wf-S'],rows:['op op-1','items ×3','attempts ×3','claim c2']},
+   db:d=>{d.op.status='cancelling'; d.op.cut=7;
+     d.att[0].exec='cancel_requested'; d.att[0].cancel='req R1 · local';
+     d.att[1].exec='cancel_requested'; d.att[1].cancel='req R1 · local'; d.att[1].claim='—';
+     d.att[2].exec='cancel_requested'; d.att[2].cancel='req R1 · local';
+     d.claims[0].disp='invalidated';}},
+  {t:'Why intent-first matters',
+   n:'The intent rows are the <b>truth other actors read</b>. Claim selection excludes attempts with a <code>cancellation_request_id</code>; <code>request_next_attempt</code> and even new registrations linking these workflow_ids are rejected while cancellation is unresolved (<code>workflow_reference_conflict</code>). A crash right now loses nothing: replaying <code>cancel_operation</code> with the same request is idempotent, and reconciliation can also drive the remaining physical work.',
+   ev:[{a:'can',x:'intent durable — any successor can finish the job'}]},
+  {t:'Phase 2, per attempt: i-1 gets a real DBOS cancel',
+   n:'Each physical step is its own transaction, and DBOS I/O happens <b>after</b> kernel row locks are released. wf-1 is live and referenced only here → <code>DBOS.cancel_workflow(wf-1, cancel_children=False)</code>. Attempt → terminal <code>cancelled</code>, disposition <code>dbos_cancelled</code>. Non-recursive is a hard rule: had wf-1 reported children, this would fail closed instead of cascading.',
+   ev:[{a:'can',x:'cancel wf-1',to:'dbos'},{a:'can',x:'attempt (i-1,0) → cancelled/dbos_cancelled',to:'pg'}],
+   db:d=>{d.att[0].exec='cancelled'; d.att[0].cancel='dbos_cancelled'; d.op.cut=8;}},
+  {t:'i-3\'s workflow is shared with a live op-2 attempt → skipped_shared',
+   n:'<code>_has_other_reference</code> finds op-2\'s current Attempt on wf-S still non-terminal. Killing wf-S would destroy op-2\'s work, so DBOS is not called. Locally, i-3\'s attempt finalizes <code>cancelled / skipped_shared</code>: op-1\'s intent is honored, op-2\'s execution survives. If op-2 later sees wf-S finish, its result stands.',
+   ev:[{a:'can',x:'wf-S has live foreign reference → skip DBOS; local cancelled/skipped_shared',to:'pg'}],
+   db:d=>{d.att[2].exec='cancelled'; d.att[2].cancel='skipped_shared'; d.op.cut=9;}},
+  {t:'i-2\'s invalidated call-started claim is the hazard: did its enqueue land?',
+   n:'c2 was invalidated <i>after</i> call-start — the dead claimant\'s DBOS call may still materialize wf-2 at any moment. <code>repair_late_enqueue_compensations</code> writes a <code>pending</code> compensation row, takes a session-level per-workflow lock (held across the external call), and asks DBOS.',
+   ev:[{a:'can',x:'compensation(c2) = pending; observe wf-2',to:'dbos'}],
+   locks:{other:['session lock wf-2 (repair)']},
+   db:d=>{d.comps=[{claim:'c2',wf:'wf-2',disp:'pending'}]; d.att[1].exec='cancelled'; d.att[1].cancel='not_enqueued'; d.op.cut=10;}},
+  {t:'Absence must be proven, and even then it stays on watch',
+   n:'ABSENT once is not enough — a compensation needs <b>3 absence observations past a grace window</b> before resolving <code>no_workflow_found</code>. If wf-2 appears later anyway (the call limped through a proxy), a single bounded <b>hazard successor</b> row is appended and the repair cancels it then. Had wf-2 been found now, the repair would cancel it directly (<code>cancelled</code>) or record its terminal state (<code>observed_terminal</code>).',
+   ev:[{a:'dbos',x:'absent ×3 across grace'},{a:'can',x:'compensation → no_workflow_found',to:'pg'}],
+   db:d=>{d.comps[0].disp='no_workflow_found';}},
+  {t:'Rollup: cancelling → cancelled, with the race\'s one exception',
+   n:'When <code>operation_has_unresolved_cancellation</code> goes false — no pending intent, no pending compensation, no open hazard — the Operation finalizes <code>cancelled</code>. The exception worth remembering: an attempt that reached SUCCEEDED before its physical cancel keeps its success (<code>observed_terminal</code>) — cancel never falsifies history, so a cancelled Operation can still contain succeeded Items.',
+   ev:[{a:'can',x:'no unresolved work → op cancelled',to:'pg'}],
+   db:d=>{d.op.status='cancelled'; d.op.cut=11; d.op.counts='0 ✓ / 3 cancelled';}},
+ ]);
+
+/* ───── 7. missing ───── */
+scenario('missing','7 · The workflow that vanished — proving a negative',['rec','dbos','pg'],
+ {op:{key:'op-1',status:'running',reg:'complete',cut:4,counts:'—'},
+  items:[{id:'i-1',cur:0}],
+  att:[{item:'i-1',n:0,enq:'enqueued',try:1,exec:'active',claim:'—',cancel:'—'}],
+  claims:[], comps:[]},
+ [
+  {t:'Observation 1: DBOS returns no row for wf-1',
+   n:'The workflow was confirmed enqueued, yet <code>get_workflow_status(wf-1)</code> finds nothing — maybe the DBOS system DB was restored from backup, maybe a read replica lagged, maybe it\'s real. One reading proves nothing. The kernel records <code>missing_observation_count=1</code> with first/last timestamps, execution_state unchanged via CAS guard.',
+   ev:[{a:'rec',x:'observe wf-1 → ABSENT',to:'dbos'},{a:'rec',x:'missing_observation_count=1',to:'pg'}],
+   db:d=>{d.att[0].cancel='missing 1× (grace running)';}},
+  {t:'Observations 2 and 3, at least 60 seconds after the first',
+   n:'The predicate for declaring MISSING is conjunctive: <code>count ≥ 3</code> <b>and</b> <code>now − first_observed ≥ missing_grace_seconds</code>. A burst of three reads in one second cannot tombstone the attempt; neither can one absence followed by silence. Between observations, an ACTIVE reading would zero the streak entirely.',
+   ev:[{a:'rec',x:'ABSENT again ×2, grace elapsed',to:'dbos'}],
+   db:d=>{d.att[0].cancel='missing 3× · grace met';}},
+  {t:'Terminal MISSING — immutable, but never forgotten',
+   n:'The attempt goes terminal <code>missing</code>. Terminal states are immutable, but MISSING is special: it enters a re-observation rotation (<code>missing_reobservations</code>, oldest-checked-first). If DBOS is later restored and wf-1 reappears, that fact is at least visible in markers — though the attempt itself stays missing; recovery is an operator\'s <code>request_next_attempt</code>, not silent resurrection.',
+   ev:[{a:'rec',x:'execution_state → missing (terminal); rotation marker created',to:'pg'}],
+   db:d=>{d.att[0].exec='missing'; d.att[0].cancel='reobserved on rotation'; d.op.status='partial'; d.op.cut=5; d.op.counts='0 ✓ / 1 missing';}},
+ ]);
+
+/* ───── 8. export ───── */
+scenario('export','8 · Export cut vs a busy fleet — the barrier and the high-water mark',['exp','wA','pg'],
+ {op:{key:'op-1',status:'running',reg:'complete',cut:9,counts:'—'},
+  items:[{id:'i-1',cur:1}],
+  att:[{item:'i-1',n:1,enq:'enqueued',try:1,exec:'active',claim:'—',cancel:'—'}],
+  claims:[], comps:[]},
+ [
+  {t:'Why a plain snapshot isn\'t enough',
+   n:'Every kernel write stamps a global <code>change_seq</code>. Incremental export ships "rows with change_seq &gt; last cursor" — but a cursor boundary chosen while writers are mid-transaction could split one logical transition (attempt updated, claim not yet) across two export runs. The cut must be a point <i>no transaction straddles</i>.',
+   ev:[{a:'exp',x:'needs a straddle-free change_seq boundary'}]},
+  {t:'The barrier flips from shared to exclusive',
+   n:'Every writer\'s first statement is <code>pg_advisory_xact_lock_shared(EXPORT_BARRIER)</code>. The exporter takes the <b>exclusive session-level</b> form: it waits for in-flight writers to commit, and new writers queue behind it. Worker A\'s outcome transaction, arriving now, blocks at its very first statement.',
+   ev:[{a:'exp',x:'pg_advisory_lock(EXPORT_BARRIER) — drains writers'},{a:'wA',x:'blocks on shared barrier…'}],
+   locks:{barrier:['exp:EX','wA:waiting']}},
+  {t:'Pin the snapshot, allocate H, read',
+   n:'Inside REPEATABLE READ: allocate <code>H = nextval(change_seq)</code> while writers are excluded — every committed mutation is ≤ H, every future one &gt; H — then read all members <code>WHERE change_seq ≤ H</code>. The barrier is held through the whole read (see concern C2: it could arguably be released right after H). Per-operation consumers can additionally pin <code>platform_cut_version</code> and later CAS against it (cut.py).',
+   ev:[{a:'exp',x:'H=15022; read members ≤ H',to:'pg'}],
+   locks:{barrier:['exp:EX','wA:waiting']}},
+  {t:'Release; the fleet resumes; the bundle promotes elsewhere',
+   n:'Worker A\'s transaction proceeds with change_seq &gt; H — invisible to this capture, first row of the next one. The captured bundle then goes through the destination-side machine: staging tables, signed integrity digests, and a <b>lease + fencing-token gated promotion</b> where every transaction re-proves ownership with a CAS (<code>…RETURNING mutation_epoch</code>). A publisher that lost its lease rolls back even already-staged DDL; an equal-snapshot loser records <code>SUPERSEDED</code>, never a receipt.',
+   ev:[{a:'exp',x:'unlock; stage + fenced promote at destination'},{a:'wA',x:'resumes, change_seq 15023',to:'pg'}],
+   db:d=>{d.att[0].exec='succeeded'; d.op.cut=10; d.op.counts='1 ✓ (next cut)';}},
+ ]);
+
+/* ───────── player engine ───────── */
+let cur=SCENARIOS[0], idx=0, playTimer=null;
+const $=id=>document.getElementById(id);
+
+function pill(v){
+  const key=String(v).replace(/[^a-z_]/g,'');
+  const known=['pending','claiming','enqueued','workflow_already_present','enqueue_error','not_started','active','cancel_requested','succeeded','error','recovery_exhausted','cancelled','missing','claimed','call_started','outcome_recorded','expired','replaced','invalidated','registering','enqueuing','running','cancelling','failed','partial','skipped_shared','observed_terminal','dbos_cancelled','planned','staging','promoted','superseded'];
+  if(known.includes(key)) return `<span class="pill pv-${key}">${v}</span>`;
+  if(String(v).includes('pending')) return `<span class="pill pv-pending_comp">${v}</span>`;
+  if(String(v).includes('no_workflow_found')) return `<span class="pill pv-cancelled">${v}</span>`;
+  return v;
+}
+function tbl(title,heads,rows){
+  if(!rows.length) return '';
+  let h=`<h4>${title}</h4><table><thead><tr>${heads.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>`;
+  rows.forEach(r=>{h+='<tr>'+r.map(c=>`<td>${c}</td>`).join('')+'</tr>';});
+  return h+'</tbody></table>';
+}
+let prevHtmlCells=null;
+function renderDb(db){
+  const rows={
+    op: db.op?[[db.op.key,pill(db.op.status),db.op.reg,db.op.cut,db.op.counts]]:[],
+    items: db.items.map(i=>[i.id,i.cur]),
+    att: db.att.map(a=>[`${a.item} · ${a.n}`,pill(a.enq),a.try,pill(a.exec),a.claim,a.cancel]),
+    claims: db.claims.map(c=>[c.id,`${c.item}·${c.n}`,c.try,pill(c.disp),c.call,c.lease]),
+    comps: db.comps.map(c=>[c.claim,c.wf,pill(c.disp)]),
+  };
+  let html='';
+  html+=tbl('operations',['key','status','registration','cut_version','counts'],rows.op);
+  html+=tbl('items',['item_id','current_attempt'],rows.items);
+  html+=tbl('item_attempts',['item · attempt','enqueue_state','try','execution_state','current_claim','cancellation / notes'],rows.att);
+  html+=tbl('enqueue_claims (append-only)',['claim_id','attempt','try','disposition','call_started','lease'],rows.claims);
+  html+=tbl('enqueue_compensations',['claim','workflow','disposition'],rows.comps);
+  $('dbtables').innerHTML=html||'<p style="color:var(--muted);font-size:13px">No rows yet.</p>';
+  // diff-flash
+  const cells=[...$('dbtables').querySelectorAll('td')].map(td=>td.innerHTML);
+  if(prevHtmlCells && prevHtmlCells.length===cells.length){
+    [...$('dbtables').querySelectorAll('td')].forEach((td,i)=>{ if(td.innerHTML!==prevHtmlCells[i]) td.classList.add('chg'); });
+  } else if(prevHtmlCells!==null){
+    // structure changed (rows added): flash tables whose row count differs — flash last row of each table
+    $('dbtables').querySelectorAll('table').forEach(t=>{const trs=t.querySelectorAll('tbody tr'); if(trs.length) trs[trs.length-1].querySelectorAll('td').forEach(td=>td.classList.add('chg'));});
+  }
+  prevHtmlCells=cells;
+}
+function renderLocks(l){
+  const items=[];
+  const b=l.barrier||[];
+  items.push({cls:b.length?(b.some(x=>x.includes('EX'))?'held ex':'held sh'):'',
+    html:`<b>EXPORT_BARRIER</b> ${b.length? '· '+b.map(x=>x.replace(':sh',' shared').replace(':EX',' EXCLUSIVE')).join(', '):'· free'}`});
+  items.push({cls:l.claim?'held ex':'', html:`<b>CLAIM_SELECTION</b> ${l.claim? '· held by '+ACTOR_NAMES[l.claim] : '· free'}`});
+  items.push({cls:(l.wf&&l.wf.length)?'held wf':'', html:`<b>workflow locks</b> ${(l.wf&&l.wf.length)? '· '+l.wf.join(', '):'· none'}`});
+  items.push({cls:(l.rows&&l.rows.length)?'held row':'', html:`<b>FOR UPDATE</b> ${(l.rows&&l.rows.length)? '· '+l.rows.join(' · '):'· none'}`});
+  if(l.other&&l.other.length) items.push({cls:'held wf',html:`<b>other</b> · ${l.other.join(', ')}`});
+  $('lockbar').innerHTML=items.map(i=>`<div class="lock ${i.cls}">${i.html}</div>`).join('');
+}
+function render(){
+  const st=cur.steps[idx];
+  $('pos').textContent=`step ${idx+1} / ${cur.steps.length}`;
+  $('narr').innerHTML=`<span class="st">${idx+1}. ${st.t}</span>${st.n}`;
+  const active=new Set(st.ev.map(e=>e.a).concat(st.ev.filter(e=>e.to).map(e=>e.to)));
+  $('actors').innerHTML=cur.actors.map(a=>
+    `<span class="actor ${active.has(a)?'lit':''}"><span class="dot" style="${active.has(a)?'background:'+ACTOR_COLORS[a]:''}"></span>${ACTOR_NAMES[a]}</span>`).join('');
+  let log='';
+  for(let s=0;s<=idx;s++){
+    cur.steps[s].ev.forEach(e=>{
+      log+=`<div class="ev ${s===idx?'cur':''}"><span class="who" style="background:${ACTOR_COLORS[e.a]}">${ACTOR_NAMES[e.a]}</span><span class="txt">${e.x}${e.to? ' <span style="color:#8a93a0">→ '+ACTOR_NAMES[e.to]+'</span>':''}</span></div>`;
+    });
+  }
+  $('evlog').innerHTML=log||'<div class="ev cur"><span class="txt" style="padding-left:14px;color:var(--muted)">…</span></div>';
+  $('evlog').scrollTop=$('evlog').scrollHeight;
+  renderLocks(cur.steps[idx].locks||{});
+  renderDb(cur.steps[idx].db);
+  $('btn-back').disabled=idx===0;
+  $('btn-next').disabled=idx>=cur.steps.length-1;
+}
+function pick(sc){
+  cur=sc; idx=0; prevHtmlCells=null; stopPlay();
+  document.querySelectorAll('#scpick button').forEach(b=>b.classList.toggle('on',b.dataset.id===sc.id));
+  render();
+}
+function stopPlay(){ if(playTimer){clearInterval(playTimer);playTimer=null;$('btn-play').textContent='▶ Play';} }
+$('scpick').innerHTML=SCENARIOS.map(s=>`<button data-id="${s.id}">${s.name}</button>`).join('');
+document.querySelectorAll('#scpick button').forEach(b=>b.addEventListener('click',()=>pick(SCENARIOS.find(s=>s.id===b.dataset.id))));
+$('btn-next').addEventListener('click',()=>{if(idx<cur.steps.length-1){idx++;render();}});
+$('btn-back').addEventListener('click',()=>{if(idx>0){idx--;prevHtmlCells=null;render();}});
+$('btn-reset').addEventListener('click',()=>{idx=0;prevHtmlCells=null;stopPlay();render();});
+$('btn-play').addEventListener('click',()=>{
+  if(playTimer){stopPlay();return;}
+  $('btn-play').textContent='⏸ Pause';
+  playTimer=setInterval(()=>{ if(idx<cur.steps.length-1){idx++;render();} else stopPlay(); },3200);
+});
+pick(SCENARIOS[0]);
+</script>
+</body>
+</html>
