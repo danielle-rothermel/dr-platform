@@ -44,7 +44,7 @@ class ExecutionIdentity(BaseModel):
     workflow_id: NonEmptyStr
 
 
-class TargetContractDeclaration(BaseModel):
+class _TargetContractDeclaration(BaseModel):
     """Serializable declaration whose digest defines a target contract."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -59,7 +59,7 @@ class TargetContractDeclaration(BaseModel):
     classifier_version: PositiveInt
 
     @model_validator(mode="after")
-    def validate_declaration(self) -> TargetContractDeclaration:
+    def validate_declaration(self) -> _TargetContractDeclaration:
         if self.topology is not WorkflowTopology.TOP_LEVEL_ONLY:
             raise ValueError("only top-level workflows are supported")
         if self.recipe_envelope_version != EXECUTION_RECIPE_FORMAT_VERSION:
@@ -77,18 +77,6 @@ class TargetContractDeclaration(BaseModel):
         declaration["registration_hook_version"] = None
         return sha256_json_digest(declaration)
 
-    def target_ref(
-        self,
-        *,
-        target_key: str,
-        target_version: int,
-    ) -> ExecutionTargetRef:
-        return ExecutionTargetRef(
-            target_key=target_key,
-            target_version=target_version,
-            target_contract_digest=self.digest(),
-        )
-
 
 class ExecutionTarget(BaseModel):
     """Runtime-only behavior registered under an immutable target reference."""
@@ -99,7 +87,8 @@ class ExecutionTarget(BaseModel):
         frozen=True,
     )
 
-    ref: ExecutionTargetRef
+    target_key: NonEmptyStr
+    target_version: PositiveInt
     queue_name: NonEmptyStr
     workflow_role: NonEmptyStr
     managed_workflow_name: NonEmptyStr
@@ -114,8 +103,16 @@ class ExecutionTarget(BaseModel):
     recipe_for: RecipeCallable = Field(exclude=True)
     classify_error: ErrorClassifier = Field(exclude=True)
 
-    def contract_declaration(self) -> TargetContractDeclaration:
-        return TargetContractDeclaration(
+    @property
+    def ref(self) -> ExecutionTargetRef:
+        return ExecutionTargetRef(
+            target_key=self.target_key,
+            target_version=self.target_version,
+            target_contract_digest=self._contract_declaration().digest(),
+        )
+
+    def _contract_declaration(self) -> _TargetContractDeclaration:
+        return _TargetContractDeclaration(
             queue_name=self.queue_name,
             workflow_role=self.workflow_role,
             managed_workflow_name=self.managed_workflow_name,
@@ -175,7 +172,7 @@ class TargetRegistry:
     def __init__(self) -> None:
         self._targets: dict[TargetIdentity, ExecutionTarget] = {}
         self._declarations: dict[
-            TargetIdentity, TargetContractDeclaration
+            TargetIdentity, _TargetContractDeclaration
         ] = {}
         self._workflow_refs: dict[str, ExecutionTargetRef] = {}
 
@@ -244,19 +241,10 @@ class TargetRegistry:
         target: ExecutionTarget,
         *,
         targets: dict[TargetIdentity, ExecutionTarget],
-        declarations: dict[TargetIdentity, TargetContractDeclaration],
+        declarations: dict[TargetIdentity, _TargetContractDeclaration],
         workflow_refs: dict[str, ExecutionTargetRef],
     ) -> ExecutionTarget:
-        declaration = target.contract_declaration()
-        if target.ref.target_contract_digest != declaration.digest():
-            raise TargetConflictError(
-                self._failure(
-                    TargetResolutionErrorCode.TARGET_CONFLICT,
-                    target.ref,
-                    "execution target contract digest does not match its "
-                    "declaration",
-                )
-            )
+        declaration = target._contract_declaration()
 
         identity = self._identity(target.ref)
         existing = targets.get(identity)

@@ -67,7 +67,6 @@ from dr_platform.submission import (
 from dr_platform.targets import (
     ExecutionIdentity,
     ExecutionTarget,
-    TargetContractDeclaration,
 )
 from tests.conftest import engine_dsn
 
@@ -207,21 +206,16 @@ class _Canceller:
 
 
 def _target() -> ExecutionTarget:
-    declaration = TargetContractDeclaration(
+    target: ExecutionTarget
+    target = ExecutionTarget(
+        target_key="lifecycle",
+        target_version=1,
         queue_name="lifecycle-queue",
         workflow_role="lifecycle",
         managed_workflow_name="lifecycle-workflow",
         managed_workflow_version=1,
         argument_recipe_version=1,
         classifier_version=1,
-    )
-    ref = declaration.target_ref(
-        target_key="lifecycle",
-        target_version=1,
-    )
-    return ExecutionTarget(
-        ref=ref,
-        **declaration.model_dump(),
         workflow=lambda: None,
         execution_for=lambda item, attempt: ExecutionIdentity(
             execution_key=f"execution:{item.item_id}:{attempt}",
@@ -229,10 +223,10 @@ def _target() -> ExecutionTarget:
         ),
         args_for=lambda item, attempt: (item.item_id, attempt),
         recipe_for=lambda item: ExecutionRecipeEnvelope(
-            target_ref=ref,
-            managed_workflow_name=declaration.managed_workflow_name,
-            managed_workflow_version=declaration.managed_workflow_version,
-            argument_recipe_version=declaration.argument_recipe_version,
+            target_ref=target.ref,
+            managed_workflow_name=target.managed_workflow_name,
+            managed_workflow_version=target.managed_workflow_version,
+            argument_recipe_version=target.argument_recipe_version,
             payload={"item_key": item.item_key},
         ),
         classify_error=lambda error: FailureSnapshot(
@@ -241,6 +235,7 @@ def _target() -> ExecutionTarget:
             message=str(error),
         ),
     )
+    return target
 
 
 def _registry(target: ExecutionTarget) -> TargetRegistry:

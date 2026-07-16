@@ -17,7 +17,6 @@ from dr_platform.submission import SubmitOptions, SubmitResult, submit
 from dr_platform.targets import (
     ExecutionIdentity,
     ExecutionTarget,
-    TargetContractDeclaration,
 )
 
 
@@ -50,18 +49,16 @@ class _Source:
 
 
 def _target() -> ExecutionTarget:
-    declaration = TargetContractDeclaration(
+    target: ExecutionTarget
+    target = ExecutionTarget(
+        target_key="generation",
+        target_version=1,
         queue_name="generation-queue",
         workflow_role="generation",
         managed_workflow_name="generation-workflow",
         managed_workflow_version=1,
         argument_recipe_version=1,
         classifier_version=1,
-    )
-    ref = declaration.target_ref(target_key="generation", target_version=1)
-    return ExecutionTarget(
-        ref=ref,
-        **declaration.model_dump(),
         workflow=lambda: None,
         execution_for=lambda item, attempt: ExecutionIdentity(
             execution_key=f"{item.item_id}:{attempt}",
@@ -69,10 +66,10 @@ def _target() -> ExecutionTarget:
         ),
         args_for=lambda item, attempt: (item.item_id, attempt),
         recipe_for=lambda item: ExecutionRecipeEnvelope(
-            target_ref=ref,
-            managed_workflow_name=declaration.managed_workflow_name,
-            managed_workflow_version=declaration.managed_workflow_version,
-            argument_recipe_version=declaration.argument_recipe_version,
+            target_ref=target.ref,
+            managed_workflow_name=target.managed_workflow_name,
+            managed_workflow_version=target.managed_workflow_version,
+            argument_recipe_version=target.argument_recipe_version,
             payload={"item_key": item.item_key},
         ),
         classify_error=lambda error: FailureSnapshot(
@@ -81,6 +78,7 @@ def _target() -> ExecutionTarget:
             message=str(error),
         ),
     )
+    return target
 
 
 def test_submit_materializes_pages_once_and_reconciles_completed_registration(
