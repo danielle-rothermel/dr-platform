@@ -194,8 +194,9 @@
     The first implementation layer has removed the clearest <span class="key">scope violations</span>:
     publication, export, projection, DuckDB, MotherDuck, Unitbench signing, OpenSSL integration,
     DBOS dependency self-tests, and Whetstone policy. PR 2 then replaced manifest preparation and
-    source-mutation policing with one submission-owned read. The remaining work is deliberately visible:
-    PostgreSQL integration still spans 156 collected cases, and many tests remain coupled below the public interface.
+    source-mutation policing with one submission-owned read. PR 3 assigned validation to caller boundaries and PostgreSQL
+    instead of re-auditing typed rows. The remaining work is deliberately visible: PostgreSQL integration still spans
+    162 collected cases, and many tests remain coupled below the public interface.
   </div>
 
   <div class="note warn" style="margin-top: 18px;">
@@ -206,9 +207,9 @@
 
   <div class="summary-grid" aria-label="Audit summary">
     <div class="metric"><span class="value">0</span><span class="label">DuckDB/MotherDuck/OpenSSL integration paths remaining</span></div>
-    <div class="metric"><span class="value">156</span><span class="label">PostgreSQL cases still to consolidate into a high-leverage set</span></div>
+    <div class="metric"><span class="value">162</span><span class="label">PostgreSQL cases still to consolidate into a high-leverage set</span></div>
     <div class="metric"><span class="value">90</span><span class="label">root exports remaining after obsolete manifest types were removed</span></div>
-    <div class="metric"><span class="value">11,456</span><span class="label">test lines versus 13,222 source lines after PR 2</span></div>
+    <div class="metric"><span class="value">11,486</span><span class="label">test lines versus 12,785 source lines after PR 3</span></div>
   </div>
 
   <nav aria-label="Contents">
@@ -325,8 +326,8 @@
       <span class="severity high">High · consolidate</span>
     </div>
     <p>
-      After PR 2, Pytest collects 277 cases and fixture analysis finds 156 requiring PostgreSQL. No cases require
-      MotherDuck, open DuckDB, or spawn OpenSSL. PostgreSQL is a valid integration boundary, but 156 cases repeat
+      After PR 3, Pytest collects 275 cases and fixture analysis finds 162 requiring PostgreSQL. No cases require
+      MotherDuck, open DuckDB, or spawn OpenSSL. PostgreSQL is a valid integration boundary, but 162 cases repeat
       state transitions, table shapes, and similar race
       variants instead of concentrating on the few guarantees that require a real database.
     </p>
@@ -489,12 +490,13 @@
       compensation shapes; <a href="src/dr_platform/db/alembic/versions/0001_platform_baseline.py">0001_platform_baseline.py:233–452, 521–850</a>
       repeats them as checks and immutable-row triggers; service modules re-check state before every mutation.
     </div>
-    <p class="remove"><strong>Simplification test:</strong> assign one owner per invariant. Keep database constraints for
-      persisted integrity and boundary validation for caller input; remove repeated internal revalidation unless it catches
-      a distinct failure source.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Document the owner of each retained invariant.</li><li>Keep caller-boundary validation and critical database constraints.</li>
-      <li>Remove repeated internal revalidation and its implementation-shape tests.</li>
+    <p class="remove"><strong>Resolved ownership:</strong> public inputs and external adapter results validate at their
+      boundaries; PostgreSQL checks, foreign keys, and triggers own durable lifecycle integrity; frozen record models decode
+      typed rows without re-auditing the database; service checks remain only for replay, authority, CAS, and external outcomes.
+      PR 3 added the two constraints that previously existed only in model validators before removing the repeated checks.</p>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 3</div><ul class="checklist">
+      <li class="done">Document the owner of each retained invariant.</li><li class="done">Keep caller-boundary validation and critical database constraints.</li>
+      <li class="done">Remove repeated internal revalidation and its implementation-shape tests.</li>
     </ul></div>
   </article>
 
@@ -775,10 +777,10 @@
         <tr><td class="path">contracts/test_platform_v6_reconciliation_retries.py</td><td class="num">29</td><td class="num">26</td><td>Mixed; DB integration + duplicated unit cases</td><td class="status-rewrite">Keep only distinct persistence/race evidence</td></tr>
         <tr><td class="path">contracts/test_platform_v6_registration_targets.py</td><td class="num">54</td><td class="num">26</td><td>Mixed; DB integration + target/manifest units</td><td class="status-keep">Removed in PR 2; focused coverage retained</td></tr>
         <tr><td class="path">contracts/test_platform_v6_telemetry_hygiene.py</td><td class="num">7</td><td class="num">0</td><td>Unit; includes Whetstone policy</td><td class="status-rewrite">Remove downstream cases</td></tr>
-        <tr><td class="path">contracts/test_platform_v6_vocabulary.py</td><td class="num">15</td><td class="num">0</td><td>API/model shape and absence assertions</td><td class="status-rewrite">Reduce to public contract</td></tr>
+        <tr><td class="path">contracts/test_platform_v6_vocabulary.py</td><td class="num">15</td><td class="num">0</td><td>API/model shape and absence assertions</td><td class="status-keep">Removed across PRs 1 and 3</td></tr>
         <tr><td class="path">contracts/test_preflight_script.py</td><td class="num">15</td><td class="num">0</td><td>Vendor preflight implementation</td><td class="status-keep">Removed in PR 1</td></tr>
         <tr><td class="path">contracts/test_storage_preflight.py</td><td class="num">4</td><td class="num">3</td><td>PostgreSQL + DuckDB/subprocess integration</td><td class="status-keep">Removed in PR 1</td></tr>
-        <tr><td class="path">test_backoff.py</td><td class="num">1</td><td class="num">1</td><td>PostgreSQL integration</td><td class="status-keep">Keep only if backoff persistence is core</td></tr>
+        <tr><td class="path">test_backoff.py</td><td class="num">5</td><td class="num">5</td><td>PostgreSQL boundary and persistence</td><td class="status-rewrite">Consolidate in PR 5</td></tr>
         <tr><td class="path">test_claims.py</td><td class="num">13</td><td class="num">13</td><td>PostgreSQL integration</td><td class="status-rewrite">Consolidate with contract claim tests</td></tr>
         <tr><td class="path">test_cut.py</td><td class="num">1</td><td class="num">1</td><td>PostgreSQL integration</td><td class="status-keep">Keep only if cut locking is core</td></tr>
         <tr><td class="path">test_dbos_config.py</td><td class="num">13</td><td class="num">0</td><td>Unit; partly private DBOS behavior</td><td class="status-rewrite">Keep only wrapper behavior</td></tr>
@@ -821,7 +823,7 @@
   </div>
 
   <footer>
-    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 2 of the Graphite stack and was
+    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 3 of the Graphite stack and was
     refreshed with complete source search, AST-based API inventory, pytest fixture collection, dependency/configuration
     inspection, and focused/full-suite verification. Pending checklist items describe work not yet completed by this branch.
   </footer>
