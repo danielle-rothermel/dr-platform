@@ -149,14 +149,14 @@ def test_fresh_upgrade_creates_complete_kernel_schema(
 
 
 def test_prefix_is_the_only_physical_naming_option(pg_engine: Engine) -> None:
-    upgrade_platform_schema(engine_dsn(pg_engine), prefix="whetstone")
+    upgrade_platform_schema(engine_dsn(pg_engine), prefix="tenant")
 
     tables = set(inspect(pg_engine).get_table_names())
     expected_tables = {
-        f"whetstone_{suffix}" for suffix in KERNEL_TABLE_SUFFIXES
+        f"tenant_{suffix}" for suffix in KERNEL_TABLE_SUFFIXES
     }
     assert expected_tables <= tables
-    assert _table_columns(pg_engine, "whetstone_items") >= {
+    assert _table_columns(pg_engine, "tenant_items") >= {
         "item_key",
         "shuffle_rank",
     }

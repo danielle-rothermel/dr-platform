@@ -87,7 +87,7 @@ class RetryPolicy(BaseModel):
 
 
 class FailureSnapshot(BaseModel):
-    """Safe, persistence-ready failure facts; never raw provider payloads."""
+    """Safe persistence facts, never raw application payloads."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
