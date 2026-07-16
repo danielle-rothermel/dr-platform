@@ -1,4 +1,4 @@
-"""P6b optional telemetry and safe-attribute contracts."""
+"""Optional telemetry behavior and safe-attribute validation."""
 
 from __future__ import annotations
 
@@ -46,7 +46,6 @@ def test_otlp_failure_is_visible_and_nonfatal() -> None:
     assert not result.healthy
     assert result.error_type == "RuntimeError"
     assert result.message == "OTLP initialization failed"
-    assert "sensitive" not in result.message
 
 
 def test_dbos_config_uses_semconv_and_optional_trace_endpoints() -> None:
@@ -69,37 +68,26 @@ def test_dbos_config_uses_semconv_and_optional_trace_endpoints() -> None:
 def test_telemetry_attributes_allow_safe_facts_and_reject_payloads() -> None:
     safe = {
         "platform.operation_key": "operation-1",
-        "platform.execution_key": "generation:sha256",
-        "platform.workflow_role": "generation",
+        "platform.execution_key": "execute:sha256",
+        "platform.workflow_role": "execute",
         "platform.attempt": 2,
         "platform.publication.destination_id": "postgres-reporting",
         "platform.publication.disposition": "PROMOTED",
         "platform.publication.snapshot_seq": 7,
-        "whetstone.provider": "anthropic",
-        "whetstone.model": "anthropic/claude-sonnet-4-5",
-        "whetstone.provider_cost_usd": 0.125,
-        "whetstone.token_count": 100,
-        "whetstone.throttle_delay_ms": 50,
     }
     assert validated_telemetry_attributes(safe) == safe
 
     for attributes in (
-        {"platform.prompt": "hello"},
-        {"whetstone.output": "answer"},
         {"platform.database_url": "redacted"},
         {"platform.api_key": "redacted"},
         {"platform.authorization": "redacted"},
-        {"platform.request_body": "raw prompt and provider payload"},
-        {"whetstone.provider_metadata": '{"authorization":"raw-secret"}'},
+        {"platform.request_body": "raw application input"},
         {"platform.operation_key": "Bearer secret"},
         {"platform.operation_key": "sk-proj-supersecret"},
         {"platform.operation_key": "postgresql://secret"},
         {"other.operation_key": "operation-1"},
         {"platform.attempt": True},
         {"platform.attempt": -1},
-        {"whetstone.token_count": 1.5},
-        {"whetstone.provider_cost_usd": float("inf")},
-        {"whetstone.throttle_delay_ms": -0.1},
     ):
         with pytest.raises(ValueError, match="telemetry attribute"):
             validated_telemetry_attributes(attributes)

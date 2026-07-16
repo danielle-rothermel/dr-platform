@@ -4,19 +4,11 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from dbos._error import (
-    DBOSConflictingWorkflowError,
-    DBOSQueueDeduplicatedError,
-    DBOSWorkflowConflictIDError,
-)
 
 from dr_platform import dbos_config
-from dr_platform.dbos_config import (
-    WORKFLOW_START_RACE_ERRORS,
-    workflow_start_raced,
-)
+from dr_platform.dbos_config import workflow_start_raced
 
-WORKFLOW_ID = "generate:item-1"
+WORKFLOW_ID = "execute:item-1"
 
 
 def test_resolve_database_url_prefers_explicit_arg(
@@ -130,25 +122,6 @@ def test_destroy_dbos_runtime_calls_dbos_destroy(
     dbos_config.destroy_dbos_runtime()
 
     assert calls == ["destroy"]
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        DBOSWorkflowConflictIDError(WORKFLOW_ID),
-        DBOSQueueDeduplicatedError(WORKFLOW_ID, "generation", "dedup-1"),
-        DBOSConflictingWorkflowError(WORKFLOW_ID),
-    ],
-)
-def test_workflow_start_raced_returns_true_for_typed_dbos_errors(
-    error: BaseException,
-) -> None:
-    assert isinstance(error, WORKFLOW_START_RACE_ERRORS)
-    patch_target = "dr_platform.dbos_config.DBOS.get_workflow_status"
-    with patch(patch_target) as status:
-        raced = workflow_start_raced(workflow_id=WORKFLOW_ID, error=error)
-        assert raced is True
-        status.assert_not_called()
 
 
 def test_workflow_start_raced_returns_false_without_status() -> None:

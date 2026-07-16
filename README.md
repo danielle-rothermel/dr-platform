@@ -6,8 +6,9 @@ registration, kernel-executed enqueue, reconciliation and retry policy,
 reference-aware logical cancellation, inspection, health, and export cuts.
 
 DBOS owns durable workflow and step execution. Applications own workflow
-definitions and domain outcomes. The kernel does not persist prompts, model
-configuration, provider payloads, credentials, or DBOS replay payloads.
+definitions and domain outcomes. The kernel does not persist workflow inputs,
+application configuration, external-service payloads, credentials, or DBOS
+replay payloads.
 
 The public flow is:
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 from typing import TYPE_CHECKING
 
@@ -89,26 +88,6 @@ def _validate_counter(value: object) -> None:
         raise ValueError("telemetry attribute value is not a valid counter")
 
 
-def _validate_cost(value: object) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(  # noqa: TRY004 -- one validation failure contract
-            "telemetry attribute value is not a valid cost"
-        )
-    numeric = float(value)
-    if not math.isfinite(numeric) or numeric < 0:
-        raise ValueError("telemetry attribute value is not a valid cost")
-
-
-def _validate_throttle_delay(value: object) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(  # noqa: TRY004 -- one validation failure contract
-            "telemetry attribute value is not a valid delay"
-        )
-    numeric = float(value)
-    if not math.isfinite(numeric) or numeric < 0:
-        raise ValueError("telemetry attribute value is not a valid delay")
-
-
 _ATTRIBUTE_VALIDATORS = {
     "platform.operation_key": _validate_safe_text,
     "platform.execution_key": _validate_safe_text,
@@ -117,9 +96,4 @@ _ATTRIBUTE_VALIDATORS = {
     "platform.publication.destination_id": _validate_safe_text,
     "platform.publication.disposition": _validate_safe_text,
     "platform.publication.snapshot_seq": _validate_counter,
-    "whetstone.provider": _validate_safe_text,
-    "whetstone.model": _validate_safe_text,
-    "whetstone.token_count": _validate_counter,
-    "whetstone.provider_cost_usd": _validate_cost,
-    "whetstone.throttle_delay_ms": _validate_throttle_delay,
 }
