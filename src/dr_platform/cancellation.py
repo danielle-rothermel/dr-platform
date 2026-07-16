@@ -26,17 +26,11 @@ from sqlalchemy import (
     update,
 )
 
+from dr_platform import claims, operation_lifecycle
 from dr_platform.cancellation_truth import (
     operation_has_unresolved_cancellation,
 )
-from dr_platform.claims import (
-    _acquire_export_writer_lock,
-    _acquire_workflow_reference_locks,
-    _database_now,
-    _invalidate_attempt_claims,
-)
-from dr_platform.db import PlatformSchema
-from dr_platform.reconciliation import _refresh_operation_lifecycle
+from dr_platform.db import PlatformSchema, coordination
 from dr_platform.records import FailureSnapshot
 from dr_platform.status import (
     CONFIRMED_ENQUEUE_STATES,
@@ -434,11 +428,10 @@ def _persist_intent(
         # Retry creation and current-Attempt advancement also take this lock.
         # Select the cancellation set only after acquiring it so the locked
         # hierarchy cannot be based on a stale current_attempt pointer.
-        _acquire_export_writer_lock(connection)
         candidates = _current_attempts(
             connection, schema=schema, operation_key=request.operation_key
         )
-        _acquire_workflow_reference_locks(
+        coordination.acquire_workflow_reference_locks(
             connection, [row["workflow_id"] for row in candidates]
         )
         operations, locked_attempts = _lock_cancellation_hierarchy(
@@ -464,7 +457,7 @@ def _persist_intent(
         _validate_expected_cut(
             operation=operation, attempts=attempts, request=request
         )
-        now = _database_now(connection)
+        now = coordination.database_now(connection)
         observed_terminal_rows: list[dict[str, Any]] = []
         if operation["status"] not in {
             OperationStatus.SUCCEEDED.value,
@@ -516,7 +509,7 @@ def _persist_intent(
                 request=request,
                 now=now,
             )
-            _invalidate_attempt_claims(
+            claims.invalidate_attempt_claims(
                 connection,
                 schema=schema,
                 item_id=str(row["item_id"]),
@@ -535,7 +528,7 @@ def _persist_intent(
                     disposition=CancellationDisposition.NOT_ENQUEUED,
                     now=now,
                 )
-        _refresh_operation_lifecycle(
+        operation_lifecycle.refresh_operation_lifecycle(
             connection,
             schema=schema,
             operation_key=request.operation_key,
@@ -557,8 +550,9 @@ def _cancel_one(
 ) -> None:
     workflow_id = str(planned["workflow_id"])
     with engine.begin() as connection:
-        _acquire_export_writer_lock(connection)
-        _acquire_workflow_reference_locks(connection, [workflow_id])
+        coordination.acquire_workflow_reference_locks(
+            connection, [workflow_id]
+        )
         _, attempts = _lock_cancellation_hierarchy(
             connection,
             schema=schema,
@@ -574,7 +568,7 @@ def _cancel_one(
             workflow_id=workflow_id,
             item_id=str(planned["item_id"]),
         ):
-            now = _database_now(connection)
+            now = coordination.database_now(connection)
             _finalize(
                 connection,
                 schema=schema,
@@ -638,8 +632,9 @@ def _finalize_physical(
     inspection: CancellationInspection | None,
 ) -> None:
     with engine.begin() as connection:
-        _acquire_export_writer_lock(connection)
-        _acquire_workflow_reference_locks(connection, [planned["workflow_id"]])
+        coordination.acquire_workflow_reference_locks(
+            connection, [planned["workflow_id"]]
+        )
         _, attempts = _lock_cancellation_hierarchy(
             connection,
             schema=schema,
@@ -649,7 +644,7 @@ def _finalize_physical(
         row = attempts[(planned["item_id"], planned["attempt"])]
         if not _still_pending(row, request=request):
             return
-        now = _database_now(connection)
+        now = coordination.database_now(connection)
         _finalize(
             connection,
             schema=schema,
@@ -929,7 +924,7 @@ def _lock_cancellation_hierarchy(
 ) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, int], dict[str, Any]]]:
     """Lock every live reference before cancellation-owned domain rows."""
     workflow_ids = sorted({str(row["workflow_id"]) for row in candidates})
-    _acquire_workflow_reference_locks(connection, workflow_ids)
+    coordination.acquire_workflow_reference_locks(connection, workflow_ids)
     reference_rows = list(
         connection.execute(
             select(
@@ -1084,7 +1079,7 @@ def _refresh_if_resolved(
     operation_key: str,
     now: datetime,
 ) -> None:
-    _refresh_operation_lifecycle(
+    operation_lifecycle.refresh_operation_lifecycle(
         connection, schema=schema, operation_key=operation_key, now=now
     )
 
@@ -1098,7 +1093,6 @@ def _prepare_compensation_repair(  # noqa: PLR0912
 ) -> bool | None:
     """Insert/reload one exact compensation and decide if it is exclusive."""
     with engine.begin() as connection:
-        _acquire_export_writer_lock(connection)
         # The hierarchy helper acquires lexical workflow locks before every
         # Operation/Item/Attempt row, including all current references.
         _, attempts = _lock_cancellation_hierarchy(
@@ -1158,7 +1152,7 @@ def _prepare_compensation_repair(  # noqa: PLR0912
                 raise CancellationConflictError(
                     "successor compensation predecessor disappeared"
                 )
-            now = _database_now(connection)
+            now = coordination.database_now(connection)
             connection.execute(
                 insert(schema.enqueue_compensations).values(
                     item_id=candidate["item_id"],
@@ -1220,7 +1214,7 @@ def _prepare_compensation_repair(  # noqa: PLR0912
                             cancel_disposition=(
                                 EnqueueCompensationDisposition.PENDING.value
                             ),
-                            created_at=_database_now(connection),
+                            created_at=coordination.database_now(connection),
                         )
                     )
                 elif hazard["workflow_id"] != claim["workflow_id"]:
@@ -1354,7 +1348,6 @@ def _finalize_compensation_repair(
     missing_required_observations: int = 3,
 ) -> None:
     with engine.begin() as connection:
-        _acquire_export_writer_lock(connection)
         _lock_cancellation_hierarchy(
             connection,
             schema=schema,
@@ -1408,11 +1401,11 @@ def _finalize_compensation_repair(
                 failure=failure,
                 successor=successor,
             )
-        _refresh_operation_lifecycle(
+        operation_lifecycle.refresh_operation_lifecycle(
             connection,
             schema=schema,
             operation_key=str(candidate["operation_key"]),
-            now=_database_now(connection),
+            now=coordination.database_now(connection),
         )
 
 
@@ -1427,7 +1420,7 @@ def _record_compensation_absence(
 ) -> None:
     if compensation["resolved_at"] is not None:
         return
-    now = _database_now(connection)
+    now = coordination.database_now(connection)
     first_absent_at = compensation["first_absent_at"] or now
     observation_count = compensation["absence_observation_count"] + 1
     reached_grace = (
@@ -1489,7 +1482,7 @@ def _resolve_compensation(
     failure: FailureSnapshot | None,
     successor: bool = False,
 ) -> None:
-    now = _database_now(connection)
+    now = coordination.database_now(connection)
     values: dict[str, Any] = {
         "cancel_disposition": disposition.value,
         "resolved_at": (

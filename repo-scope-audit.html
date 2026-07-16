@@ -195,8 +195,9 @@
     publication, export, projection, DuckDB, MotherDuck, Unitbench signing, OpenSSL integration,
     DBOS dependency self-tests, and Whetstone policy. PR 2 then replaced manifest preparation and
     source-mutation policing with one submission-owned read. PR 3 assigned validation to caller boundaries and PostgreSQL
-    instead of re-auditing typed rows. The remaining work is deliberately visible: PostgreSQL integration still spans
-    162 collected cases, and many tests remain coupled below the public interface.
+    instead of re-auditing typed rows. PR 4 removed the remaining cycle-hiding runtime imports and internal private-module
+    crossings. The remaining work is deliberately visible: PostgreSQL integration still spans 162 collected cases, and
+    many tests remain coupled below the public interface.
   </div>
 
   <div class="note warn" style="margin-top: 18px;">
@@ -209,7 +210,7 @@
     <div class="metric"><span class="value">0</span><span class="label">DuckDB/MotherDuck/OpenSSL integration paths remaining</span></div>
     <div class="metric"><span class="value">162</span><span class="label">PostgreSQL cases still to consolidate into a high-leverage set</span></div>
     <div class="metric"><span class="value">90</span><span class="label">root exports remaining after obsolete manifest types were removed</span></div>
-    <div class="metric"><span class="value">11,486</span><span class="label">test lines versus 12,785 source lines after PR 3</span></div>
+    <div class="metric"><span class="value">11,484</span><span class="label">test lines versus 12,718 source lines after PR 4</span></div>
   </div>
 
   <nav aria-label="Contents">
@@ -653,14 +654,15 @@
       responsibilities being split at unstable seams.
     </p>
     <div class="evidence">
-      PR 1 removed the intentional export/publication cycle and its repeated cycle-breaking imports. Reconciliation modules
-      still use the same <code>PLC0415</code> pattern and cancellation still imports private lifecycle helpers.
+      PR 1 removed the intentional export/publication cycle. PR 4 then removed the obsolete export-writer lock edge,
+      moved PostgreSQL coordination and operation lifecycle aggregation to leaf modules, placed reconciliation candidates
+      with their persistence owner, and hoisted the now-acyclic runtime imports.
     </div>
     <p class="remove"><strong>Removal boundary:</strong> deleting export/publication eliminates the worst cycle. Move genuinely
       shared remaining concepts to leaf modules rather than preserving lazy imports.</p>
-    <div class="progress"><div class="progress-title">Implementation status · In progress</div><ul class="checklist">
-      <li class="done">Remove cycles deleted with publication/export.</li><li>Move remaining shared lifecycle and locking concepts to leaf modules.</li>
-      <li>Remove runtime lazy imports that only conceal cycles.</li>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 4</div><ul class="checklist">
+      <li class="done">Remove cycles deleted with publication/export.</li><li class="done">Move remaining shared lifecycle and locking concepts to leaf modules.</li>
+      <li class="done">Remove runtime lazy imports that only conceal cycles.</li>
     </ul></div>
   </article>
 
@@ -823,7 +825,7 @@
   </div>
 
   <footer>
-    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 3 of the Graphite stack and was
+    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 4 of the Graphite stack and was
     refreshed with complete source search, AST-based API inventory, pytest fixture collection, dependency/configuration
     inspection, and focused/full-suite verification. Pending checklist items describe work not yet completed by this branch.
   </footer>

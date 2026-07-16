@@ -32,6 +32,7 @@ from pydantic import (
     model_validator,
 )
 
+import dr_platform.claims as claims_module
 from dr_platform.dbos_config import WORKFLOW_START_RACE_ERRORS
 from dr_platform.records import (
     AttemptRecord,
@@ -405,12 +406,7 @@ def enqueue_pending_page(  # noqa: PLR0913 -- explicit kernel facade
     operation_key: str | None = None,
 ) -> EnqueuePageResult:
     """Validate every target queue, then claim and enqueue one bounded page."""
-    from dr_platform.claims import (  # noqa: PLC0415 -- avoids module cycle
-        PostgresClaimTransitionStore,
-        claim_pending_attempts,
-    )
-
-    page = claim_pending_attempts(
+    page = claims_module.claim_pending_attempts(
         engine,
         admit_targets=_target_admission(
             resolver=resolver,
@@ -420,7 +416,7 @@ def enqueue_pending_page(  # noqa: PLR0913 -- explicit kernel facade
         schema=schema,
         operation_key=operation_key,
     )
-    store = PostgresClaimTransitionStore(engine, schema=schema)
+    store = claims_module.PostgresClaimTransitionStore(engine, schema=schema)
     return _execute_claim_page(
         page.claims,
         resolver=resolver,
@@ -440,12 +436,7 @@ def enqueue_replacement_page(  # noqa: PLR0913 -- explicit kernel facade
     operation_key: str | None = None,
 ) -> EnqueuePageResult:
     """Replace never-started expired Claims only after queue admission."""
-    from dr_platform.claims import (  # noqa: PLC0415 -- avoids module cycle
-        PostgresClaimTransitionStore,
-        replace_expired_unstarted_claims,
-    )
-
-    page = replace_expired_unstarted_claims(
+    page = claims_module.replace_expired_unstarted_claims(
         engine,
         admit_targets=_target_admission(
             resolver=resolver,
@@ -455,7 +446,7 @@ def enqueue_replacement_page(  # noqa: PLR0913 -- explicit kernel facade
         schema=schema,
         operation_key=operation_key,
     )
-    store = PostgresClaimTransitionStore(engine, schema=schema)
+    store = claims_module.PostgresClaimTransitionStore(engine, schema=schema)
     return _execute_claim_page(
         page.claims,
         resolver=resolver,
@@ -476,12 +467,7 @@ def recover_call_started_page(  # noqa: PLR0913 -- explicit kernel facade
     operation_key: str | None = None,
 ) -> EnqueuePageResult:
     """Observe expired CALL_STARTED Claims before any replacement enqueue."""
-    from dr_platform.claims import (  # noqa: PLC0415 -- avoids module cycle
-        PostgresClaimTransitionStore,
-        load_call_started_recovery_page,
-    )
-
-    page = load_call_started_recovery_page(
+    page = claims_module.load_call_started_recovery_page(
         engine,
         options=options,
         schema=schema,
@@ -491,7 +477,7 @@ def recover_call_started_page(  # noqa: PLR0913 -- explicit kernel facade
         resolver=resolver,
         queue_lookup=queue_lookup,
     )
-    store = PostgresClaimTransitionStore(
+    store = claims_module.PostgresClaimTransitionStore(
         engine,
         schema=schema,
         options=options,

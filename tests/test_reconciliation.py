@@ -11,8 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from sqlalchemy import Engine, event, func, select, text, update
 
-from dr_platform import claims as claims_module
-from dr_platform import reconciliation as reconciliation_module
+from dr_platform.db import coordination as coordination_module
 from dr_platform.dbos_config import DbosWorkflowStatus
 from dr_platform.reconciliation import (
     NextAttemptRequest,
@@ -57,7 +56,7 @@ def test_workflow_reference_lock_helper_sorts_and_deduplicates() -> None:
             workflow_id = cast("Mapping[str, str]", parameters)["id"]
             observed.append(workflow_id)
 
-    claims_module._acquire_workflow_reference_locks(
+    coordination_module.acquire_workflow_reference_locks(
         cast("Any", Connection()),
         ["z-source", "a-successor", "z-source"],
     )
@@ -97,8 +96,8 @@ def test_missing_requires_repeated_observations_and_grace(
         ).scalar_one()
     times = iter((first_now, first_now + timedelta(seconds=2)))
     monkeypatch.setattr(
-        reconciliation_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: next(times),
     )
     observation = ReconciliationObservation(

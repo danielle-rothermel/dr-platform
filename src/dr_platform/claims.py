@@ -11,7 +11,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from sqlalchemy import Connection, Engine, and_, insert, select, text, update
 
-from dr_platform.db import PlatformSchema
+from dr_platform.db import PlatformSchema, coordination
 from dr_platform.manifests import ExecutionTargetRef
 from dr_platform.records import (
     AttemptRecord,
@@ -29,7 +29,6 @@ from dr_platform.status import (
     OperationStatus,
     PrioritySource,
 )
-from dr_platform.submission import EXPORT_BARRIER_ADVISORY_KEY
 
 DEFAULT_CLAIM_PAGE_SIZE = 500
 DEFAULT_CLAIM_LEASE_SECONDS = 60
@@ -137,7 +136,6 @@ def claim_pending_attempts(  # noqa: PLR0913 -- operation-scoped facade
     selected_options = options or ClaimPageOptions()
     make_claim_id = claim_id_factory or _random_claim_id
     with engine.begin() as connection:
-        _acquire_export_writer_lock(connection)
         _acquire_claim_selection_lock(connection)
         candidates = _pending_candidates(
             connection=connection,
@@ -153,7 +151,7 @@ def claim_pending_attempts(  # noqa: PLR0913 -- operation-scoped facade
             schema=selected_schema,
             candidates=candidates,
         )
-        now = _database_now(connection)
+        now = coordination.database_now(connection)
         lease_expires_at = now + timedelta(
             seconds=selected_options.lease_seconds
         )
@@ -256,7 +254,6 @@ def replace_expired_unstarted_claims(  # noqa: PLR0913 -- operation-scoped facad
     selected_options = options or ClaimPageOptions()
     make_claim_id = claim_id_factory or _random_claim_id
     with engine.begin() as connection:
-        _acquire_export_writer_lock(connection)
         _acquire_claim_selection_lock(connection)
         candidates = _expired_unstarted_candidates(
             connection=connection,
@@ -273,7 +270,7 @@ def replace_expired_unstarted_claims(  # noqa: PLR0913 -- operation-scoped facad
             candidates=candidates,
             claim_keys=[_candidate_claim_key(row) for row in candidates],
         )
-        now = _database_now(connection)
+        now = coordination.database_now(connection)
         lease_expires_at = now + timedelta(
             seconds=selected_options.lease_seconds
         )
@@ -450,14 +447,13 @@ def _start_enqueue_call_transition(
         claim_id=claim_id,
     )
     with engine.begin() as connection:
-        _acquire_export_writer_lock(connection)
         locked = _lock_candidate_hierarchy(
             connection,
             schema=selected_schema,
             candidates=[context],
             claim_keys=[(item_id, attempt, claim_id)],
         )
-        now = _database_now(connection)
+        now = coordination.database_now(connection)
         attempt_row = locked.attempts.get((item_id, attempt))
         claim_row = locked.claims.get((item_id, attempt, claim_id))
         if attempt_row is None or claim_row is None:
@@ -541,14 +537,13 @@ def invalidate_stale_claim(  # noqa: PLR0913 -- exact Claim key + actor
         claim_id=claim_id,
     )
     with engine.begin() as connection:
-        _acquire_export_writer_lock(connection)
         locked = _lock_candidate_hierarchy(
             connection,
             schema=selected_schema,
             candidates=[context],
             claim_keys=[(item_id, attempt, claim_id)],
         )
-        now = _database_now(connection)
+        now = coordination.database_now(connection)
         attempt_row = locked.attempts.get((item_id, attempt))
         claim_row = locked.claims.get((item_id, attempt, claim_id))
         if attempt_row is None or claim_row is None:
@@ -658,14 +653,13 @@ class PostgresClaimTransitionStore:
             claim_id=claim.claim_id,
         )
         with self._engine.begin() as connection:
-            _acquire_export_writer_lock(connection)
             locked = _lock_candidate_hierarchy(
                 connection,
                 schema=self._schema,
                 candidates=[context],
                 claim_keys=[(claim.item_id, claim.attempt, claim.claim_id)],
             )
-            now = _database_now(connection)
+            now = coordination.database_now(connection)
             attempt_row = locked.attempts.get((claim.item_id, claim.attempt))
             claim_row = locked.claims.get(
                 (claim.item_id, claim.attempt, claim.claim_id)
@@ -761,7 +755,6 @@ class PostgresClaimTransitionStore:
         )
         compensations = self._schema.enqueue_compensations
         with self._engine.begin() as connection:
-            _acquire_export_writer_lock(connection)
             locked = _lock_candidate_hierarchy(
                 connection,
                 schema=self._schema,
@@ -837,7 +830,7 @@ class PostgresClaimTransitionStore:
                         "enqueue compensation replay conflicts"
                     )
                 return
-            now = _database_now(connection)
+            now = coordination.database_now(connection)
             connection.execute(
                 insert(compensations).values(
                     item_id=claim.item_id,
@@ -875,7 +868,6 @@ class PostgresClaimTransitionStore:
         if _candidate_target_refs([context]) != (claimed.target_ref,):
             raise ClaimConflictError("recovery target reference changed")
         with self._engine.begin() as connection:
-            _acquire_export_writer_lock(connection)
             locked = _lock_candidate_hierarchy(
                 connection,
                 schema=self._schema,
@@ -884,7 +876,7 @@ class PostgresClaimTransitionStore:
                     (claimed.item_id, claimed.attempt, claimed.claim_id)
                 ],
             )
-            now = _database_now(connection)
+            now = coordination.database_now(connection)
             attempt_row = locked.attempts.get(
                 (claimed.item_id, claimed.attempt)
             )
@@ -1056,7 +1048,7 @@ def _expired_unstarted_candidates(
     limit: int,
     operation_key: str | None = None,
 ) -> list[dict[str, Any]]:
-    now = _database_now(connection)
+    now = coordination.database_now(connection)
     statement = (
         _candidate_select(schema)
         .join(
@@ -1105,7 +1097,7 @@ def _call_started_recovery_candidates(
     limit: int,
     operation_key: str | None = None,
 ) -> list[dict[str, Any]]:
-    now = _database_now(connection)
+    now = coordination.database_now(connection)
     statement = (
         _candidate_select(schema)
         .join(
@@ -1357,7 +1349,7 @@ def _lock_candidate_hierarchy(
     candidates: Sequence[Mapping[str, Any]],
     claim_keys: Sequence[tuple[str, int, str]] = (),
 ) -> _LockedHierarchy:
-    _acquire_workflow_reference_locks(
+    coordination.acquire_workflow_reference_locks(
         connection,
         sorted({str(row["workflow_id"]) for row in candidates}),
     )
@@ -1722,7 +1714,7 @@ def _random_claim_id() -> str:
     return uuid4().hex
 
 
-def _invalidate_attempt_claims(  # noqa: PLR0913
+def invalidate_attempt_claims(  # noqa: PLR0913
     connection: Connection,
     *,
     schema: PlatformSchema,
@@ -1755,30 +1747,8 @@ def _invalidate_attempt_claims(  # noqa: PLR0913
     )
 
 
-def _database_now(connection: Connection) -> datetime:
-    return connection.execute(text("SELECT clock_timestamp()")).scalar_one()
-
-
-def _acquire_export_writer_lock(connection: Connection) -> None:
-    connection.execute(
-        text("SELECT pg_advisory_xact_lock_shared(:lock_key)"),
-        {"lock_key": EXPORT_BARRIER_ADVISORY_KEY},
-    )
-
-
 def _acquire_claim_selection_lock(connection: Connection) -> None:
     connection.execute(
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
         {"lock_key": CLAIM_SELECTION_ADVISORY_KEY},
     )
-
-
-def _acquire_workflow_reference_locks(
-    connection: Connection,
-    workflow_ids: Sequence[str],
-) -> None:
-    for workflow_id in sorted(set(workflow_ids)):
-        connection.execute(
-            text("SELECT pg_advisory_xact_lock(hashtextextended(:id, 0))"),
-            {"id": workflow_id},
-        )

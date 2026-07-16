@@ -38,8 +38,9 @@ from sqlalchemy import (
     update,
 )
 
+from dr_platform import reconciliation_runtime
 from dr_platform.cancellation_truth import workflow_reference_conflict
-from dr_platform.db import PlatformSchema
+from dr_platform.db import PlatformSchema, coordination
 from dr_platform.items import item_id, shuffle_rank
 from dr_platform.manifests import (  # noqa: TC001 -- Pydantic resolves these
     ExecutionRecipeEnvelope,
@@ -72,10 +73,6 @@ DEFAULT_FAILURE_PREVIEW_LIMIT = 100
 EMPTY_SUBMISSION_REASON = "empty_submission"
 REGISTRATION_ABANDONED_REASON = "registration_abandoned"
 SOURCE_APPLICATION_VERSION_DEFAULT = "unknown"
-
-# One stable shared transaction lock is taken by every kernel writer. Export
-# takes the exclusive form of this same key before opening its snapshot.
-EXPORT_BARRIER_ADVISORY_KEY = 2_129_927_185_611_267_111
 
 NonEmptyStr = Annotated[StrictStr, Field(min_length=1)]
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
@@ -375,18 +372,13 @@ def _enqueue_registered_page(  # noqa: PLR0913
     workflow_observer: WorkflowObserver | None = None,
     reconciliation_reader: LifecycleObservationReader | None = None,
 ) -> None:
-    from dr_platform.reconciliation_runtime import (  # noqa: PLC0415
-        ReconcileOptions,
-        reconcile,
-    )
-
-    reconcile_options = ReconcileOptions(
+    reconcile_options = reconciliation_runtime.ReconcileOptions(
         page_size=options.page_size,
         claim_lease_seconds=options.claim_lease_seconds,
         missing_grace_seconds=options.missing_grace_seconds,
         missing_required_observations=(options.missing_required_observations),
     )
-    reconcile(
+    reconciliation_runtime.reconcile(
         engine,
         resolver=resolver,
         queue_lookup=queue_lookup,
@@ -419,7 +411,6 @@ def abandon_registration(  # noqa: PLR0913 -- explicit public facade contract
     selected_schema = schema or PlatformSchema()
     operations = selected_schema.operations
     with engine.begin() as connection:
-        _acquire_export_writer_lock(connection)
         row = (
             connection.execute(
                 select(operations)
@@ -433,7 +424,7 @@ def abandon_registration(  # noqa: PLR0913 -- explicit public facade contract
             raise RegistrationIneligibleError(
                 f"unknown Operation {operation_key!r}"
             )
-        now = _database_now(connection)
+        now = coordination.database_now(connection)
         if row["registration_abandoned_at"] is not None:
             if (
                 row["registration_abandoned_by"] != abandoned_by
@@ -506,7 +497,6 @@ def _create_or_claim_operation(  # noqa: PLR0913
 ) -> int:
     operations = schema.operations
     with engine.begin() as connection:
-        _acquire_export_writer_lock(connection)
         _acquire_operation_registration_lock(
             connection,
             operation_key,
@@ -520,7 +510,7 @@ def _create_or_claim_operation(  # noqa: PLR0913
             .mappings()
             .one_or_none()
         )
-        now = _database_now(connection)
+        now = coordination.database_now(connection)
         if row is None:
             if requested_count == 0:
                 connection.execute(
@@ -645,8 +635,7 @@ def _register_page(  # noqa: PLR0913
     workflow_ids = sorted({item.workflow_id for item in candidate_items})
     operations = schema.operations
     with engine.begin() as connection:
-        _acquire_export_writer_lock(connection)
-        _acquire_workflow_reference_locks(connection, workflow_ids)
+        coordination.acquire_workflow_reference_locks(connection, workflow_ids)
         row = (
             connection.execute(
                 select(operations)
@@ -656,7 +645,7 @@ def _register_page(  # noqa: PLR0913
             .mappings()
             .one()
         )
-        now = _database_now(connection)
+        now = coordination.database_now(connection)
         _validate_page_authority(
             row=row,
             operation_key=operation_key,
@@ -684,7 +673,7 @@ def _register_page(  # noqa: PLR0913
             ),
         )
         _validate_hook_result(items=candidate_items, result=hook_result)
-        now = _database_now(connection)
+        now = coordination.database_now(connection)
         _validate_page_authority(
             row=row,
             operation_key=operation_key,
@@ -1193,17 +1182,6 @@ def _validate_jsonb_payload(value: Any, *, label: str) -> None:
         raise ValueError(f"{label}: {exc}") from exc
 
 
-def _database_now(connection: Connection) -> datetime:
-    return connection.execute(text("SELECT clock_timestamp()")).scalar_one()
-
-
-def _acquire_export_writer_lock(connection: Connection) -> None:
-    connection.execute(
-        text("SELECT pg_advisory_xact_lock_shared(:lock_key)"),
-        {"lock_key": EXPORT_BARRIER_ADVISORY_KEY},
-    )
-
-
 def _acquire_operation_registration_lock(
     connection: Connection,
     operation_key: str,
@@ -1212,16 +1190,6 @@ def _acquire_operation_registration_lock(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:id, 1))"),
         {"id": operation_key},
     )
-
-
-def _acquire_workflow_reference_locks(
-    connection: Connection, workflow_ids: list[str]
-) -> None:
-    for workflow_id in workflow_ids:
-        connection.execute(
-            text("SELECT pg_advisory_xact_lock(hashtextextended(:id, 0))"),
-            {"id": workflow_id},
-        )
 
 
 def _load_submit_result(

@@ -18,14 +18,12 @@ from pydantic import (
 )
 from sqlalchemy import select
 
+from dr_platform import cancellation, claims, enqueue_runtime, reconciliation
 from dr_platform.dbos_config import (
     DBOS_SYSTEM_DATABASE_URL_ENV,
     DbosWorkflowStatus,
 )
-from dr_platform.manifests import (  # noqa: TC001 -- Pydantic runtime field
-    ExecutionTargetRef,
-)
-from dr_platform.records import AttemptRecord, FailureSnapshot, ItemRecord
+from dr_platform.records import FailureSnapshot
 from dr_platform.status import FailureClass
 
 if TYPE_CHECKING:
@@ -72,16 +70,6 @@ class ReconciliationObservationDisposition(StrEnum):
     RECOVERY_EXHAUSTED = "recovery_exhausted"
     ABSENT = "absent"
     UNCERTAIN = "uncertain"
-
-
-class ReconciliationCandidate(BaseModel):
-    """One current Attempt and its durable target-resolution context."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    item: ItemRecord
-    attempt: AttemptRecord
-    target_ref: ExecutionTargetRef
 
 
 class ReconciliationObservation(BaseModel):
@@ -366,19 +354,6 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
     compensation_canceller: WorkflowCanceller | None = None,
 ) -> ReconcileResult:
     """Recover call-started Claims, then reconcile one bounded Attempt page."""
-    from dr_platform.claims import ClaimPageOptions  # noqa: PLC0415
-    from dr_platform.enqueue_runtime import (  # noqa: PLC0415
-        DbosWorkflowObserver,
-        enqueue_pending_page,
-        enqueue_replacement_page,
-        recover_call_started_page,
-    )
-    from dr_platform.reconciliation import (  # noqa: PLC0415 -- cycle boundary
-        apply_reconciliation_observations,
-        load_missing_reobservation_page,
-        load_reconciliation_page,
-    )
-
     selected = options or ReconcileOptions()
     if reader is None or queue_lookup is None:
         owned_client: DBOSClient | None = DBOSClient(
@@ -400,11 +375,7 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
             # Compensation never mutates its terminal Attempt.  The optional
             # adapter keeps this facade payload-free while allowing health
             # reconciliation to replay a bounded late-enqueue repair page.
-            from dr_platform.cancellation import (  # noqa: PLC0415
-                repair_late_enqueue_compensations,
-            )
-
-            repair_late_enqueue_compensations(
+            cancellation.repair_late_enqueue_compensations(
                 engine=engine,
                 canceller=compensation_canceller,
                 schema=schema,
@@ -414,22 +385,23 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
                     selected.missing_required_observations
                 ),
             )
-        recovery = recover_call_started_page(
+        recovery = enqueue_runtime.recover_call_started_page(
             engine,
             resolver=resolver,
             queue_lookup=selected_queue_lookup,
-            options=ClaimPageOptions(
+            options=claims.ClaimPageOptions(
                 page_size=selected.page_size,
                 lease_seconds=selected.claim_lease_seconds,
             ),
             schema=schema,
             adapter=enqueue_adapter,
-            observer=recovery_observer or DbosWorkflowObserver(),
+            observer=recovery_observer
+            or enqueue_runtime.DbosWorkflowObserver(),
             operation_key=selected.operation_key,
         )
         remaining = selected.page_size - len(recovery.items)
         actionable = (
-            load_reconciliation_page(
+            reconciliation.load_reconciliation_page(
                 engine,
                 page_size=remaining,
                 schema=schema,
@@ -440,7 +412,7 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
         )
         remaining -= len(actionable)
         missing = (
-            load_missing_reobservation_page(
+            reconciliation.load_missing_reobservation_page(
                 engine,
                 page_size=remaining,
                 schema=schema,
@@ -455,7 +427,7 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
             resolver=resolver,
             reader=selected_reader,
         )
-        persisted = apply_reconciliation_observations(
+        persisted = reconciliation.apply_reconciliation_observations(
             engine,
             observations=observations,
             resolver=resolver,
@@ -474,10 +446,10 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
                 "adapter": enqueue_adapter,
                 "operation_key": selected.operation_key,
             }
-            replacements = enqueue_replacement_page(
+            replacements = enqueue_runtime.enqueue_replacement_page(
                 engine,
                 **common,
-                options=ClaimPageOptions(
+                options=claims.ClaimPageOptions(
                     page_size=remaining,
                     lease_seconds=selected.claim_lease_seconds,
                 ),
@@ -485,10 +457,10 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
             replacement_count = len(replacements.items)
             remaining -= replacement_count
             if remaining > 0:
-                pending = enqueue_pending_page(
+                pending = enqueue_runtime.enqueue_pending_page(
                     engine,
                     **common,
-                    options=ClaimPageOptions(
+                    options=claims.ClaimPageOptions(
                         page_size=remaining,
                         lease_seconds=selected.claim_lease_seconds,
                     ),
@@ -510,7 +482,7 @@ def reconcile(  # noqa: PLR0913 -- explicit lifecycle facade
 
 
 def _observe_candidates(
-    candidates: tuple[ReconciliationCandidate, ...],
+    candidates: tuple[reconciliation.ReconciliationCandidate, ...],
     *,
     resolver: TargetResolver,
     reader: LifecycleObservationReader,

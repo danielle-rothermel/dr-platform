@@ -11,7 +11,6 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import Engine, and_, insert, select, text, update
 
-from dr_platform import claims as claims_module
 from dr_platform.claims import (
     ClaimAuthorityError,
     ClaimConflictError,
@@ -23,6 +22,7 @@ from dr_platform.claims import (
     start_enqueue_call,
 )
 from dr_platform.db import PlatformSchema, upgrade_platform_schema
+from dr_platform.db import coordination as coordination_module
 from dr_platform.enqueue_runtime import QueueConfigurationError
 from dr_platform.manifests import ExecutionRecipeEnvelope, ExecutionTargetRef
 from dr_platform.records import EnqueueClaimRecord, FailureSnapshot
@@ -657,8 +657,8 @@ def test_expired_call_started_absence_appends_next_try_replacement(
             select(text("clock_timestamp()"))
         ).scalar_one()
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at,
     )
     claimed = claim_pending_attempts(
@@ -676,8 +676,8 @@ def test_expired_call_started_absence_appends_next_try_replacement(
         schema=schema,
     )
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at + timedelta(seconds=2),
     )
 
