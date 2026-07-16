@@ -27,6 +27,7 @@ from dr_platform.claims import (
     replace_expired_unstarted_claims,
     start_enqueue_call,
 )
+from dr_platform.db import coordination as coordination_module
 from dr_platform.enqueue_runtime import (
     EnqueueClaimExecutionDisposition,
     EnqueuePageResult,
@@ -761,8 +762,8 @@ def test_claim_row_locks_are_acquired_by_claim_id_then_attempt_identity(
         claimed_at = connection.scalar(select(func.clock_timestamp()))
     assert claimed_at is not None
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at,
     )
     original_claims = claim_pending_attempts(
@@ -774,8 +775,8 @@ def test_claim_row_locks_are_acquired_by_claim_id_then_attempt_identity(
     ).claims
     assert len(original_claims) == 2
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at + timedelta(seconds=2),
     )
     observed_claim_locks: list[tuple[str, int, str]] = []
@@ -1038,8 +1039,8 @@ def test_expired_uncalled_claim_is_replaced_without_identity_reuse(
         claimed_at = connection.scalar(select(func.clock_timestamp()))
     assert claimed_at is not None
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at,
     )
     page = claim_pending_attempts(
@@ -1051,8 +1052,8 @@ def test_expired_uncalled_claim_is_replaced_without_identity_reuse(
     )
     original = page.claims[0]
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at + timedelta(seconds=2),
     )
 
@@ -1114,8 +1115,8 @@ def test_expired_unstarted_replacement_rechecks_locked_eligibility(
         claimed_at = connection.scalar(select(func.clock_timestamp()))
     assert claimed_at is not None
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at,
     )
     original = claim_pending_attempts(
@@ -1126,8 +1127,8 @@ def test_expired_unstarted_replacement_rechecks_locked_eligibility(
         claim_id_factory=lambda: "race-original-claim",
     ).claims[0]
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at + timedelta(seconds=2),
     )
     _install_attempt_eligibility_race(monkeypatch, mutation=mutation)
@@ -1177,8 +1178,8 @@ def test_call_start_cas_is_exact_and_blocks_expired_claim(
         claimed_at = connection.scalar(select(func.clock_timestamp()))
     assert claimed_at is not None
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at,
     )
     claims = claim_pending_attempts(
@@ -1212,8 +1213,8 @@ def test_call_start_cas_is_exact_and_blocks_expired_claim(
     assert started.disposition is EnqueueClaimDisposition.CALL_STARTED
     assert started.enqueue_call_started_at is not None
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at + timedelta(seconds=2),
     )
     with pytest.raises(ClaimAuthorityError):
@@ -1493,8 +1494,8 @@ def _expired_call_started_claim(
         claimed_at = connection.scalar(select(func.clock_timestamp()))
     assert claimed_at is not None
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at,
     )
     claimed = claim_pending_attempts(
@@ -1512,8 +1513,8 @@ def _expired_call_started_claim(
         schema=schema,
     )
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at + timedelta(seconds=2),
     )
     return target, registry, claimed.workflow_id
@@ -1860,8 +1861,8 @@ def test_exhausted_absence_terminalizes_without_replacement_or_cut_bump(
         claimed_at = connection.scalar(select(func.clock_timestamp()))
     assert claimed_at is not None
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at,
     )
     claimed = claim_pending_attempts(
@@ -1879,8 +1880,8 @@ def test_exhausted_absence_terminalizes_without_replacement_or_cut_bump(
         schema=schema,
     )
     monkeypatch.setattr(
-        claims_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: claimed_at + timedelta(seconds=2),
     )
     observer = StaticWorkflowObserver(

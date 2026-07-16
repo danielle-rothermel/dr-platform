@@ -47,7 +47,7 @@ PositiveInt = Annotated[StrictInt, Field(gt=0)]
 PositiveChangeSeq = Annotated[StrictInt, Field(gt=0)]
 
 
-def _validate_payload_size(value: Any, *, label: str) -> None:
+def validate_payload_size(value: Any, *, label: str) -> None:
     try:
         Serializer(
             limits=postgres_jsonb_limits(JSONB_PAYLOAD_MAX_BYTES)
@@ -87,7 +87,7 @@ class FailureSnapshot(BaseModel):
 
     @model_validator(mode="after")
     def validate_metadata(self) -> FailureSnapshot:
-        _validate_payload_size(self.metadata, label="failure metadata")
+        validate_payload_size(self.metadata, label="failure metadata")
         return self
 
 

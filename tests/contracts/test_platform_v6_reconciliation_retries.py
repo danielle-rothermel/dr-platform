@@ -12,11 +12,11 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import Engine, select, text, update
 
-from dr_platform import claims as claims_module
 from dr_platform import reconciliation as reconciliation_module
 from dr_platform import reconciliation_runtime as runtime_module
 from dr_platform.claims import ClaimPageOptions, claim_pending_attempts
 from dr_platform.db import PlatformSchema, upgrade_platform_schema
+from dr_platform.db import coordination as coordination_module
 from dr_platform.dbos_config import DbosWorkflowStatus
 from dr_platform.enqueue_runtime import (
     EnqueuePageResult,
@@ -430,8 +430,8 @@ def test_terminal_missing_reobservation_rotates_oldest_without_rewrite(
         selected_ids.append(selected[0].item.item_id)
         observed_at = base + timedelta(seconds=cycle + 1)
         monkeypatch.setattr(
-            reconciliation_module,
-            "_database_now",
+            coordination_module,
+            "database_now",
             lambda connection, now=observed_at: now,
         )
         apply_reconciliation_observations(
@@ -503,8 +503,8 @@ def test_missing_requires_confirmed_enqueue_count_and_grace(
     assert first_now is not None
     times = iter((first_now, first_now + timedelta(seconds=2)))
     monkeypatch.setattr(
-        reconciliation_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: next(times),
     )
     options = ReconcileOptions(
@@ -803,9 +803,7 @@ def test_automatic_retry_locks_successor_workflow_before_domain_rows(
     _confirm_enqueued(pg_engine, schema)
     source_workflow_id = _workflow_id(pg_engine, schema)
     events: list[tuple[str, object]] = []
-    original_workflows = (
-        reconciliation_module._acquire_workflow_reference_locks
-    )
+    original_workflows = coordination_module.acquire_workflow_reference_locks
     original_operation = reconciliation_module._lock_operation_for_item
     original_item = reconciliation_module._lock_item
     original_attempt = reconciliation_module._lock_attempt
@@ -828,8 +826,8 @@ def test_automatic_retry_locks_successor_workflow_before_domain_rows(
         return original_attempt(connection, **kwargs)
 
     monkeypatch.setattr(
-        reconciliation_module,
-        "_acquire_workflow_reference_locks",
+        coordination_module,
+        "acquire_workflow_reference_locks",
         lock_workflows,
     )
     monkeypatch.setattr(
@@ -882,7 +880,7 @@ def test_workflow_reference_lock_helper_sorts_and_deduplicates() -> None:
             del statement
             observed.append(parameters["id"])
 
-    claims_module._acquire_workflow_reference_locks(
+    coordination_module.acquire_workflow_reference_locks(
         cast("Any", RecordingConnection()),
         ("workflow-z", "workflow-a", "workflow-z", "workflow-m"),
     )
@@ -999,8 +997,8 @@ def test_identical_active_is_noop_but_active_resets_missing_streak(
         absent_at = connection.scalar(select(text("clock_timestamp()")))
     assert absent_at is not None
     monkeypatch.setattr(
-        reconciliation_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: absent_at,
     )
     apply_reconciliation_observations(
@@ -1017,8 +1015,8 @@ def test_identical_active_is_noop_but_active_resets_missing_streak(
     )
     reset_at = absent_at + timedelta(seconds=1)
     monkeypatch.setattr(
-        reconciliation_module,
-        "_database_now",
+        coordination_module,
+        "database_now",
         lambda connection: reset_at,
     )
     reset = apply_reconciliation_observations(

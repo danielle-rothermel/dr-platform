@@ -9,8 +9,7 @@ from dr_serialize import sha256_json_digest
 from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert
 
-from dr_platform.claims import _acquire_export_writer_lock
-from dr_platform.records import ThrottleState, _validate_payload_size
+from dr_platform.records import ThrottleState, validate_payload_size
 from dr_platform.status import FailureClass
 
 if TYPE_CHECKING:
@@ -165,7 +164,6 @@ def record_throttle_failure(  # noqa: PLR0913 -- retained failure surface
     validated_metadata = _validate_throttle_metadata(metadata or {})
     if not should_backoff_failure(failure_class):
         return None
-    _acquire_export_writer_lock(connection)
     table = schema.throttle_state
     count = int(
         connection.execute(
@@ -285,7 +283,6 @@ def clear_throttle_hold(
     validated_throttle_key = _validate_non_empty_string(
         throttle_key, label="throttle key"
     )
-    _acquire_export_writer_lock(connection)
     connection.execute(
         update(schema.throttle_state)
         .where(schema.throttle_state.c.throttle_key == validated_throttle_key)
@@ -340,7 +337,7 @@ def _validate_throttle_metadata(value: object) -> dict[str, Any]:
         raise ValueError(
             "throttle metadata must be a mapping with string keys"
         )
-    _validate_payload_size(value, label="throttle metadata")
+    validate_payload_size(value, label="throttle metadata")
     return dict(value)
 
 
@@ -356,7 +353,7 @@ def _validate_throttle_tags(value: object) -> dict[str, str]:
         for key, item in value.items()
     ):
         raise ValueError("throttle tags must map strings to strings")
-    _validate_payload_size(value, label="throttle tags")
+    validate_payload_size(value, label="throttle tags")
     return dict(value)
 
 
@@ -377,7 +374,6 @@ def _upsert(
     now: datetime,
     values: dict[str, Any],
 ) -> None:
-    _acquire_export_writer_lock(connection)
     table = schema.throttle_state
     connection.execute(
         insert(table)
