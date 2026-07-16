@@ -1,7 +1,7 @@
 # dr-platform
 
 `dr-platform` is a typed durable-execution kernel built on DBOS. It owns
-Operation and Item identity, append-only Attempt lineage, manifest-backed
+Operation and Item identity, append-only Attempt lineage, single-read
 registration, kernel-executed enqueue, reconciliation and retry policy,
 reference-aware logical cancellation, inspection, and health reporting.
 
@@ -13,7 +13,7 @@ replay payloads.
 The public flow is:
 
 1. register an immutable execution target;
-2. prepare and submit an Operation manifest;
+2. submit an Operation from one caller-owned source;
 3. run bounded reconciliation or `wait_operation`;
 4. inspect typed Operation, Item, Attempt, and health state;
 5. use explicit cancellation or next-Attempt requests for operator actions.
