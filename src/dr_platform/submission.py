@@ -3,13 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import (
-    TYPE_CHECKING,
-    Annotated,
-    Any,
-    Protocol,
-    runtime_checkable,
-)
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import uuid4
 
 from dr_serialize import (
@@ -50,7 +44,6 @@ from dr_platform.records import ItemRecord, RetryPolicy
 from dr_platform.status import (
     AttemptEnqueueState,
     AttemptExecutionState,
-    ItemInsertStatus,
     OperationStatus,
     ServiceClass,
 )
@@ -104,15 +97,15 @@ class RegistrationAbandonedError(RegistrationError):
 
 
 class RegistrationIntegrityError(RegistrationError):
-    """Source, hook, or cursor accounting violated registration invariants."""
+    """Source or cursor accounting violated registration invariants."""
 
 
 class RegistrationIneligibleError(RegistrationError):
     """An operator transition is not eligible in the current state."""
 
 
-class RegistrationItem(BaseModel):
-    """Validated page Item passed to a caller-owned registration hook."""
+class _RegistrationItem(BaseModel):
+    """Prepared page Item with its package-owned execution identity."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -126,47 +119,6 @@ class RegistrationItem(BaseModel):
     execution_recipe_digest: NonEmptyStr
     execution_key: NonEmptyStr
     workflow_id: NonEmptyStr
-
-
-class RegistrationItemResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    item_key: NonEmptyStr
-    insert_status: ItemInsertStatus
-
-
-class RegistrationResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    items: tuple[RegistrationItemResult, ...]
-
-
-class RegistrationPageContext(BaseModel):
-    """Frozen page facts available to a registration hook.
-
-    ``is_final_page`` is authoritative only for this transaction: the
-    completion cursor CAS immediately follows the hook and rolls its work back
-    if the lease or cursor is no longer current.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    page_index: NonNegativeInt
-    page_count: PositiveInt
-    next_registration_cursor: PositiveInt
-    is_final_page: bool
-
-
-@runtime_checkable
-class RegistrationHook(Protocol):
-    def __call__(
-        self,
-        connection: Connection,
-        *,
-        operation_key: str,
-        items: tuple[RegistrationItem, ...],
-        page: RegistrationPageContext,
-    ) -> RegistrationResult: ...
 
 
 class SubmitOptions(BaseModel):
@@ -204,7 +156,6 @@ class SubmitResult(BaseModel):
     requested_count: NonNegativeInt
     registration_cursor: NonNegativeInt
     inserted_count: NonNegativeInt
-    already_present_count: NonNegativeInt
     enqueued_count: NonNegativeInt
     workflow_already_present_count: NonNegativeInt
     enqueue_failed_count: NonNegativeInt
@@ -660,33 +611,7 @@ def _register_page(  # noqa: PLR0913
         )
         next_cursor = page_index + 1
         is_final = next_cursor == page_count
-        hook_result = _invoke_registration_hook(
-            connection=connection,
-            target=target,
-            operation_key=operation_key,
-            items=candidate_items,
-            page=RegistrationPageContext(
-                page_index=page_index,
-                page_count=page_count,
-                next_registration_cursor=next_cursor,
-                is_final_page=is_final,
-            ),
-        )
-        _validate_hook_result(items=candidate_items, result=hook_result)
-        now = coordination.database_now(connection)
-        _validate_page_authority(
-            row=row,
-            operation_key=operation_key,
-            page_index=page_index,
-            lease_id=lease_id,
-            now=now,
-        )
-        result_by_key = {
-            result.item_key: result.insert_status
-            for result in hook_result.items
-        }
         for item in candidate_items:
-            insert_status = result_by_key[item.item_key]
             connection.execute(
                 insert(schema.items).values(
                     item_id=item.item_id,
@@ -697,7 +622,6 @@ def _register_page(  # noqa: PLR0913
                     service_class=item.service_class,
                     service_priority=item.service_class.priority,
                     spec=item.spec,
-                    insert_status=insert_status.value,
                     current_attempt=0,
                     created_at=now,
                     updated_at=now,
@@ -723,17 +647,11 @@ def _register_page(  # noqa: PLR0913
                 )
             )
 
-        inserted = sum(
-            result.insert_status is ItemInsertStatus.INSERTED
-            for result in hook_result.items
-        )
-        already_present = len(hook_result.items) - inserted
         cas_now = func.clock_timestamp()
         values: dict[str, Any] = {
             "registration_cursor": next_cursor,
-            "inserted_count": operations.c.inserted_count + inserted,
-            "already_present_count": (
-                operations.c.already_present_count + already_present
+            "inserted_count": (
+                operations.c.inserted_count + len(candidate_items)
             ),
             "registration_lease_expires_at": cas_now
             + timedelta(seconds=options.registration_lease_seconds),
@@ -817,7 +735,6 @@ def _operation_insert_values(  # noqa: PLR0913
         "registration_lease_expires_at": lease_expires_at,
         "retry_policy": options.retry_policy.model_dump(mode="json"),
         "inserted_count": 0,
-        "already_present_count": 0,
         "enqueued_count": 0,
         "workflow_already_present_count": 0,
         "enqueue_failed_count": 0,
@@ -1015,8 +932,8 @@ def _registration_items(
     operation_key: str,
     target: ExecutionTarget,
     prepared: tuple[_PreparedPageItem, ...],
-) -> tuple[RegistrationItem, ...]:
-    items: list[RegistrationItem] = []
+) -> tuple[_RegistrationItem, ...]:
+    items: list[_RegistrationItem] = []
     for prepared_item in prepared:
         source_item = prepared_item.source_item
         candidate = ItemRecord(
@@ -1028,7 +945,6 @@ def _registration_items(
             service_class=source_item.service_class,
             service_priority=source_item.service_class.priority,
             spec=source_item.spec,
-            insert_status=ItemInsertStatus.INSERTED,
             current_attempt=0,
             created_at=datetime.min.replace(tzinfo=UTC),
             updated_at=datetime.min.replace(tzinfo=UTC),
@@ -1036,7 +952,7 @@ def _registration_items(
         )
         execution = target.execution_for(candidate, 0)
         items.append(
-            RegistrationItem(
+            _RegistrationItem(
                 item_id=prepared_item.item_id,
                 operation_key=operation_key,
                 item_key=source_item.item_key,
@@ -1052,62 +968,6 @@ def _registration_items(
             )
         )
     return tuple(items)
-
-
-def _invoke_registration_hook(
-    *,
-    connection: Connection,
-    target: ExecutionTarget,
-    operation_key: str,
-    items: tuple[RegistrationItem, ...],
-    page: RegistrationPageContext,
-) -> RegistrationResult:
-    if target.registration_hook is None:
-        return RegistrationResult(
-            items=tuple(
-                RegistrationItemResult(
-                    item_key=item.item_key,
-                    insert_status=ItemInsertStatus.INSERTED,
-                )
-                for item in items
-            )
-        )
-    hook_items = tuple(
-        RegistrationItem.model_validate(item.model_dump(mode="python"))
-        for item in items
-    )
-    result = RegistrationResult.model_validate(
-        target.registration_hook(
-            connection,
-            operation_key=operation_key,
-            items=hook_items,
-            page=page,
-        )
-    )
-    if any(
-        not _canonical_json_equal(
-            original.model_dump(mode="json"),
-            hook_item.model_dump(mode="json"),
-        )
-        for original, hook_item in zip(items, hook_items, strict=True)
-    ):
-        raise RegistrationIntegrityError(
-            "RegistrationHook mutated its frozen page inputs"
-        )
-    return result
-
-
-def _validate_hook_result(
-    *,
-    items: tuple[RegistrationItem, ...],
-    result: RegistrationResult,
-) -> None:
-    expected = tuple(item.item_key for item in items)
-    actual = tuple(item.item_key for item in result.items)
-    if actual != expected:
-        raise RegistrationIntegrityError(
-            "RegistrationHook result keys must exactly match page order"
-        )
 
 
 def _validate_page_authority(
@@ -1211,7 +1071,6 @@ def _load_submit_result(
         requested_count=row["requested_count"],
         registration_cursor=row["registration_cursor"],
         inserted_count=row["inserted_count"],
-        already_present_count=row["already_present_count"],
         enqueued_count=row["enqueued_count"],
         workflow_already_present_count=(row["workflow_already_present_count"]),
         enqueue_failed_count=row["enqueue_failed_count"],
@@ -1222,7 +1081,7 @@ def _load_submit_result(
 
 
 def _abandonment_result(row: Any) -> AbandonRegistrationResult:
-    committed_count = row["inserted_count"] + row["already_present_count"]
+    committed_count = row["inserted_count"]
     return AbandonRegistrationResult(
         operation_key=row["operation_key"],
         committed_count=committed_count,

@@ -38,7 +38,6 @@ from dr_platform.status import (
     EnqueueCompensationDisposition,
     EnqueueCompensationReason,
     FailureClass,
-    ItemInsertStatus,
     NextAttemptDisposition,
     NextAttemptReason,
     OperationStatus,
@@ -60,7 +59,6 @@ MAX_PREFIX_BYTES = (
 OPERATION_COUNT_CHECK = """
 requested_count >= 0
 AND inserted_count >= 0
-AND already_present_count >= 0
 AND enqueued_count >= 0
 AND workflow_already_present_count >= 0
 AND enqueue_failed_count >= 0
@@ -68,7 +66,7 @@ AND active_count >= 0
 AND succeeded_count >= 0
 AND terminal_failed_count >= 0
 AND cancelled_count >= 0
-AND inserted_count + already_present_count <= requested_count
+AND inserted_count <= requested_count
 AND enqueued_count + workflow_already_present_count + enqueue_failed_count
     <= requested_count
 AND active_count + succeeded_count + terminal_failed_count + cancelled_count
@@ -106,7 +104,7 @@ REGISTRATION_COMPLETION_CHECK = """
 registration_completed_at IS NULL
 OR (
   registration_cursor = registration_page_count
-  AND inserted_count + already_present_count = requested_count
+  AND inserted_count = requested_count
   AND registration_lease_id IS NULL
   AND registration_lease_expires_at IS NULL
 )
@@ -300,7 +298,6 @@ class PlatformSchema:
             Column("registration_abandonment_reason", Text),
             Column("retry_policy", JSONB, nullable=False),
             Column("inserted_count", Integer, nullable=False),
-            Column("already_present_count", Integer, nullable=False),
             Column("enqueued_count", Integer, nullable=False),
             Column("workflow_already_present_count", Integer, nullable=False),
             Column("enqueue_failed_count", Integer, nullable=False),
@@ -394,7 +391,6 @@ class PlatformSchema:
             Column("service_class", Text, nullable=False),
             Column("service_priority", Integer, nullable=False),
             Column("spec", JSONB, nullable=False),
-            Column("insert_status", Text, nullable=False),
             Column("current_attempt", Integer, nullable=False),
             Column("created_at", DateTime(timezone=True), nullable=False),
             Column("updated_at", DateTime(timezone=True), nullable=False),
@@ -417,10 +413,6 @@ class PlatformSchema:
                 "OR (service_class = 'standard' AND service_priority = 1000) "
                 "OR (service_class = 'backfill' AND service_priority = 10000)",
                 name=name("ck_items_service_priority"),
-            ),
-            CheckConstraint(
-                enum_check("insert_status", ItemInsertStatus),
-                name=name("ck_items_insert_status"),
             ),
             CheckConstraint(
                 "updated_at >= created_at",
