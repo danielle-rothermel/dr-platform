@@ -191,14 +191,11 @@
   <div class="byline">dr-platform · 2026-07-15</div>
 
   <div class="hero">
-    The repository still violates the main <span class="key">scope boundaries</span>.
-    DuckDB and data projection are public runtime features; MotherDuck and Unitbench
-    compatibility shape production code; and several defensive protocols multiply the
-    package's public surface, schema, and test burden. PostgreSQL integration coverage is
-    allowed, but it is spread across 233 collected cases instead of a small set of
-    high-leverage database tests. The cleanest boundary is to remove publication/export
-    as a complete subsystem, then simplify the remaining execution kernel and its
-    PostgreSQL coverage against an explicitly smaller contract.
+    The first implementation layer has removed the clearest <span class="key">scope violations</span>:
+    publication, export, projection, DuckDB, MotherDuck, Unitbench signing, OpenSSL integration,
+    DBOS dependency self-tests, and Whetstone policy. The remaining work is deliberately visible:
+    PostgreSQL integration still spans 182 collected cases, submission still carries manifest
+    ceremony, and many tests remain coupled below the public package interface.
   </div>
 
   <div class="note warn" style="margin-top: 18px;">
@@ -208,10 +205,10 @@
   </div>
 
   <div class="summary-grid" aria-label="Audit summary">
-    <div class="metric"><span class="value">6,604</span><span class="label">source/script lines in DuckDB/MotherDuck publication modules</span></div>
-    <div class="metric"><span class="value">233</span><span class="label">PostgreSQL cases to consolidate into a small high-leverage set</span></div>
-    <div class="metric"><span class="value">40 / 132</span><span class="label">root exports owned by export and publication</span></div>
-    <div class="metric"><span class="value">18,697</span><span class="label">test lines versus 19,590 source lines</span></div>
+    <div class="metric"><span class="value">0</span><span class="label">DuckDB/MotherDuck/OpenSSL integration paths remaining</span></div>
+    <div class="metric"><span class="value">182</span><span class="label">PostgreSQL cases still to consolidate into a high-leverage set</span></div>
+    <div class="metric"><span class="value">0 / 92</span><span class="label">remaining root exports owned by export and publication</span></div>
+    <div class="metric"><span class="value">13,485</span><span class="label">test lines versus 13,618 source lines after PR 1</span></div>
   </div>
 
   <nav aria-label="Contents">
@@ -236,18 +233,16 @@
       default destination identifiers.
     </p>
     <div class="evidence">
-      <a href="pyproject.toml">pyproject.toml:24</a> declares <code>duckdb&gt;=1.4,&lt;1.5</code>;
-      <a href="src/dr_platform/export.py">export.py:1, 28, 294–325</a> implements local DuckDB export;
-      <a href="src/dr_platform/publication.py">publication.py:21, 3151–3559</a> implements DuckDB pins,
-      integrity backfill, and cleanup; <a href="scripts/platform_v6_preflight.py">platform_v6_preflight.py:14, 589–641</a>
-      opens MotherDuck through DuckDB. The package root re-exports 40 names from export/publication.
+      The audited base declared DuckDB in <code>pyproject.toml</code>, implemented local export in
+      <code>src/dr_platform/export.py</code>, implemented pins and cleanup in <code>publication.py</code>, and opened
+      MotherDuck from <code>platform_v6_preflight.py</code>. PR 1 removed all four paths and their 40 root exports.
     </div>
     <p class="remove"><strong>Removal boundary:</strong> delete the export/publication subsystem and its tests,
       remove its root exports, remove the dependency, and regenerate <code>uv.lock</code>. Editing the lockfile alone
       would leave import failures.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Delete DuckDB runtime code and tests.</li><li>Remove public exports and the direct dependency.</li>
-      <li>Regenerate and verify the lockfile.</li>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 1</div><ul class="checklist">
+      <li class="done">Delete DuckDB runtime code and tests.</li><li class="done">Remove public exports and the direct dependency.</li>
+      <li class="done">Regenerate and verify the lockfile.</li>
     </ul></div>
   </article>
 
@@ -262,15 +257,13 @@
       all live in <code>dr_platform</code>. This is the direct data-projection link the audit was asked to find.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/export.py">export.py:64–117, 294–321, 1643–2259</a> owns application projection
-      schemas and builders. Its opening comment says application projections remain outside the module,
-      but the module implements them. <a href="src/dr_platform/__init__.py">__init__.py:47–62, 227–229</a>
-      makes projection types first-class public API.
+      The audited <code>export.py</code> owned projection schemas and builders, while the package root made those
+      types first-class public API. PR 1 deleted the implementation, exports, and tests together.
     </div>
     <p class="remove"><strong>Removal boundary:</strong> remove projection types, application snapshot/export paths,
       remote publication, and projection tests together. Do not preserve compatibility aliases if the goal is a clean break.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Delete projection and application-export implementations.</li><li>Delete projection-facing public API and tests.</li>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 1</div><ul class="checklist">
+      <li class="done">Delete projection and application-export implementations.</li><li class="done">Delete projection-facing public API and tests.</li>
     </ul></div>
   </article>
 
@@ -285,17 +278,14 @@
       vendor-neutral execution kernel even where the public class is named “Postgres.”
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/publication.py">publication.py:598–675, 1429–1430, 2267, 2696–2806</a>
-      branches on <code>Literal["motherduck", "neon"]</code> and vendor quirks.
-      <a href="scripts/platform_v6_preflight.py">platform_v6_preflight.py:27–45, 111–143, 581–641</a>
-      hard-codes the official MotherDuck endpoint and token flow. CI and the skip-budget script
-      preserve a live MotherDuck capability test.
+      The audited publication and preflight modules branched on MotherDuck and Neon behavior, hard-coded a
+      MotherDuck endpoint and token flow, and preserved a live capability exception in CI. PR 1 deleted those paths.
     </div>
     <p class="remove"><strong>Removal boundary:</strong> remove vendor preflight commands, vendor capability branches,
       CI/skip-budget exceptions, publication tests, and the <code>motherduck:</code> secret-prefix special case.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Delete MotherDuck and Neon publication behavior.</li><li>Remove vendor preflight, CI, and test exceptions.</li>
-      <li>Remove vendor-specific secret heuristics.</li>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 1</div><ul class="checklist">
+      <li class="done">Delete MotherDuck and Neon publication behavior.</li><li class="done">Remove vendor preflight, CI, and test exceptions.</li>
+      <li class="done">Remove vendor-specific secret heuristics.</li>
     </ul></div>
   </article>
 
@@ -310,14 +300,13 @@
       signing/verification exist to match Unitbench's reader.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/publication.py">publication.py:489–591</a> names Unitbench three times and
-      implements its cross-language contract. <a href="tests/test_signed_integrity_jcs.py">test_signed_integrity_jcs.py:15–60</a>
-      pins Node-compatible vectors and real OpenSSL behavior; the fixture file supplies UTF-16 ordering cases.
+      The audited publication module implemented the Unitbench-compatible cross-language contract, while
+      <code>test_signed_integrity_jcs.py</code> pinned Node-compatible vectors and real OpenSSL behavior. PR 1 removed both.
     </div>
     <p class="remove"><strong>Removal boundary:</strong> removing publication makes this entire signing stack obsolete:
       signer types, JCS encoder, key verification, fixture vectors, OpenSSL test material, and signed-integrity tests.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Delete Unitbench-compatible signing and JCS code.</li><li>Delete OpenSSL fixtures and integration tests.</li>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 1</div><ul class="checklist">
+      <li class="done">Delete Unitbench-compatible signing and JCS code.</li><li class="done">Delete OpenSSL fixtures and integration tests.</li>
     </ul></div>
   </article>
 
@@ -336,24 +325,22 @@
       <span class="severity high">High · consolidate</span>
     </div>
     <p>
-      Pytest collects 438 cases. Fixture analysis found 233 cases requiring PostgreSQL and one requiring
-      MotherDuck. Additional cases open real DuckDB databases or spawn OpenSSL subprocesses. PostgreSQL is a valid
-      integration boundary for this package, but 233 cases repeat state transitions, table shapes, and similar race
+      After PR 1, Pytest collects 338 cases and fixture analysis finds 182 requiring PostgreSQL. No cases require
+      MotherDuck, open DuckDB, or spawn OpenSSL. PostgreSQL is a valid integration boundary, but 182 cases repeat
+      state transitions, table shapes, and similar race
       variants instead of concentrating on the few guarantees that require a real database.
     </p>
     <div class="evidence">
-      <a href="tests/conftest.py">conftest.py:17–117</a> owns live PostgreSQL and OpenSSL fixtures;
-      <a href=".github/workflows/ci.yml">ci.yml:11–59</a> starts PostgreSQL, verifies connectivity, and enforces
-      a skip budget. Current evidence: <strong>437 passed, 1 skipped in 25.06s</strong>; the skipped case is the
-      credential-gated MotherDuck test.
+      <a href="tests/conftest.py">conftest.py</a> now owns only PostgreSQL fixtures;
+      <a href=".github/workflows/ci.yml">ci.yml</a> starts PostgreSQL and verifies connectivity without a vendor skip budget.
     </div>
     <p class="remove"><strong>Required action:</strong> remove every DuckDB, MotherDuck, and OpenSSL integration path. Reduce
       PostgreSQL coverage to one focused test per database-only guarantee: fresh migration and usable schema; a representative
       transaction/locking race; core idempotent lifecycle persistence through a public seam; public inspection of persisted
       state; and credential-preserving connection behavior. Add another PostgreSQL case only when it proves a materially
       different database guarantee.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Remove every non-PostgreSQL integration test.</li><li>Consolidate PostgreSQL coverage by distinct database guarantee.</li>
+    <div class="progress"><div class="progress-title">Implementation status · In progress</div><ul class="checklist">
+      <li class="done">Remove every non-PostgreSQL integration test.</li><li>Consolidate PostgreSQL coverage by distinct database guarantee.</li>
       <li>Verify password-preserving PostgreSQL connection behavior.</li>
     </ul></div>
   </article>
@@ -370,16 +357,16 @@
       <code>dr-platform</code>'s public behavior.
     </p>
     <div class="evidence">
-      <a href="tests/contracts/test_dbos_226_contract.py">test_dbos_226_contract.py:11–18, 26–162, 183–325</a>
-      imports five private DBOS modules and pins exact schema/signature shapes. Production also imports private DBOS
+      The removed <code>test_dbos_226_contract.py</code> imported five private DBOS modules and pinned exact
+      schema/signature shapes. Production still imports private DBOS
       modules in <a href="src/dr_platform/dbos_config.py">dbos_config.py:17–26</a> and
       <a href="src/dr_platform/reconciliation_runtime.py">reconciliation_runtime.py:10</a>.
     </div>
     <p class="remove"><strong>Removal boundary:</strong> retain only tests for behavior the package itself wraps and promises.
       Delete dependency self-tests and exact private-shape assertions.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Delete DBOS dependency self-tests.</li><li>Delete exact private schema, version, and signature assertions.</li>
-      <li>Retain only package-owned wrapper behavior.</li>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 1</div><ul class="checklist">
+      <li class="done">Delete DBOS dependency self-tests.</li><li class="done">Delete exact private schema, version, and signature assertions.</li>
+      <li class="done">Retain only package-owned wrapper behavior.</li>
     </ul></div>
   </article>
 
@@ -394,16 +381,15 @@
       files/symbols remain absent, pin <code>__all__</code>, and inspect Pydantic field dictionaries.
     </p>
     <div class="evidence">
-      <a href="tests/contracts/test_platform_v6_publication_recovery.py">test_platform_v6_publication_recovery.py:24–188</a>
-      repeatedly uses <code>inspect.getsource</code> and exact substrings;
+      The removed publication recovery contract repeatedly used <code>inspect.getsource</code> and exact substrings;
       <a href="tests/contracts/test_platform_v6_credential_hygiene.py">test_platform_v6_credential_hygiene.py:22–43</a>
       regex-scans all source files; <a href="tests/contracts/test_platform_v6_enqueue_claims.py">test_platform_v6_enqueue_claims.py:2011–2060</a>
       enforces absent files, symbols, and source patterns; vocabulary tests pin internal model configuration and fields.
     </div>
     <p class="remove"><strong>Replacement rule:</strong> keep an assertion only if it crosses a supported public seam and
       protects a necessary behavior. Static policy checks belong in a linter only when the policy itself is retained.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Delete source-text and repository-scan assertions.</li><li>Delete absence and implementation-shape assertions.</li>
+    <div class="progress"><div class="progress-title">Implementation status · In progress</div><ul class="checklist">
+      <li class="done">Delete source-text and repository-scan assertions.</li><li>Delete remaining absence and implementation-shape assertions.</li>
       <li>Retain only supported public behavior checks.</li>
     </ul></div>
   </article>
@@ -444,14 +430,15 @@
       than the documented five-step public flow.
     </p>
     <div class="evidence">
-      The largest modules are <code>test_publication.py</code> (2,227 lines), contract enqueue claims (2,060),
+      PR 1 removed <code>test_publication.py</code> (2,227 lines), <code>test_export.py</code> (1,290 lines), and their
+      obsolete contracts. The remaining largest modules include contract enqueue claims (now below its former 2,060 lines),
       contract registration targets (1,774), contract cancellation (1,648), contract reconciliation (1,643),
-      <code>test_export.py</code> (1,290), and <code>test_migrations.py</code> (1,145).
+      and <code>test_migrations.py</code> (1,145).
     </div>
     <p class="remove"><strong>Replacement rule:</strong> retain narrow pure tests for deterministic calculations and public
       contracts; delete tests made obsolete by subsystem removal; rewrite remaining behavior tests around public outputs.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Delete tests made obsolete by subsystem removal.</li><li>Remove unnecessary schema and private-module coupling.</li>
+    <div class="progress"><div class="progress-title">Implementation status · In progress</div><ul class="checklist">
+      <li class="done">Delete tests made obsolete by subsystem removal.</li><li>Remove unnecessary schema and private-module coupling.</li>
       <li>Rewrite remaining behavior tests around public outputs.</li>
     </ul></div>
   </article>
@@ -474,15 +461,14 @@
       crash hooks, and backend-specific recovery. <code>export.py</code> adds 2,277 more lines and 41 raises.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/publication.py">publication.py:223–447</a> introduces a large recovery vocabulary before
-      the 2,500-line fence class; <a href="src/dr_platform/export.py">export.py:294–2277</a> duplicates local/application
-      capture and destination paths. Forty of 132 package-root names come from these two modules.
+      The audited publication module introduced a large recovery vocabulary before a 2,500-line fence class, while
+      export duplicated local/application capture and destination paths. PR 1 deleted both modules and all 40 root names.
     </div>
     <p class="remove"><strong>Decision:</strong> because publication itself is out of scope, none of its defensive guarantees
       need to survive in this package.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Delete publication recovery, fencing, leases, pins, tombstones, cleanup, and signing.</li>
-      <li>Delete all recovery-specific tests and public types.</li>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 1</div><ul class="checklist">
+      <li class="done">Delete publication recovery, fencing, leases, pins, tombstones, cleanup, and signing.</li>
+      <li class="done">Delete all recovery-specific tests and public types.</li>
     </ul></div>
   </article>
 
@@ -645,8 +631,8 @@
     </div>
     <p class="remove"><strong>Simplification direction:</strong> define a small documented metadata contract and keep opaque
       application payloads out of telemetry by construction. Do not infer secrets from arbitrary key names and string prefixes.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Remove vendor and downstream-specific telemetry policy.</li><li>Replace heuristic payload policing with a small metadata boundary.</li>
+    <div class="progress"><div class="progress-title">Implementation status · In progress</div><ul class="checklist">
+      <li class="done">Remove vendor and downstream-specific telemetry policy.</li><li>Replace heuristic payload policing with a small metadata boundary.</li>
     </ul></div>
   </article>
 
@@ -662,14 +648,13 @@
       responsibilities being split at unstable seams.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/publication.py">publication.py:33–47, 3568–3584</a> documents and repairs the intentional cycle;
-      <a href="src/dr_platform/export.py">export.py:502–547, 1016, 1569, 1762</a> contains repeated cycle-breaking imports.
-      Reconciliation modules use the same <code>PLC0415</code> pattern and cancellation imports private lifecycle helpers.
+      PR 1 removed the intentional export/publication cycle and its repeated cycle-breaking imports. Reconciliation modules
+      still use the same <code>PLC0415</code> pattern and cancellation still imports private lifecycle helpers.
     </div>
     <p class="remove"><strong>Removal boundary:</strong> deleting export/publication eliminates the worst cycle. Move genuinely
       shared remaining concepts to leaf modules rather than preserving lazy imports.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Remove cycles deleted with publication/export.</li><li>Move remaining shared lifecycle and locking concepts to leaf modules.</li>
+    <div class="progress"><div class="progress-title">Implementation status · In progress</div><ul class="checklist">
+      <li class="done">Remove cycles deleted with publication/export.</li><li>Move remaining shared lifecycle and locking concepts to leaf modules.</li>
       <li>Remove runtime lazy imports that only conceal cycles.</li>
     </ul></div>
   </article>
@@ -693,8 +678,8 @@
     </div>
     <p class="remove"><strong>Removal boundary:</strong> delete Whetstone keys and tests. Replace documentation examples with
       neutral execution payload language only where the concept remains necessary.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Delete Whetstone telemetry keys and tests.</li><li>Replace AI/provider examples with neutral package language.</li>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 1</div><ul class="checklist">
+      <li class="done">Delete Whetstone telemetry keys and tests.</li><li class="done">Replace AI/provider examples with neutral package language.</li>
     </ul></div>
   </article>
 
@@ -760,8 +745,8 @@
     </div>
     <p class="remove"><strong>Standalone direction:</strong> after removal, expose only the remaining core verbs, their direct
       input/result types, and required public protocols. Leave implementation records and storage operations private.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Remove obsolete subsystem exports.</li><li>Curate the remaining root API around supported public verbs and types.</li>
+    <div class="progress"><div class="progress-title">Implementation status · In progress</div><ul class="checklist">
+      <li class="done">Remove obsolete subsystem exports.</li><li>Curate the remaining root API around supported public verbs and types.</li>
     </ul></div>
   </article>
 
@@ -777,31 +762,31 @@
         <tr><th>Module</th><th>Cases</th><th>DB cases</th><th>Classification</th><th>Audit disposition</th></tr>
       </thead>
       <tbody>
-        <tr><td class="path">contracts/test_dbos_226_contract.py</td><td class="num">11</td><td class="num">7</td><td>DBOS private compatibility + PostgreSQL</td><td class="status-remove">Remove</td></tr>
+        <tr><td class="path">contracts/test_dbos_226_contract.py</td><td class="num">11</td><td class="num">7</td><td>DBOS private compatibility + PostgreSQL</td><td class="status-keep">Removed in PR 1</td></tr>
         <tr><td class="path">contracts/test_platform_v6_cancellation.py</td><td class="num">21</td><td class="num">21</td><td>PostgreSQL integration</td><td class="status-rewrite">Consolidate into public cancellation path</td></tr>
         <tr><td class="path">contracts/test_platform_v6_credential_hygiene.py</td><td class="num">2</td><td class="num">0</td><td>Repository source scan</td><td class="status-remove">Remove</td></tr>
         <tr><td class="path">contracts/test_platform_v6_enqueue_claims.py</td><td class="num">36</td><td class="num">28</td><td>Mixed; DB integration + source-shape policy</td><td class="status-rewrite">Keep only distinct DB race evidence</td></tr>
         <tr><td class="path">contracts/test_platform_v6_fresh_schema.py</td><td class="num">12</td><td class="num">3</td><td>Schema internals + migrations</td><td class="status-rewrite">Collapse into migration smoke test</td></tr>
         <tr><td class="path">contracts/test_platform_v6_inspection_telemetry.py</td><td class="num">3</td><td class="num">3</td><td>PostgreSQL integration</td><td class="status-rewrite">Keep one public inspection path</td></tr>
-        <tr><td class="path">contracts/test_platform_v6_publication_recovery.py</td><td class="num">7</td><td class="num">0</td><td>Publication source inspection</td><td class="status-remove">Remove with publication</td></tr>
+        <tr><td class="path">contracts/test_platform_v6_publication_recovery.py</td><td class="num">7</td><td class="num">0</td><td>Publication source inspection</td><td class="status-keep">Removed in PR 1</td></tr>
         <tr><td class="path">contracts/test_platform_v6_reconciliation_retries.py</td><td class="num">29</td><td class="num">26</td><td>Mixed; DB integration + duplicated unit cases</td><td class="status-rewrite">Keep only distinct persistence/race evidence</td></tr>
         <tr><td class="path">contracts/test_platform_v6_registration_targets.py</td><td class="num">54</td><td class="num">26</td><td>Mixed; DB integration + target/manifest units</td><td class="status-rewrite">Keep one transaction/idempotency path</td></tr>
         <tr><td class="path">contracts/test_platform_v6_telemetry_hygiene.py</td><td class="num">7</td><td class="num">0</td><td>Unit; includes Whetstone policy</td><td class="status-rewrite">Remove downstream cases</td></tr>
         <tr><td class="path">contracts/test_platform_v6_vocabulary.py</td><td class="num">15</td><td class="num">0</td><td>API/model shape and absence assertions</td><td class="status-rewrite">Reduce to public contract</td></tr>
-        <tr><td class="path">contracts/test_preflight_script.py</td><td class="num">15</td><td class="num">0</td><td>Vendor preflight implementation</td><td class="status-remove">Remove</td></tr>
-        <tr><td class="path">contracts/test_storage_preflight.py</td><td class="num">4</td><td class="num">3</td><td>PostgreSQL + DuckDB/subprocess integration</td><td class="status-remove">Remove</td></tr>
+        <tr><td class="path">contracts/test_preflight_script.py</td><td class="num">15</td><td class="num">0</td><td>Vendor preflight implementation</td><td class="status-keep">Removed in PR 1</td></tr>
+        <tr><td class="path">contracts/test_storage_preflight.py</td><td class="num">4</td><td class="num">3</td><td>PostgreSQL + DuckDB/subprocess integration</td><td class="status-keep">Removed in PR 1</td></tr>
         <tr><td class="path">test_backoff.py</td><td class="num">1</td><td class="num">1</td><td>PostgreSQL integration</td><td class="status-keep">Keep only if backoff persistence is core</td></tr>
         <tr><td class="path">test_claims.py</td><td class="num">13</td><td class="num">13</td><td>PostgreSQL integration</td><td class="status-rewrite">Consolidate with contract claim tests</td></tr>
         <tr><td class="path">test_cut.py</td><td class="num">1</td><td class="num">1</td><td>PostgreSQL integration</td><td class="status-keep">Keep only if cut locking is core</td></tr>
         <tr><td class="path">test_dbos_config.py</td><td class="num">13</td><td class="num">0</td><td>Unit; partly private DBOS behavior</td><td class="status-rewrite">Keep only wrapper behavior</td></tr>
         <tr><td class="path">test_enqueue_runtime.py</td><td class="num">28</td><td class="num">0</td><td>Unit with hand-written DBOS fakes</td><td class="status-keep">Core candidate after pruning</td></tr>
-        <tr><td class="path">test_export.py</td><td class="num">17</td><td class="num">14</td><td>PostgreSQL + real DuckDB + projections</td><td class="status-remove">Remove</td></tr>
+        <tr><td class="path">test_export.py</td><td class="num">17</td><td class="num">14</td><td>PostgreSQL + real DuckDB + projections</td><td class="status-keep">Removed in PR 1</td></tr>
         <tr><td class="path">test_jsonl.py</td><td class="num">14</td><td class="num">0</td><td>Filesystem adapter units</td><td class="status-rewrite">Keep only if JSONL remains core</td></tr>
         <tr><td class="path">test_migrations.py</td><td class="num">46</td><td class="num">41</td><td>PostgreSQL schema/trigger integration</td><td class="status-rewrite">Reduce to migration + critical constraints</td></tr>
-        <tr><td class="path">test_publication.py</td><td class="num">30</td><td class="num">28</td><td>PostgreSQL/MotherDuck + real DuckDB/OpenSSL</td><td class="status-remove">Remove</td></tr>
+        <tr><td class="path">test_publication.py</td><td class="num">30</td><td class="num">28</td><td>PostgreSQL/MotherDuck + real DuckDB/OpenSSL</td><td class="status-keep">Removed in PR 1</td></tr>
         <tr><td class="path">test_reconciliation.py</td><td class="num">20</td><td class="num">19</td><td>PostgreSQL integration + one pure lock-order test</td><td class="status-rewrite">Keep one core persistence/race path</td></tr>
         <tr><td class="path">test_reconciliation_runtime.py</td><td class="num">23</td><td class="num">0</td><td>Unit with DBOS client fakes</td><td class="status-keep">Core candidate after pruning</td></tr>
-        <tr><td class="path">test_signed_integrity_jcs.py</td><td class="num">4</td><td class="num">0</td><td>Unit + OpenSSL subprocess; Unitbench wire format</td><td class="status-remove">Remove</td></tr>
+        <tr><td class="path">test_signed_integrity_jcs.py</td><td class="num">4</td><td class="num">0</td><td>Unit + OpenSSL subprocess; Unitbench wire format</td><td class="status-keep">Removed in PR 1</td></tr>
         <tr><td class="path">test_submission_pipeline.py</td><td class="num">2</td><td class="num">0</td><td>Orchestration units with fakes</td><td class="status-keep">Core candidate after redesign</td></tr>
         <tr><td class="path">test_targets.py</td><td class="num">10</td><td class="num">0</td><td>Pure target-registry units</td><td class="status-rewrite">Keep against simplified contract</td></tr>
       </tbody>
@@ -833,9 +818,9 @@
   </div>
 
   <footer>
-    Audit scope: 72 tracked files at commit <code>5b8f984</code> plus the current working tree. Evidence was derived from
-    complete tracked-file search, AST-based source and test inventories, pytest fixture collection, dependency/configuration
-    inspection, and a full test run. Counts describe the audited revision and should be refreshed after removal work.
+    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 1 of the Graphite stack and was
+    refreshed with complete source search, AST-based API inventory, pytest fixture collection, dependency/configuration
+    inspection, and focused/full-suite verification. Pending checklist items describe work not yet completed by this branch.
   </footer>
 </main>
 </body>

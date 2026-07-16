@@ -1,18 +1,10 @@
 from __future__ import annotations
 
-import base64
 import os
-import shutil
-import subprocess
-import tempfile
 from collections.abc import Iterator
-from functools import lru_cache
-from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine, create_engine, text
-
-from dr_platform.publication import OpenSslEd25519Signer
 
 TEST_DATABASE_URL = os.environ.get(
     "DR_PLATFORM_TEST_DATABASE_URL",
@@ -29,54 +21,6 @@ def engine_dsn(engine: Engine) -> str:
     service container.
     """
     return engine.url.render_as_string(hide_password=False)
-
-
-@lru_cache(maxsize=1)
-def signed_integrity_test_material() -> tuple[
-    OpenSslEd25519Signer, dict[str, str]
-]:
-    """Ephemeral OpenSSL key material used by signed-publication tests."""
-
-    openssl = shutil.which("openssl")
-    if openssl is None:
-        pytest.skip("openssl unavailable; install it and add it to PATH")
-
-    private = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)  # noqa: SIM115
-    private.close()
-    public = tempfile.NamedTemporaryFile(suffix=".der", delete=False)  # noqa: SIM115
-    public.close()
-    subprocess.run(
-        [
-            openssl,
-            "genpkey",
-            "-algorithm",
-            "ED25519",
-            "-out",
-            private.name,
-        ],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            openssl,
-            "pkey",
-            "-in",
-            private.name,
-            "-pubout",
-            "-outform",
-            "DER",
-            "-out",
-            public.name,
-        ],
-        check=True,
-        capture_output=True,
-    )
-    return OpenSslEd25519Signer("test-ed25519", Path(private.name)), {
-        "test-ed25519": base64.b64encode(
-            Path(public.name).read_bytes()
-        ).decode()
-    }
 
 
 @pytest.fixture(scope="session")

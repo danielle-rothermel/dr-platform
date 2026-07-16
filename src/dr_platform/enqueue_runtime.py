@@ -73,7 +73,6 @@ FORBIDDEN_ARGUMENT_KEY_FRAGMENTS = (
 )
 FORBIDDEN_ARGUMENT_VALUE_PREFIXES = (
     "md:",
-    "motherduck:",
     "postgres://",
     "postgresql+psycopg://",
     "postgresql://",

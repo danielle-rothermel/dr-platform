@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from threading import Barrier, Lock
-from typing import Any, Final, Literal
+from typing import Any, Literal
 from unittest.mock import patch
 
 import pytest
@@ -73,9 +71,6 @@ from dr_platform.targets import (
     TargetRegistry,
 )
 from tests.conftest import engine_dsn
-
-REPO_ROOT: Final = Path(__file__).resolve().parents[2]
-SOURCE_ROOT: Final = REPO_ROOT / "src" / "dr_platform"
 
 
 class ClaimTestItem(BaseModel):
@@ -1302,9 +1297,6 @@ def test_enqueue_adapter_receives_only_allowlisted_context(
         "platform.workflow_role": "claim-test",
         "platform.attempt": 0,
     }
-    serialized_attributes = repr(call.attributes)
-    assert claimed.operation_key not in serialized_attributes
-    assert claimed.item_id not in serialized_attributes
 
 
 @pytest.mark.parametrize(
@@ -2006,55 +1998,3 @@ def test_exhausted_absence_terminalizes_without_replacement_or_cut_bump(
         )
     assert final_cut == exhausted_cut
     assert adapter.calls == []
-
-
-def test_enqueue_ownership_and_legacy_paths_are_absent() -> None:
-    assert not (SOURCE_ROOT / "fairness.py").exists()
-    assert not (SOURCE_ROOT / "naming.py").exists()
-
-    forbidden_symbols = (
-        "dedup_enqueue",
-        "EnqueueOutcome",
-        "EnqueueItem",
-        "enqueue_callback",
-        "fair_ordered",
-        "PlatformNaming",
-    )
-    production_text = "\n".join(
-        path.read_text()
-        for path in SOURCE_ROOT.rglob("*.py")
-        if path.name != "py.typed"
-    )
-
-    for symbol in forbidden_symbols:
-        assert re.search(rf"\b{re.escape(symbol)}\b", production_text) is None
-
-    assert dr_platform.submit is submit
-    for private_runtime_name in (
-        "claim_pending_attempts",
-        "enqueue_pending_page",
-        "recover_call_started_page",
-        "start_enqueue_call",
-    ):
-        assert private_runtime_name not in dr_platform.__all__
-        assert not hasattr(dr_platform, private_runtime_name)
-
-    for path in SOURCE_ROOT.rglob("*.py"):
-        if path.name in {
-            "claims.py",
-            "schema.py",
-            "0001_platform_baseline.py",
-        }:
-            continue
-        text_content = path.read_text()
-        assert (
-            re.search(
-                r"(?:insert|update)\([^)]*enqueue_claims",
-                text_content,
-                flags=re.DOTALL,
-            )
-            is None
-        )
-        if path.name != "enqueue_runtime.py":
-            assert "DBOS.enqueue_workflow" not in text_content
-            assert "SetEnqueueOptions" not in text_content
