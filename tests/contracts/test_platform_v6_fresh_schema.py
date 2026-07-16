@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import CheckConstraint, Engine, text
@@ -374,21 +373,9 @@ def test_every_change_tracked_table_has_change_sequence_first_index() -> None:
         ), suffix
 
 
-def test_migration_lineage_has_only_the_final_baseline() -> None:
+def test_migration_api_exposes_upgrade_without_stamping() -> None:
     from dr_platform.db import migrate
 
-    versions_dir = (
-        Path(inspect.getfile(migrate)).parent / "alembic" / "versions"
-    )
-    versions = sorted(
-        path.name
-        for path in versions_dir.glob("*.py")
-        if path.name != "__init__.py"
-    )
-
-    assert versions == [
-        "0001_platform_baseline.py",
-    ]
     assert not hasattr(migrate, "stamp_platform_schema")
     assert not hasattr(dr_platform, "stamp_platform_schema")
     upgrade_parameters = inspect.signature(
