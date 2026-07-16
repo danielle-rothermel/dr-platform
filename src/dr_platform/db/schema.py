@@ -150,11 +150,6 @@ ATTEMPT_CLAIM_CHECK = """
 (enqueue_state = 'claiming') = (current_claim_id IS NOT NULL)
 """.strip()
 
-ATTEMPT_WORKFLOW_CHECK = """
-enqueue_state NOT IN ('enqueued', 'workflow_already_present')
-OR workflow_id IS NOT NULL
-""".strip()
-
 ATTEMPT_TERMINAL_CHECK = """
 (
   execution_state IN (
@@ -573,10 +568,6 @@ class PlatformSchema:
                 name=name("ck_attempts_claim"),
             ),
             CheckConstraint(
-                ATTEMPT_WORKFLOW_CHECK,
-                name=name("ck_attempts_workflow"),
-            ),
-            CheckConstraint(
                 ATTEMPT_TERMINAL_CHECK,
                 name=name("ck_attempts_terminal"),
             ),
@@ -803,6 +794,10 @@ class PlatformSchema:
                 "OR created_attempt = source_attempt + 1",
                 name=name("ck_requests_created_attempt"),
             ),
+            CheckConstraint(
+                "resolved_at >= created_at",
+                name=name("ck_requests_resolved_time"),
+            ),
         )
 
         self.enqueue_compensations = Table(
@@ -944,6 +939,10 @@ class PlatformSchema:
                 "failure_class IS NULL OR "
                 + enum_check("failure_class", FailureClass),
                 name=name("ck_throttle_state_failure_class"),
+            ),
+            CheckConstraint(
+                "failure_class IS NULL OR consecutive_failures > 0",
+                name=name("ck_throttle_state_failure_count"),
             ),
             CheckConstraint(
                 "(hold_until IS NULL) = (hold_reason IS NULL)",

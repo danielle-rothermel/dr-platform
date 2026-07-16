@@ -44,7 +44,6 @@ from dr_platform.records import (
     EligibilityReference,
     FailureSnapshot,
     ItemRecord,
-    NextAttemptRequestRecord,
     RetryPolicy,
 )
 from dr_platform.status import (
@@ -313,17 +312,14 @@ def request_next_attempt(
                 operation_key=seed["operation_key"],
                 now=now,
             )
-        row = NextAttemptRequestRecord.model_validate(
-            {**values, "change_seq": 1}
-        )
         return NextAttemptResult(
-            request_id=row.request_id,
-            item_id=row.item_id,
-            source_attempt=row.source_attempt,
-            disposition=row.disposition,
-            created_attempt=row.created_attempt,
-            effective_max_attempts=row.effective_max_attempts,
-            rejection_detail=row.rejection_detail,
+            request_id=request.request_id(),
+            item_id=request.item_id,
+            source_attempt=request.source_attempt,
+            disposition=disposition,
+            created_attempt=created_attempt,
+            effective_max_attempts=effective_max,
+            rejection_detail=rejection,
         )
 
 

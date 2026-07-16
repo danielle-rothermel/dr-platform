@@ -65,6 +65,14 @@ def _table_columns(engine: Engine, table: str) -> set[str]:
     return {column["name"] for column in inspect(engine).get_columns(table)}
 
 
+def _table_check_names(engine: Engine, table: str) -> set[str]:
+    return {
+        name
+        for constraint in inspect(engine).get_check_constraints(table)
+        if isinstance(name := constraint["name"], str)
+    }
+
+
 def test_fresh_upgrade_creates_complete_kernel_schema(
     pg_engine: Engine,
 ) -> None:
@@ -142,6 +150,15 @@ def test_fresh_upgrade_creates_complete_kernel_schema(
         "effective_service_priority",
         "change_seq",
     } <= attempt_columns
+    assert "platform_ck_attempts_workflow" not in _table_check_names(
+        pg_engine, "platform_item_attempts"
+    )
+    assert "platform_ck_requests_resolved_time" in _table_check_names(
+        pg_engine, "platform_next_attempt_requests"
+    )
+    assert "platform_ck_throttle_state_failure_count" in _table_check_names(
+        pg_engine, "platform_throttle_state"
+    )
 
     database_inspector = inspect(pg_engine)
     claim_uniques = database_inspector.get_unique_constraints(
@@ -178,7 +195,7 @@ def test_prefix_is_the_only_physical_naming_option(pg_engine: Engine) -> None:
     }
 
 
-def test_single_read_registration_revision_is_the_only_head() -> None:
+def test_validation_ownership_revision_is_the_only_head() -> None:
     script = ScriptDirectory.from_config(
         migrate._alembic_config("postgresql://unused", "platform")
     )
@@ -186,9 +203,12 @@ def test_single_read_registration_revision_is_the_only_head() -> None:
     assert PLATFORM_HEAD_REVISION != PLATFORM_BASELINE_REVISION
     assert script.get_heads() == [PLATFORM_HEAD_REVISION]
     head = script.get_revision(PLATFORM_HEAD_REVISION)
+    single_read = script.get_revision("0002_single_read_registration")
     baseline = script.get_revision(PLATFORM_BASELINE_REVISION)
     assert head is not None
-    assert head.down_revision == PLATFORM_BASELINE_REVISION
+    assert head.down_revision == "0002_single_read_registration"
+    assert single_read is not None
+    assert single_read.down_revision == PLATFORM_BASELINE_REVISION
     assert baseline is not None
     assert baseline.down_revision is None
 
@@ -286,6 +306,89 @@ def test_upgrade_from_baseline_preserves_registration_progress(
                 "WHERE operation_key = 'existing'"
             )
         )
+
+
+def test_upgrade_from_single_read_adopts_validation_constraints(
+    pg_engine: Engine,
+) -> None:
+    dsn = engine_dsn(pg_engine)
+    upgrade_platform_schema(dsn, revision="0002_single_read_registration")
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO platform_throttle_state (
+                    throttle_key, consecutive_failures, failure_class,
+                    metadata, tags, updated_at
+                ) VALUES (
+                    'existing', 1, 'transient', '{}', '{}', now()
+                )
+                """
+            )
+        )
+
+    assert "platform_ck_attempts_workflow" in _table_check_names(
+        pg_engine, "platform_item_attempts"
+    )
+    assert "platform_ck_requests_resolved_time" not in _table_check_names(
+        pg_engine, "platform_next_attempt_requests"
+    )
+    assert (
+        "platform_ck_throttle_state_failure_count"
+        not in _table_check_names(pg_engine, "platform_throttle_state")
+    )
+
+    upgrade_platform_schema(dsn)
+
+    assert "platform_ck_attempts_workflow" not in _table_check_names(
+        pg_engine, "platform_item_attempts"
+    )
+    assert "platform_ck_requests_resolved_time" in _table_check_names(
+        pg_engine, "platform_next_attempt_requests"
+    )
+    assert "platform_ck_throttle_state_failure_count" in _table_check_names(
+        pg_engine, "platform_throttle_state"
+    )
+    with pg_engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT failure_class, consecutive_failures "
+                "FROM platform_throttle_state "
+                "WHERE throttle_key = 'existing'"
+            )
+        ).one() == ("transient", 1)
+        assert (
+            connection.execute(
+                text(
+                    "SELECT version_num "
+                    "FROM platform_platform_alembic_version"
+                )
+            ).scalar_one()
+            == PLATFORM_HEAD_REVISION
+        )
+
+
+def test_validation_ownership_downgrade_restores_single_read_schema(
+    pg_engine: Engine,
+) -> None:
+    dsn = engine_dsn(pg_engine)
+    upgrade_platform_schema(dsn)
+
+    command.downgrade(
+        migrate._alembic_config(dsn, "platform"),
+        "0002_single_read_registration",
+    )
+
+    assert "platform_ck_attempts_workflow" in _table_check_names(
+        pg_engine, "platform_item_attempts"
+    )
+    assert "platform_ck_requests_resolved_time" not in _table_check_names(
+        pg_engine, "platform_next_attempt_requests"
+    )
+    assert (
+        "platform_ck_throttle_state_failure_count"
+        not in _table_check_names(pg_engine, "platform_throttle_state")
+    )
 
 
 def test_baseline_upgrade_and_downgrade_are_exact(pg_engine: Engine) -> None:
@@ -419,6 +522,29 @@ def test_change_sequence_advances_for_insert_and_update(
     assert updated > inserted
 
 
+def test_throttle_failure_class_requires_positive_count(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(engine_dsn(pg_engine))
+
+    with (
+        pytest.raises(Exception, match="throttle_state_failure_count"),
+        pg_engine.begin() as connection,
+    ):
+        connection.execute(
+            text(
+                """
+                INSERT INTO platform_throttle_state (
+                    throttle_key, consecutive_failures, failure_class,
+                    metadata, tags, updated_at
+                ) VALUES (
+                    'provider:model', 0, 'transient', '{}', '{}', now()
+                )
+                """
+            )
+        )
+
+
 def test_kernel_rows_reject_hard_delete(pg_engine: Engine) -> None:
     upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
@@ -511,6 +637,37 @@ def _insert_terminal_attempt_fixture(connection: Connection) -> None:
             """
         )
     )
+
+
+def test_next_attempt_request_resolution_cannot_precede_creation(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(engine_dsn(pg_engine))
+    with pg_engine.begin() as connection:
+        _insert_terminal_attempt_fixture(connection)
+
+    with (
+        pytest.raises(Exception, match="requests_resolved_time"),
+        pg_engine.begin() as connection,
+    ):
+        connection.execute(
+            text(
+                """
+                INSERT INTO platform_next_attempt_requests (
+                    request_id, item_id, request_key, source_attempt, reason,
+                    eligibility_kind, eligibility_record_id,
+                    eligibility_digest, requested_by,
+                    effective_max_attempts, disposition, rejection_detail,
+                    created_at, resolved_at
+                ) VALUES (
+                    'request-time', 'item', 'caller-request-time', 0,
+                    'domain_outcome', 'generation_run', 'run',
+                    'eligibility-digest', 'caller', 3, 'ineligible',
+                    'not eligible', now(), now() - interval '1 second'
+                )
+                """
+            )
+        )
 
 
 def test_terminal_attempt_allows_noop_and_rejects_mutation(
