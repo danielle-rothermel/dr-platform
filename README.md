@@ -47,9 +47,10 @@ reconcile(engine=engine, resolver=registry)
 operation = inspect_operation(receipt.operation_key, engine=engine)
 ```
 
-Advanced storage, enqueue recovery, throttling/backoff, cancellation repair,
-and scheduling APIs remain importable from their responsibility modules; they
-are not part of the supported root facade.
+Advanced record storage and mutation, enqueue recovery, throttling/backoff,
+cancellation repair, and scheduling APIs remain importable from their
+responsibility modules; they are not part of the supported root facade. Record
+types returned by the supported inspection API remain available at the root.
 
 Cancellation is non-recursive and reference-aware. Attempts and enqueue
 Claims are durable history rather than mutable work slots. Optional OTLP
@@ -62,6 +63,6 @@ Install the locked environment and run the repository checks:
 ```bash
 uv sync
 uv run ruff check .
-uv run ty check
+uv run pyright src/dr_platform tests scripts
 uv run pytest
 ```

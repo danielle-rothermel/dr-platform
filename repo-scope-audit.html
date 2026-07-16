@@ -213,8 +213,8 @@
   <div class="summary-grid" aria-label="Audit summary">
     <div class="metric"><span class="value">0</span><span class="label">DuckDB/MotherDuck/OpenSSL integration paths remaining</span></div>
     <div class="metric"><span class="value">12</span><span class="label">high-leverage PostgreSQL cases in the current 97-case suite</span></div>
-    <div class="metric"><span class="value">70</span><span class="label">documented lifecycle verbs and their direct root contracts</span></div>
-    <div class="metric"><span class="value">2,984</span><span class="label">test lines versus 13,008 source lines after PR 9</span></div>
+    <div class="metric"><span class="value">80</span><span class="label">documented lifecycle verbs and their direct root contracts</span></div>
+    <div class="metric"><span class="value">2,984</span><span class="label">test lines versus 13,028 source lines after PR 9</span></div>
   </div>
 
   <nav aria-label="Contents">
@@ -510,15 +510,16 @@
       <span class="severity decision">Decision required</span>
     </div>
     <p>
-      One submission freezes format versions, target digests, per-item recipe digests, per-page digests, an all-items digest,
-      an operation-recipe digest, and a final manifest digest. Submission then rereads and recomputes the entire chain.
-      The JSONL adapter adds inode/device/size/mtime identity, content SHA-256, byte length, byte offsets, and before/after
-      identity checks around reads and hashing.
+      At the audit baseline, a separate preparation layer froze format versions, target digests, per-item recipe digests,
+      per-page digests, an all-items digest, an operation-recipe digest, and a final manifest digest. Submission reread and
+      recomputed that chain. The former JSONL adapter also recorded inode/device/size/mtime identity, content SHA-256, byte
+      length, byte offsets, and before/after identity checks around reads and hashing.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/manifests.py">manifests.py:22–125</a> defines versioned, self-hashing manifests;
-      <a href="src/dr_platform/submission.py">submission.py:274–351, 954–1075</a> computes and revalidates the digest tree;
-      <a href="src/dr_platform/jsonl.py">jsonl.py:68–167, 194–250, 335–352</a> adds filesystem drift detection.
+      The baseline inventory recorded those removed paths. In the current tree,
+      <a href="src/dr_platform/jsonl.py">jsonl.py</a> reads and validates the source once, while
+      <a href="src/dr_platform/submission.py">submission.py</a> validates the committed prefix only when resumable
+      registration continues. Neither module retains filesystem fingerprints, a manifest digest tree, or a second source read.
     </div>
     <p class="remove"><strong>Resolved contract:</strong> submission owns one authoritative read, validates caller input at that
       boundary, and persists only runtime identity and resumable-registration state. It does not defend against caller mutation
@@ -750,13 +751,14 @@
     </div>
     <p>
       Before curation, the root mixed lifecycle verbs with raw persistence records, throttle storage, cut comparison, repair
-      operations, and low-level configuration helpers while omitting direct errors and result contracts. PR 9 now exposes 70
+      operations, and low-level configuration helpers while omitting direct errors and result contracts. PR 9 now exposes 80
       names: the documented configuration, target, submission, reconciliation, inspection, cancellation, and operator-action
-      flow plus the types required to call it.
+      flow plus the types required to call it and interpret its direct results.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/__init__.py">__init__.py</a> explicitly imports the supported facade; raw records, backoff and
-      throttle persistence, cut comparison, abandonment, and repair APIs remain discoverable only from focused submodules.
+      <a href="src/dr_platform/__init__.py">__init__.py</a> explicitly imports the supported facade; inspection record types
+      are included because public results contain them, while record storage and mutation, backoff and throttle persistence,
+      cut comparison, abandonment, and repair APIs remain discoverable only from focused submodules.
       <a href="README.md">README.md</a> documents the same root lifecycle and the advanced-submodule boundary.
     </div>
     <p class="remove"><strong>Standalone direction:</strong> after removal, expose only the remaining core verbs, their direct

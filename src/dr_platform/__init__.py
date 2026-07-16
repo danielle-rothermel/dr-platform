@@ -48,13 +48,20 @@ from dr_platform.reconciliation import (
     request_next_attempt,
 )
 from dr_platform.reconciliation_runtime import (
+    DbosStepObservation,
     ReconcileOptions,
     ReconcileResult,
     reconcile,
 )
 from dr_platform.records import (
+    AttemptRecord,
     EligibilityReference,
+    EnqueueClaimRecord,
+    EnqueueCompensationHazardRecord,
+    EnqueueCompensationRecord,
     FailureSnapshot,
+    ItemRecord,
+    OperationRecord,
     RetryPolicy,
 )
 from dr_platform.status import (
@@ -85,12 +92,16 @@ from dr_platform.targets import (
     TargetConflictError,
     TargetRegistry,
     TargetResolutionError,
+    TargetResolutionErrorCode,
+    TargetResolutionFailure,
     TargetResolver,
     TargetUnavailableError,
 )
+from dr_platform.telemetry import TelemetryInitializationResult
 
 __all__ = [
     "AttemptInspection",
+    "AttemptRecord",
     "CancellationAttemptCut",
     "CancellationAttemptResult",
     "CancellationConflictError",
@@ -101,7 +112,11 @@ __all__ = [
     "CancellationInspectionDisposition",
     "CancellationRequest",
     "CancellationResult",
+    "DbosStepObservation",
     "EligibilityReference",
+    "EnqueueClaimRecord",
+    "EnqueueCompensationHazardRecord",
+    "EnqueueCompensationRecord",
     "ExecutionIdentity",
     "ExecutionRecipeEnvelope",
     "ExecutionTarget",
@@ -110,12 +125,14 @@ __all__ = [
     "FailureSnapshot",
     "HealthReport",
     "ItemInspection",
+    "ItemRecord",
     "JsonlFieldNames",
     "NextAttemptDisposition",
     "NextAttemptReason",
     "NextAttemptRequest",
     "NextAttemptResult",
     "OperationInspection",
+    "OperationRecord",
     "OperationStatus",
     "OperationWaitOptions",
     "OperationWaitResult",
@@ -142,8 +159,11 @@ __all__ = [
     "TargetConflictError",
     "TargetRegistry",
     "TargetResolutionError",
+    "TargetResolutionErrorCode",
+    "TargetResolutionFailure",
     "TargetResolver",
     "TargetUnavailableError",
+    "TelemetryInitializationResult",
     "WorkflowCanceller",
     "WorkflowTopology",
     "build_platform_dbos_config",
