@@ -198,7 +198,8 @@
     instead of re-auditing typed rows. PR 4 removed the remaining cycle-hiding runtime imports and internal private-module
     crossings. PR 5 dissolved the contract-test layer and reduced database coverage to 13 distinct PostgreSQL guarantees.
     PR 6 replaced heuristic payload policing with an explicit application-owned workflow-argument boundary. Findings outside
-    the approved cleanup layers remain highlighted below as future decisions.
+    the approved cleanup layers remain highlighted below as future decisions. PR 7 retained resumable registration while
+    removing caller-owned transaction hooks and their persisted classification state.
   </div>
 
   <div class="note warn" style="margin-top: 18px;">
@@ -209,9 +210,9 @@
 
   <div class="summary-grid" aria-label="Audit summary">
     <div class="metric"><span class="value">0</span><span class="label">DuckDB/MotherDuck/OpenSSL integration paths remaining</span></div>
-    <div class="metric"><span class="value">13</span><span class="label">high-leverage PostgreSQL cases in the current 98-case suite</span></div>
-    <div class="metric"><span class="value">90</span><span class="label">root exports remaining after obsolete manifest types were removed</span></div>
-    <div class="metric"><span class="value">3,006</span><span class="label">test lines versus 12,984 source lines after PR 6</span></div>
+    <div class="metric"><span class="value">12</span><span class="label">high-leverage PostgreSQL cases in the current 97-case suite</span></div>
+    <div class="metric"><span class="value">86</span><span class="label">root exports remaining before final facade curation</span></div>
+    <div class="metric"><span class="value">2,998</span><span class="label">test lines versus 13,055 source lines after PR 7</span></div>
   </div>
 
   <nav aria-label="Contents">
@@ -328,7 +329,7 @@
       <span class="severity high">High · consolidate</span>
     </div>
     <p>
-      After PR 6, Pytest collects 98 cases and fixture analysis finds 13 requiring PostgreSQL. No cases require
+      After PR 7, Pytest collects 97 cases and fixture analysis finds 12 requiring PostgreSQL. No cases require
       MotherDuck, open DuckDB, or spawn OpenSSL. The retained database cases cover public migration, representative
       upgrade compatibility from the published baseline, persisted integrity, transactional rollback, concurrent claims,
       submit/request/cancel idempotency, safe source-identity checks when registration resumes, retry reconciliation,
@@ -429,8 +430,8 @@
     </div>
     <p>
       The original suite had 97 submodule imports, 145 monkeypatch mentions, 368 schema references, and 333 direct SQL calls.
-      The current suite has 98 collected cases in 3,006 lines. Its deterministic units target responsibility modules, while
-      only 13 PostgreSQL cases cross the storage boundary and 16 explicit database calls remain for representative persisted
+      The current suite has 97 collected cases in 2,998 lines. Its deterministic units target responsibility modules, while
+      only 12 PostgreSQL cases cross the storage boundary and explicit database setup remains limited to representative persisted
       integrity evidence.
     </p>
     <div class="evidence">
@@ -530,13 +531,13 @@
 
   <article class="finding" id="f13">
     <div class="finding-head">
-      <h3>F13 · Target registration makes callers assemble and cross-validate a 17-field contract</h3>
+      <h3>F13 · Target registration makes callers assemble and cross-validate parallel contracts</h3>
       <span class="severity decision">Decision required</span>
     </div>
     <p>
-      <code>ExecutionTarget</code> has 17 fields, including six callables and several independently versioned concepts.
-      Callers must separately derive a ten-field declaration and make its digest match the target reference. Recipes then
-      repeat target identity, workflow name/version, topology, and argument-recipe version and are validated again.
+      After hook removal, <code>ExecutionTarget</code> still has 14 fields, including five callables and several independently
+      versioned concepts. Callers must separately derive an eight-field declaration and make its digest match the target
+      reference. Recipes then repeat target identity, workflow name/version, topology, and argument-recipe version.
     </p>
     <div class="evidence">
       <a href="src/dr_platform/targets.py">targets.py:41–157</a> defines target identity, declaration, target construction,
@@ -546,30 +547,32 @@
     <p class="remove"><strong>Simplification direction:</strong> derive references, declarations, and digests from one target
       definition. Remove version fields without a demonstrated migration/compatibility consumer.</p>
     <div class="progress"><div class="progress-title">Implementation status · In progress · Future decision remains</div><ul class="checklist">
-      <li class="done">Remove manifest-level copies of target identity and aggregate recipe digests.</li>
+      <li class="done">Remove manifest-level copies of aggregate recipe identity and obsolete hook identity.</li>
       <li>Choose one authoritative target definition.</li><li>Remove repeated identity and unused compatibility fields.</li>
     </ul></div>
   </article>
 
   <article class="finding" id="f14">
     <div class="finding-head">
-      <h3>F14 · Registration leases, page hooks, and replay checks create a second transaction protocol</h3>
+      <h3>F14 · Registration leases, application hooks, and replay checks create a second transaction protocol</h3>
       <span class="severity decision">Decision required</span>
     </div>
     <p>
-      Submission uses page-level registration leases, cursor compare-and-set checks, abandonment, hook accounting,
-      exact JSON replay comparison, nested-input mutation detection, global advisory locks, and per-workflow locks.
-      The public <code>submit</code> and <code>submit_jsonl</code> facades each expose 13 parameters to wire this machinery.
+      The audited implementation combined necessary resumable paging with arbitrary application SQL callbacks, hook result
+      classification, input mutation policing, and separate “already present” accounting. PR 7 made the boundary explicit:
+      the package owns page registration, while leases, cursor compare-and-set, abandonment, and persisted-prefix replay checks
+      remain because they protect resumable registration.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/submission.py">submission.py:90–273, 354–842, 898–1259</a> contains the registration protocol;
-      <code>OperationRecord</code> persists 39 fields, many solely for manifest, lease, cursor, and aggregate bookkeeping.
+      <a href="src/dr_platform/submission.py">submission.py</a> now inserts prepared pages without invoking caller code;
+      <a href="src/dr_platform/db/alembic/versions/0004_package_owned_registration.py">0004_package_owned_registration.py</a>
+      folds historical classifications into the inserted total before dropping the hook-owned columns and checks.
     </div>
-    <p class="remove"><strong>Question to resolve:</strong> does core submission need resumable multi-page registration with
-      application hooks? If not, use one transaction or a much smaller idempotency contract and remove abandonment/lease paths.</p>
-    <div class="progress"><div class="progress-title">Implementation status · In progress · Future decision remains</div><ul class="checklist">
+    <p class="remove"><strong>Resolved contract:</strong> core submission keeps resumable multi-page registration, but no
+      application extension point runs inside its transactions. Registration outcomes describe package-owned persistence only.</p>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 7</div><ul class="checklist">
       <li class="done">Remove nested-source mutation detection and manifest exact-replay policing.</li>
-      <li>Decide the required resumability and hook contract.</li><li>Remove protocol state outside that contract.</li>
+      <li class="done">Retain resumability while removing caller-owned transaction hooks.</li><li class="done">Remove hook result classification and persisted accounting outside that contract.</li>
     </ul></div>
   </article>
 
@@ -776,7 +779,7 @@
         <tr><td class="path">test_dbos_config.py</td><td class="num">8</td><td class="num">0</td><td>Package-owned DBOS configuration behavior</td><td class="status-keep">Keep</td></tr>
         <tr><td class="path">test_enqueue_runtime.py</td><td class="num">22</td><td class="num">0</td><td>External enqueue outcome units with package-owned fakes</td><td class="status-keep">Keep</td></tr>
         <tr><td class="path">test_jsonl.py</td><td class="num">8</td><td class="num">0</td><td>Single-read JSONL boundary units</td><td class="status-keep">Keep</td></tr>
-        <tr><td class="path">test_lifecycle.py</td><td class="num">10</td><td class="num">10</td><td>Distinct PostgreSQL transaction/lifecycle guarantees</td><td class="status-keep">Keep</td></tr>
+        <tr><td class="path">test_lifecycle.py</td><td class="num">9</td><td class="num">9</td><td>Distinct PostgreSQL transaction/lifecycle guarantees</td><td class="status-keep">Keep</td></tr>
         <tr><td class="path">test_reconciliation_runtime.py</td><td class="num">17</td><td class="num">0</td><td>External DBOS observation normalization units</td><td class="status-keep">Keep</td></tr>
         <tr><td class="path">test_submission_pipeline.py</td><td class="num">1</td><td class="num">0</td><td>Single-read public submission orchestration</td><td class="status-keep">Keep</td></tr>
         <tr><td class="path">test_targets.py</td><td class="num">9</td><td class="num">0</td><td>Pure target-registry behavior</td><td class="status-keep">Keep</td></tr>
@@ -810,7 +813,7 @@
   </div>
 
   <footer>
-    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 6 of the Graphite stack and was
+    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 7 of the Graphite stack and was
     refreshed with complete source search, AST-based API inventory, pytest fixture collection, dependency/configuration
     inspection, and focused/full-suite verification. Pending checklist items describe work not yet completed by this branch.
   </footer>
