@@ -206,22 +206,27 @@ def test_queue_preflight_accepts_valid_database_queue() -> None:
     validate_priority_queue(queue_lookup=Lookup(), target=_target())
 
 
-@pytest.mark.parametrize(
-    "args",
-    [
-        ({"api_key": "secret"},),
-        ({"nested": {"database-url": "value"}},),
-        ("postgresql://user:password@host/db",),
-    ],
-)
-def test_prepare_call_rejects_secret_bearing_workflow_arguments(
-    args: tuple[object, ...],
-) -> None:
-    with pytest.raises(EnqueuePreparationError, match="secret material"):
+def test_prepare_call_accepts_application_owned_workflow_arguments() -> None:
+    args = ({"api_key": "application-owned"},)
+
+    call = prepare_enqueue_call(
+        item=_item(),
+        attempt=_attempt(),
+        target=_target(args_for=lambda item, attempt: args),
+    )
+
+    assert call.args == args
+
+
+def test_prepare_call_rejects_unserializable_workflow_arguments() -> None:
+    with pytest.raises(
+        EnqueuePreparationError,
+        match="workflow arguments are not safely serializable",
+    ):
         prepare_enqueue_call(
             item=_item(),
             attempt=_attempt(),
-            target=_target(args_for=lambda item, attempt: args),
+            target=_target(args_for=lambda item, attempt: (object(),)),
         )
 
 

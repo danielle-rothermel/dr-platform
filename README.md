@@ -8,7 +8,8 @@ reference-aware logical cancellation, inspection, and health reporting.
 DBOS owns durable workflow and step execution. Applications own workflow
 definitions and domain outcomes. The kernel does not persist workflow inputs,
 application configuration, external-service payloads, credentials, or DBOS
-replay payloads.
+replay payloads. It validates workflow arguments only for serialization and
+does not log or emit them as telemetry; applications own their secret policy.
 
 The public flow is:
 

@@ -63,23 +63,6 @@ EXECUTION_KEY_ATTRIBUTE = "platform.execution_key"
 WORKFLOW_ROLE_ATTRIBUTE = "platform.workflow_role"
 ATTEMPT_ATTRIBUTE = "platform.attempt"
 
-FORBIDDEN_ARGUMENT_KEY_FRAGMENTS = (
-    "api_key",
-    "credential",
-    "database_url",
-    "dsn",
-    "password",
-    "secret",
-    "token",
-)
-FORBIDDEN_ARGUMENT_VALUE_PREFIXES = (
-    "md:",
-    "postgres://",
-    "postgresql+psycopg://",
-    "postgresql://",
-)
-
-
 class QueueConfigurationError(RuntimeError):
     """A target queue is absent or violates the persisted priority contract."""
 
@@ -305,7 +288,7 @@ def prepare_enqueue_call(
     attempt: AttemptRecord,
     target: ExecutionTarget,
 ) -> PreparedEnqueueCall:
-    """Revalidate one current Attempt and build its secret-free DBOS call."""
+    """Revalidate one current Attempt and build its DBOS call."""
     if attempt.item_id != item.item_id:
         raise EnqueuePreparationError("Attempt does not belong to the Item")
     if attempt.enqueue_state is not AttemptEnqueueState.CLAIMING:
@@ -330,7 +313,7 @@ def prepare_enqueue_call(
             "target execution identity does not match the persisted Attempt"
         )
     args = target.args_for(item, attempt.attempt)
-    _validate_secret_free_arguments(args)
+    _validate_serializable_arguments(args)
     attributes: dict[str, str | int] = {
         EXECUTION_KEY_ATTRIBUTE: attempt.execution_key,
         WORKFLOW_ROLE_ATTRIBUTE: attempt.workflow_role,
@@ -817,50 +800,13 @@ def _validate_claim_call(
         )
 
 
-def _validate_secret_free_arguments(args: tuple[Any, ...]) -> None:
+def _validate_serializable_arguments(args: tuple[Any, ...]) -> None:
     try:
-        payload = Serializer(limits=postgres_jsonb_limits()).to_jsonable(args)
+        Serializer(limits=postgres_jsonb_limits()).to_jsonable(args)
     except SerializationError as error:
         raise EnqueuePreparationError(
             f"workflow arguments are not safely serializable: {error}"
         ) from error
-    violation = _find_secret_violation(payload)
-    if violation is not None:
-        raise EnqueuePreparationError(
-            "workflow arguments contain forbidden secret material at "
-            f"{violation}"
-        )
-
-
-def _find_secret_violation(  # noqa: PLR0911 -- recursive shape dispatcher
-    value: object,
-    *,
-    path: str = "args",
-) -> str | None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if not isinstance(key, str):
-                return f"{path}.<non-string-key>"
-            normalized = key.lower().replace("-", "_")
-            if any(
-                part in normalized for part in FORBIDDEN_ARGUMENT_KEY_FRAGMENTS
-            ):
-                return f"{path}.{key}"
-            violation = _find_secret_violation(child, path=f"{path}.{key}")
-            if violation is not None:
-                return violation
-        return None
-    if isinstance(value, list):
-        for index, child in enumerate(value):
-            violation = _find_secret_violation(child, path=f"{path}[{index}]")
-            if violation is not None:
-                return violation
-        return None
-    if isinstance(value, str) and value.lower().startswith(
-        FORBIDDEN_ARGUMENT_VALUE_PREFIXES
-    ):
-        return path
-    return None
 
 
 def _uncertain_outcome(
