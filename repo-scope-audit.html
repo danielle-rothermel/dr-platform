@@ -199,7 +199,8 @@
     crossings. PR 5 dissolved the contract-test layer and reduced database coverage to 13 distinct PostgreSQL guarantees.
     PR 6 replaced heuristic payload policing with an explicit application-owned workflow-argument boundary. Findings outside
     the approved cleanup layers remain highlighted below as future decisions. PR 7 retained resumable registration while
-    removing caller-owned transaction hooks and their persisted classification state.
+    removing caller-owned transaction hooks and their persisted classification state. PR 8 made the runtime target the single
+    caller-authored definition and derives its persisted reference without changing legacy no-hook digests.
   </div>
 
   <div class="note warn" style="margin-top: 18px;">
@@ -212,7 +213,7 @@
     <div class="metric"><span class="value">0</span><span class="label">DuckDB/MotherDuck/OpenSSL integration paths remaining</span></div>
     <div class="metric"><span class="value">12</span><span class="label">high-leverage PostgreSQL cases in the current 97-case suite</span></div>
     <div class="metric"><span class="value">86</span><span class="label">root exports remaining before final facade curation</span></div>
-    <div class="metric"><span class="value">2,998</span><span class="label">test lines versus 13,055 source lines after PR 7</span></div>
+    <div class="metric"><span class="value">2,982</span><span class="label">test lines versus 13,043 source lines after PR 8</span></div>
   </div>
 
   <nav aria-label="Contents">
@@ -535,20 +536,20 @@
       <span class="severity decision">Decision required</span>
     </div>
     <p>
-      After hook removal, <code>ExecutionTarget</code> still has 14 fields, including five callables and several independently
-      versioned concepts. Callers must separately derive an eight-field declaration and make its digest match the target
-      reference. Recipes then repeat target identity, workflow name/version, topology, and argument-recipe version.
+      <code>ExecutionTarget</code> now accepts target identity, declarative configuration, and runtime callables once. Its
+      persisted reference and digest are derived from a private declaration projection, so callers can no longer assemble two
+      conflicting copies. Recipes still repeat workflow/version/topology concepts whose compatibility value remains undecided.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/targets.py">targets.py:41–157</a> defines target identity, declaration, target construction,
-      and cross-validation; <a href="src/dr_platform/manifests.py">manifests.py:29–60</a> repeats the recipe envelope;
-      <a href="src/dr_platform/submission.py">submission.py:1225–1246</a> compares the repeated fields.
+      <a href="src/dr_platform/targets.py">targets.py</a> owns the private digest projection and derived
+      <code>ExecutionTarget.ref</code>; <a href="src/dr_platform/manifests.py">manifests.py:29–60</a> still defines the repeated
+      recipe envelope; target tests prove that persisted no-hook references resolve with the unchanged digest.
     </div>
     <p class="remove"><strong>Simplification direction:</strong> derive references, declarations, and digests from one target
       definition. Remove version fields without a demonstrated migration/compatibility consumer.</p>
-    <div class="progress"><div class="progress-title">Implementation status · In progress · Future decision remains</div><ul class="checklist">
+    <div class="progress"><div class="progress-title">Implementation status · In progress · Compatibility-field decision remains</div><ul class="checklist">
       <li class="done">Remove manifest-level copies of aggregate recipe identity and obsolete hook identity.</li>
-      <li>Choose one authoritative target definition.</li><li>Remove repeated identity and unused compatibility fields.</li>
+      <li class="done">Make ExecutionTarget the one caller-authored definition and derive its reference.</li><li>Remove repeated recipe identity and unused compatibility fields.</li>
     </ul></div>
   </article>
 
@@ -813,7 +814,7 @@
   </div>
 
   <footer>
-    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 7 of the Graphite stack and was
+    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 8 of the Graphite stack and was
     refreshed with complete source search, AST-based API inventory, pytest fixture collection, dependency/configuration
     inspection, and focused/full-suite verification. Pending checklist items describe work not yet completed by this branch.
   </footer>
