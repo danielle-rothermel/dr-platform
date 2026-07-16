@@ -22,10 +22,6 @@ from pydantic import (
 )
 
 from dr_platform.status import (
-    CONFIRMED_ENQUEUE_STATES,
-    RESOLVED_COMPENSATION_DISPOSITIONS,
-    TERMINAL_EXECUTION_STATES,
-    TERMINAL_OPERATION_STATUSES,
     AttemptEnqueueState,
     AttemptExecutionState,
     AttemptRetryReason,
@@ -58,13 +54,6 @@ def _validate_payload_size(value: Any, *, label: str) -> None:
         ).to_jsonable(value)
     except SerializationError as exc:
         raise ValueError(f"{label}: {exc}") from exc
-
-
-def _validate_time_order(
-    *, start: datetime, end: datetime | None, label: str
-) -> None:
-    if end is not None and end < start:
-        raise ValueError(f"{label} must not precede {start=}")
 
 
 class RetryPolicy(BaseModel):
@@ -142,130 +131,6 @@ class OperationRecord(BaseModel):
     completed_at: datetime | None = None
     change_seq: PositiveChangeSeq
 
-    @model_validator(mode="after")
-    def validate_operation(self) -> OperationRecord:
-        self._validate_counts()
-        self._validate_registration()
-        self._validate_lifecycle()
-        _validate_payload_size(self.spec, label="operation spec")
-        _validate_payload_size(self.metadata, label="operation metadata")
-        for end, label in (
-            (self.registration_completed_at, "registration_completed_at"),
-            (self.registration_abandoned_at, "registration_abandoned_at"),
-            (self.cancel_requested_at, "cancel_requested_at"),
-            (self.updated_at, "updated_at"),
-            (self.completed_at, "completed_at"),
-        ):
-            _validate_time_order(start=self.created_at, end=end, label=label)
-        return self
-
-    def _validate_counts(self) -> None:
-        count_values = (
-            self.inserted_count,
-            self.already_present_count,
-            self.enqueued_count,
-            self.workflow_already_present_count,
-            self.enqueue_failed_count,
-            self.active_count,
-            self.succeeded_count,
-            self.terminal_failed_count,
-            self.cancelled_count,
-        )
-        if any(value > self.requested_count for value in count_values):
-            raise ValueError("operation counts cannot exceed requested_count")
-        if (
-            self.inserted_count + self.already_present_count
-            > self.requested_count
-        ):
-            raise ValueError(
-                "registration counts cannot exceed requested_count"
-            )
-        enqueue_total = (
-            self.enqueued_count
-            + self.workflow_already_present_count
-            + self.enqueue_failed_count
-        )
-        if enqueue_total > self.requested_count:
-            raise ValueError("enqueue counts cannot exceed requested_count")
-        execution_total = (
-            self.active_count
-            + self.succeeded_count
-            + self.terminal_failed_count
-            + self.cancelled_count
-        )
-        if execution_total > self.requested_count:
-            raise ValueError("execution counts cannot exceed requested_count")
-        if self.registration_cursor > self.registration_page_count:
-            raise ValueError(
-                "registration_cursor exceeds registration_page_count"
-            )
-        expected_page_count = (
-            self.requested_count + self.registration_page_size - 1
-        ) // self.registration_page_size
-        if self.registration_page_count != expected_page_count:
-            raise ValueError("registration pages do not cover item count")
-        if self.registration_completed_at is not None and (
-            self.registration_cursor != self.registration_page_count
-        ):
-            raise ValueError(
-                "registration completion requires the final cursor"
-            )
-        if self.registration_completed_at is not None and (
-            self.inserted_count + self.already_present_count
-            != self.requested_count
-        ):
-            raise ValueError(
-                "completed registration must account for every item"
-            )
-
-    def _validate_registration(self) -> None:
-        lease_values = (
-            self.registration_lease_id,
-            self.registration_lease_expires_at,
-        )
-        if any(value is None for value in lease_values) and any(
-            value is not None for value in lease_values
-        ):
-            raise ValueError("registration lease fields must be set together")
-        abandonment_values = (
-            self.registration_abandoned_at,
-            self.registration_abandoned_by,
-            self.registration_abandonment_reason,
-        )
-        if any(value is None for value in abandonment_values) and any(
-            value is not None for value in abandonment_values
-        ):
-            raise ValueError(
-                "registration abandonment fields must be set together"
-            )
-        if self.registration_completed_at is not None and any(
-            value is not None for value in lease_values
-        ):
-            raise ValueError("completed registration cannot retain a lease")
-        if self.registration_abandoned_at is not None:
-            if any(value is not None for value in lease_values):
-                raise ValueError(
-                    "abandoned registration cannot retain a lease"
-                )
-            if self.registration_completed_at is not None:
-                raise ValueError(
-                    "registration cannot be completed and abandoned"
-                )
-            if self.status is not OperationStatus.FAILED:
-                raise ValueError("abandoned registration must be failed")
-
-    def _validate_lifecycle(self) -> None:
-        if (
-            self.status in TERMINAL_OPERATION_STATUSES
-            and self.completed_at is None
-        ):
-            raise ValueError("terminal operations require completed_at")
-        if (
-            self.status not in TERMINAL_OPERATION_STATUSES
-            and self.completed_at is not None
-        ):
-            raise ValueError("nonterminal operations cannot have completed_at")
-
 
 class ItemRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -283,16 +148,6 @@ class ItemRecord(BaseModel):
     created_at: datetime
     updated_at: datetime
     change_seq: PositiveChangeSeq
-
-    @model_validator(mode="after")
-    def validate_item(self) -> ItemRecord:
-        if self.service_priority != self.service_class.priority:
-            raise ValueError("service_priority does not match service_class")
-        _validate_payload_size(self.spec, label="item spec")
-        _validate_time_order(
-            start=self.created_at, end=self.updated_at, label="updated_at"
-        )
-        return self
 
 
 class AttemptRecord(BaseModel):
@@ -336,150 +191,6 @@ class AttemptRecord(BaseModel):
     updated_at: datetime
     change_seq: PositiveChangeSeq
 
-    @model_validator(mode="after")
-    def validate_attempt(self) -> AttemptRecord:
-        self._validate_identity_and_priority()
-        self._validate_enqueue()
-        self._validate_execution()
-        self._validate_missing_observations()
-        self._validate_cancellation()
-        for end, label in (
-            (self.enqueued_at, "enqueued_at"),
-            (self.terminal_at, "terminal_at"),
-            (self.updated_at, "updated_at"),
-        ):
-            _validate_time_order(start=self.created_at, end=end, label=label)
-        return self
-
-    def _validate_identity_and_priority(self) -> None:
-        if (
-            self.requested_service_priority
-            != self.requested_service_class.priority
-        ):
-            raise ValueError("requested priority does not match service class")
-        source_values = (
-            self.source_attempt,
-            self.source_workflow_id,
-            self.retry_reason,
-        )
-        if self.attempt == 0 and any(
-            value is not None for value in source_values
-        ):
-            raise ValueError("attempt zero cannot have retry provenance")
-        if self.attempt == 0 and self.next_attempt_request_id is not None:
-            raise ValueError(
-                "attempt zero cannot reference a next-attempt request"
-            )
-        if self.attempt > 0 and any(value is None for value in source_values):
-            raise ValueError(
-                "later attempts require complete retry provenance"
-            )
-        if self.attempt > 0 and self.source_attempt != self.attempt - 1:
-            raise ValueError(
-                "later attempts must reference the preceding attempt"
-            )
-
-    def _validate_enqueue(self) -> None:
-        if self.enqueue_state is AttemptEnqueueState.CLAIMING:
-            if self.current_claim_id is None:
-                raise ValueError("claiming attempts require current_claim_id")
-        elif self.current_claim_id is not None:
-            raise ValueError(
-                "only claiming attempts may point at a current claim"
-            )
-        if self.enqueue_state in CONFIRMED_ENQUEUE_STATES:
-            if (
-                self.enqueued_at is None
-                or self.effective_service_priority is None
-            ):
-                raise ValueError(
-                    "confirmed enqueue requires time and effective priority"
-                )
-            if self.priority_source is None:
-                raise ValueError("confirmed enqueue requires priority_source")
-        elif any(
-            value is not None
-            for value in (
-                self.enqueued_at,
-                self.effective_service_priority,
-                self.priority_source,
-            )
-        ):
-            raise ValueError(
-                "unconfirmed enqueue cannot carry confirmed enqueue facts"
-            )
-
-    def _validate_execution(self) -> None:
-        if self.execution_state in TERMINAL_EXECUTION_STATES:
-            if self.terminal_at is None:
-                raise ValueError("terminal attempts require terminal_at")
-        elif self.terminal_at is not None:
-            raise ValueError("nonterminal attempts cannot have terminal_at")
-        if (
-            self.execution_state is AttemptExecutionState.ERROR
-            or self.enqueue_state is AttemptEnqueueState.ENQUEUE_ERROR
-        ) and self.failure is None:
-            raise ValueError("error attempts require a failure snapshot")
-        if self.execution_state is AttemptExecutionState.ERROR and (
-            self.retry_disposition is None
-        ):
-            raise ValueError("execution errors require retry_disposition")
-        if self.execution_state is not AttemptExecutionState.ERROR and (
-            self.retry_disposition is not None
-        ):
-            raise ValueError(
-                "only execution errors may carry retry_disposition"
-            )
-
-    def _validate_missing_observations(self) -> None:
-        missing_values = (
-            self.missing_first_observed_at,
-            self.missing_last_observed_at,
-        )
-        if self.missing_observation_count == 0 and any(
-            value is not None for value in missing_values
-        ):
-            raise ValueError("missing timestamps require observations")
-        if self.missing_observation_count > 0 and any(
-            value is None for value in missing_values
-        ):
-            raise ValueError(
-                "missing observations require first and last timestamps"
-            )
-        if (
-            self.missing_first_observed_at is not None
-            and self.missing_last_observed_at is not None
-            and self.missing_last_observed_at < self.missing_first_observed_at
-        ):
-            raise ValueError(
-                "last missing observation cannot precede the first"
-            )
-
-    def _validate_cancellation(self) -> None:
-        cancellation_origin_values = (
-            self.cancellation_origin,
-            self.cancellation_request_id,
-            self.cancellation_requested_at,
-            self.cancellation_requested_by,
-        )
-        if any(value is None for value in cancellation_origin_values) and any(
-            value is not None for value in cancellation_origin_values
-        ):
-            raise ValueError(
-                "cancellation origin and request must be set together"
-            )
-        if (
-            self.cancellation_origin is CancellationOrigin.FOREIGN_OPERATION
-            and (
-                self.cancellation_origin_operation_key is None
-                or self.foreign_cancellation_request_id is None
-            )
-        ):
-            raise ValueError(
-                "foreign cancellation requires operation and request "
-                "provenance"
-            )
-
 
 class EligibilityReference(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -511,38 +222,6 @@ class NextAttemptRequestRecord(BaseModel):
     resolved_at: datetime
     change_seq: PositiveChangeSeq
 
-    @model_validator(mode="after")
-    def validate_request(self) -> NextAttemptRequestRecord:
-        if self.reason is NextAttemptReason.OPERATOR_CANCEL_RETRY and (
-            self.operator_confirmed_at is None
-        ):
-            raise ValueError("cancel retry requires operator confirmation")
-        if self.reason is NextAttemptReason.DOMAIN_OUTCOME and (
-            self.operator_confirmed_at is not None
-        ):
-            raise ValueError(
-                "domain-outcome retry cannot carry operator confirmation"
-            )
-        if self.max_attempts is not None and (
-            self.effective_max_attempts > self.max_attempts
-        ):
-            raise ValueError(
-                "effective_max_attempts exceeds requested tightening"
-            )
-        if self.disposition is NextAttemptDisposition.CREATED:
-            if self.created_attempt != self.source_attempt + 1:
-                raise ValueError(
-                    "created disposition requires source attempt + 1"
-                )
-        elif self.created_attempt is not None:
-            raise ValueError(
-                "only created requests may name a created attempt"
-            )
-        _validate_time_order(
-            start=self.created_at, end=self.resolved_at, label="resolved_at"
-        )
-        return self
-
 
 class EnqueueClaimRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -563,79 +242,6 @@ class EnqueueClaimRecord(BaseModel):
     created_at: datetime
     change_seq: PositiveChangeSeq
 
-    @model_validator(mode="after")
-    def validate_claim(self) -> EnqueueClaimRecord:
-        if self.lease_expires_at <= self.claimed_at:
-            raise ValueError("claim lease must expire after claimed_at")
-        if (
-            self.disposition
-            in {
-                EnqueueClaimDisposition.CALL_STARTED,
-                EnqueueClaimDisposition.OUTCOME_RECORDED,
-            }
-            and self.enqueue_call_started_at is None
-        ):
-            raise ValueError(
-                "DBOS-call dispositions require a start timestamp"
-            )
-        call_started_dispositions = {
-            EnqueueClaimDisposition.CALL_STARTED,
-            EnqueueClaimDisposition.OUTCOME_RECORDED,
-            EnqueueClaimDisposition.EXPIRED,
-            EnqueueClaimDisposition.REPLACED,
-            EnqueueClaimDisposition.INVALIDATED,
-        }
-        if (
-            self.enqueue_call_started_at is not None
-            and self.disposition not in call_started_dispositions
-        ):
-            raise ValueError(
-                "call-start facts require a call-started, outcome-recorded, "
-                "expired, replaced, or invalidated disposition"
-            )
-        if self.disposition is EnqueueClaimDisposition.REPLACED and (
-            self.replacement_claim_id is None
-        ):
-            raise ValueError("replaced claims require replacement_claim_id")
-        if self.disposition is not EnqueueClaimDisposition.REPLACED and (
-            self.replacement_claim_id is not None
-        ):
-            raise ValueError(
-                "only replaced claims may name a replacement claim"
-            )
-        invalidation_values = (self.invalidated_at, self.invalidated_by)
-        if any(value is None for value in invalidation_values) and any(
-            value is not None for value in invalidation_values
-        ):
-            raise ValueError("claim invalidation fields must be set together")
-        if self.disposition is EnqueueClaimDisposition.INVALIDATED and any(
-            value is None for value in invalidation_values
-        ):
-            raise ValueError("invalidated claims require invalidation facts")
-        if self.disposition is not EnqueueClaimDisposition.INVALIDATED and any(
-            value is not None for value in invalidation_values
-        ):
-            raise ValueError(
-                "only invalidated claims may carry invalidation facts"
-            )
-        if self.enqueue_call_started_at is not None:
-            _validate_time_order(
-                start=self.claimed_at,
-                end=self.enqueue_call_started_at,
-                label="enqueue_call_started_at",
-            )
-        resolved_dispositions = {
-            EnqueueClaimDisposition.OUTCOME_RECORDED,
-            EnqueueClaimDisposition.EXPIRED,
-            EnqueueClaimDisposition.REPLACED,
-            EnqueueClaimDisposition.INVALIDATED,
-        }
-        if (self.disposition in resolved_dispositions) != (
-            self.resolved_at is not None
-        ):
-            raise ValueError("resolved claim dispositions require resolved_at")
-        return self
-
 
 class EnqueueCompensationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -654,30 +260,6 @@ class EnqueueCompensationRecord(BaseModel):
     resolved_at: datetime | None = None
     change_seq: PositiveChangeSeq
 
-    @model_validator(mode="after")
-    def validate_compensation(self) -> EnqueueCompensationRecord:
-        if self.cancel_disposition is EnqueueCompensationDisposition.FAILED:
-            if self.failure is None:
-                raise ValueError("failed compensation requires failure")
-        elif self.failure is not None:
-            raise ValueError("only failed compensation may carry failure")
-        if self.cancel_disposition in RESOLVED_COMPENSATION_DISPOSITIONS:
-            if self.resolved_at is None:
-                raise ValueError("resolved compensation requires resolved_at")
-        elif self.resolved_at is not None:
-            raise ValueError("unresolved compensation cannot have resolved_at")
-        if self.absence_observation_count == 0:
-            if (
-                self.first_absent_at is not None
-                or self.last_absent_at is not None
-            ):
-                raise ValueError(
-                    "zero absence observations require no timestamps"
-                )
-        elif self.first_absent_at is None or self.last_absent_at is None:
-            raise ValueError("absence observations require both timestamps")
-        return self
-
 
 class EnqueueCompensationHazardRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -692,35 +274,6 @@ class EnqueueCompensationHazardRecord(BaseModel):
     created_at: datetime
     resolved_at: datetime | None = None
     change_seq: PositiveChangeSeq
-
-    @model_validator(mode="after")
-    def validate_hazard(self) -> EnqueueCompensationHazardRecord:
-        if self.hazard_seq != 1:
-            raise ValueError(
-                "successor compensation hazard sequence must be one"
-            )
-        if (
-            self.cancel_disposition
-            is EnqueueCompensationDisposition.NO_WORKFLOW_FOUND
-        ):
-            raise ValueError("successor hazard proves workflow appearance")
-        if self.cancel_disposition is EnqueueCompensationDisposition.FAILED:
-            if self.failure is None:
-                raise ValueError("failed compensation hazard requires failure")
-        elif self.failure is not None:
-            raise ValueError(
-                "only failed compensation hazard may carry failure"
-            )
-        if self.cancel_disposition in RESOLVED_COMPENSATION_DISPOSITIONS:
-            if self.resolved_at is None:
-                raise ValueError(
-                    "resolved compensation hazard requires resolved_at"
-                )
-        elif self.resolved_at is not None:
-            raise ValueError(
-                "unresolved compensation hazard cannot have resolved_at"
-            )
-        return self
 
 
 class ThrottleState(BaseModel):
@@ -738,13 +291,3 @@ class ThrottleState(BaseModel):
     hold_reason: NonEmptyStr | None = None
     tags: dict[StrictStr, StrictStr] = Field(default_factory=dict)
     change_seq: PositiveChangeSeq
-
-    @model_validator(mode="after")
-    def validate_throttle(self) -> ThrottleState:
-        if (self.hold_until is None) != (self.hold_reason is None):
-            raise ValueError("hold_until and hold_reason must be set together")
-        if self.consecutive_failures == 0 and self.failure_class is not None:
-            raise ValueError("failure class requires consecutive failures")
-        _validate_payload_size(self.metadata, label="throttle metadata")
-        _validate_payload_size(self.tags, label="throttle tags")
-        return self

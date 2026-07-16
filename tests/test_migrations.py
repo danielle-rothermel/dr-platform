@@ -419,6 +419,29 @@ def test_change_sequence_advances_for_insert_and_update(
     assert updated > inserted
 
 
+def test_throttle_failure_class_requires_positive_count(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(engine_dsn(pg_engine))
+
+    with (
+        pytest.raises(Exception, match="throttle_state_failure_count"),
+        pg_engine.begin() as connection,
+    ):
+        connection.execute(
+            text(
+                """
+                INSERT INTO platform_throttle_state (
+                    throttle_key, consecutive_failures, failure_class,
+                    metadata, tags, updated_at
+                ) VALUES (
+                    'provider:model', 0, 'transient', '{}', '{}', now()
+                )
+                """
+            )
+        )
+
+
 def test_kernel_rows_reject_hard_delete(pg_engine: Engine) -> None:
     upgrade_platform_schema(engine_dsn(pg_engine))
     with pg_engine.begin() as connection:
@@ -511,6 +534,37 @@ def _insert_terminal_attempt_fixture(connection: Connection) -> None:
             """
         )
     )
+
+
+def test_next_attempt_request_resolution_cannot_precede_creation(
+    pg_engine: Engine,
+) -> None:
+    upgrade_platform_schema(engine_dsn(pg_engine))
+    with pg_engine.begin() as connection:
+        _insert_terminal_attempt_fixture(connection)
+
+    with (
+        pytest.raises(Exception, match="requests_resolved_time"),
+        pg_engine.begin() as connection,
+    ):
+        connection.execute(
+            text(
+                """
+                INSERT INTO platform_next_attempt_requests (
+                    request_id, item_id, request_key, source_attempt, reason,
+                    eligibility_kind, eligibility_record_id,
+                    eligibility_digest, requested_by,
+                    effective_max_attempts, disposition, rejection_detail,
+                    created_at, resolved_at
+                ) VALUES (
+                    'request-time', 'item', 'caller-request-time', 0,
+                    'domain_outcome', 'generation_run', 'run',
+                    'eligibility-digest', 'caller', 3, 'ineligible',
+                    'not eligible', now(), now() - interval '1 second'
+                )
+                """
+            )
+        )
 
 
 def test_terminal_attempt_allows_noop_and_rejects_mutation(

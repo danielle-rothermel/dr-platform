@@ -83,14 +83,6 @@ class ReconciliationCandidate(BaseModel):
     attempt: AttemptRecord
     target_ref: ExecutionTargetRef
 
-    @model_validator(mode="after")
-    def validate_candidate(self) -> ReconciliationCandidate:
-        if self.item.item_id != self.attempt.item_id:
-            raise ValueError("reconciliation Attempt does not belong to Item")
-        if self.item.current_attempt != self.attempt.attempt:
-            raise ValueError("reconciliation Attempt is not current")
-        return self
-
 
 class ReconciliationObservation(BaseModel):
     """Normalized payload-free lifecycle fact for persistence."""

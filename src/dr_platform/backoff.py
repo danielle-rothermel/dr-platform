@@ -10,13 +10,14 @@ from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert
 
 from dr_platform.claims import _acquire_export_writer_lock
-from dr_platform.records import ThrottleState
+from dr_platform.records import ThrottleState, _validate_payload_size
 from dr_platform.status import FailureClass
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from sqlalchemy import Connection
+    from sqlalchemy.engine import RowMapping
 
     from dr_platform.db import PlatformSchema
 
@@ -107,7 +108,7 @@ def load_throttle_backoff_state(
         .mappings()
         .one_or_none()
     )
-    return None if row is None else ThrottleState.model_validate(dict(row))
+    return None if row is None else _decode_throttle_state(row)
 
 
 def throttle_delay_seconds(
@@ -153,6 +154,7 @@ def record_throttle_failure(  # noqa: PLR0913 -- retained failure surface
     now: datetime,
     schema: PlatformSchema,
 ) -> ThrottleState | None:
+    validated_metadata = _validate_throttle_metadata(metadata or {})
     if not should_backoff_failure(failure_class):
         return None
     _acquire_export_writer_lock(connection)
@@ -186,7 +188,7 @@ def record_throttle_failure(  # noqa: PLR0913 -- retained failure surface
             failure_class=failure_class.value,
             last_error_type=error_type,
             last_message=message,
-            metadata=dict(metadata or {}),
+            metadata=validated_metadata,
             updated_at=now,
         )
     )
@@ -273,12 +275,13 @@ def set_throttle_tags(
     now: datetime,
     schema: PlatformSchema,
 ) -> None:
+    validated_tags = _validate_throttle_tags(tags)
     _upsert(
         connection,
         schema=schema,
         throttle_key=throttle_key,
         now=now,
-        values={"tags": dict(tags)},
+        values={"tags": validated_tags},
     )
 
 
@@ -296,9 +299,39 @@ def list_throttle_states(
             schema.throttle_state.c.tags.contains(tag_filter)
         )
     return tuple(
-        ThrottleState.model_validate(dict(row))
+        _decode_throttle_state(row)
         for row in connection.execute(statement).mappings()
     )
+
+
+def _validate_throttle_metadata(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str) for key in value
+    ):
+        raise ValueError(
+            "throttle metadata must be a mapping with string keys"
+        )
+    _validate_payload_size(value, label="throttle metadata")
+    return dict(value)
+
+
+def _validate_throttle_tags(value: object) -> dict[str, str]:
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str)
+        for key, item in value.items()
+    ):
+        raise ValueError("throttle tags must map strings to strings")
+    _validate_payload_size(value, label="throttle tags")
+    return dict(value)
+
+
+def _decode_throttle_state(row: RowMapping) -> ThrottleState:
+    values = dict(row)
+    failure_class = values["failure_class"]
+    values["failure_class"] = (
+        FailureClass(failure_class) if failure_class is not None else None
+    )
+    return ThrottleState.model_construct(**values)
 
 
 def _upsert(
