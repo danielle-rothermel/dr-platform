@@ -162,7 +162,6 @@ OR (
 	PRIMARY KEY (throttle_key),
 	CONSTRAINT xbase_ck_throttle_state_failures CHECK (consecutive_failures >= 0),
 	CONSTRAINT xbase_ck_throttle_state_failure_class CHECK (failure_class IS NULL OR failure_class IN ('permanent', 'transient', 'rate_limited', 'resource_exhaustion', 'unknown')),
-	CONSTRAINT xbase_ck_throttle_state_failure_count CHECK (failure_class IS NULL OR consecutive_failures > 0),
 	CONSTRAINT xbase_ck_throttle_state_hold CHECK ((hold_until IS NULL) = (hold_reason IS NULL))
 )""",
     """CREATE TABLE xbase_items (
@@ -260,6 +259,8 @@ OR (
   AND retry_reason IS NOT NULL
 )),
 	CONSTRAINT xbase_ck_attempts_claim CHECK ((enqueue_state = 'claiming') = (current_claim_id IS NOT NULL)),
+	CONSTRAINT xbase_ck_attempts_workflow CHECK (enqueue_state NOT IN ('enqueued', 'workflow_already_present')
+OR workflow_id IS NOT NULL),
 	CONSTRAINT xbase_ck_attempts_terminal CHECK ((
   execution_state IN (
     'succeeded', 'error', 'recovery_exhausted', 'cancelled', 'missing'
@@ -406,8 +407,7 @@ OR (
   disposition != 'created'
   AND created_attempt IS NULL
 )),
-	CONSTRAINT xbase_ck_requests_created_attempt CHECK (created_attempt IS NULL OR created_attempt = source_attempt + 1),
-	CONSTRAINT xbase_ck_requests_resolved_time CHECK (resolved_at >= created_at)
+	CONSTRAINT xbase_ck_requests_created_attempt CHECK (created_attempt IS NULL OR created_attempt = source_attempt + 1)
 )""",
     """CREATE TABLE xbase_enqueue_compensations (
 	item_id TEXT NOT NULL,
