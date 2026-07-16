@@ -193,9 +193,9 @@
   <div class="hero">
     The first implementation layer has removed the clearest <span class="key">scope violations</span>:
     publication, export, projection, DuckDB, MotherDuck, Unitbench signing, OpenSSL integration,
-    DBOS dependency self-tests, and Whetstone policy. The remaining work is deliberately visible:
-    PostgreSQL integration still spans 182 collected cases, submission still carries manifest
-    ceremony, and many tests remain coupled below the public package interface.
+    DBOS dependency self-tests, and Whetstone policy. PR 2 then replaced manifest preparation and
+    source-mutation policing with one submission-owned read. The remaining work is deliberately visible:
+    PostgreSQL integration still spans 156 collected cases, and many tests remain coupled below the public interface.
   </div>
 
   <div class="note warn" style="margin-top: 18px;">
@@ -206,9 +206,9 @@
 
   <div class="summary-grid" aria-label="Audit summary">
     <div class="metric"><span class="value">0</span><span class="label">DuckDB/MotherDuck/OpenSSL integration paths remaining</span></div>
-    <div class="metric"><span class="value">182</span><span class="label">PostgreSQL cases still to consolidate into a high-leverage set</span></div>
-    <div class="metric"><span class="value">0 / 92</span><span class="label">remaining root exports owned by export and publication</span></div>
-    <div class="metric"><span class="value">13,485</span><span class="label">test lines versus 13,618 source lines after PR 1</span></div>
+    <div class="metric"><span class="value">156</span><span class="label">PostgreSQL cases still to consolidate into a high-leverage set</span></div>
+    <div class="metric"><span class="value">90</span><span class="label">root exports remaining after obsolete manifest types were removed</span></div>
+    <div class="metric"><span class="value">11,456</span><span class="label">test lines versus 13,222 source lines after PR 2</span></div>
   </div>
 
   <nav aria-label="Contents">
@@ -325,8 +325,8 @@
       <span class="severity high">High · consolidate</span>
     </div>
     <p>
-      After PR 1, Pytest collects 338 cases and fixture analysis finds 182 requiring PostgreSQL. No cases require
-      MotherDuck, open DuckDB, or spawn OpenSSL. PostgreSQL is a valid integration boundary, but 182 cases repeat
+      After PR 2, Pytest collects 277 cases and fixture analysis finds 156 requiring PostgreSQL. No cases require
+      MotherDuck, open DuckDB, or spawn OpenSSL. PostgreSQL is a valid integration boundary, but 156 cases repeat
       state transitions, table shapes, and similar race
       variants instead of concentrating on the few guarantees that require a real database.
     </p>
@@ -412,8 +412,9 @@
     </div>
     <p class="remove"><strong>Removal boundary:</strong> choose one public-behavior test per contract and delete the layered copy.
       Do not preserve “contract” as a second taxonomy unless it denotes a genuinely external interface.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending</div><ul class="checklist">
-      <li>Identify the surviving public-behavior test for each duplicated contract.</li>
+    <div class="progress"><div class="progress-title">Implementation status · In progress</div><ul class="checklist">
+      <li class="done">Delete the obsolete layered registration/manifest contract after preserving focused public coverage.</li>
+      <li>Identify the surviving public-behavior test for each other duplicated contract.</li>
       <li>Delete layered contract copies and the obsolete taxonomy.</li>
     </ul></div>
   </article>
@@ -513,12 +514,12 @@
       <a href="src/dr_platform/submission.py">submission.py:274–351, 954–1075</a> computes and revalidates the digest tree;
       <a href="src/dr_platform/jsonl.py">jsonl.py:68–167, 194–250, 335–352</a> adds filesystem drift detection.
     </div>
-    <p class="remove"><strong>Question to resolve:</strong> must the library defend against a caller mutating a source between
-      preparation and submission, or can submission own one snapshot/read? If the latter, most manifest and filesystem
-      ceremony can disappear.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending · Decision resolved</div><ul class="checklist">
-      <li>Make submission own one authoritative source traversal.</li><li>Remove filesystem mutation-defense metadata and rereads.</li>
-      <li>Remove digest layers without a remaining runtime consumer.</li>
+    <p class="remove"><strong>Resolved contract:</strong> submission owns one authoritative read, validates caller input at that
+      boundary, and persists only runtime identity and resumable-registration state. It does not defend against caller mutation
+      between a separate preparation and submission phase because that separate phase no longer exists.</p>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 2</div><ul class="checklist">
+      <li class="done">Make submission own one authoritative source traversal.</li><li class="done">Remove filesystem mutation-defense metadata and rereads.</li>
+      <li class="done">Remove digest layers without a remaining runtime consumer.</li>
     </ul></div>
   </article>
 
@@ -539,7 +540,8 @@
     </div>
     <p class="remove"><strong>Simplification direction:</strong> derive references, declarations, and digests from one target
       definition. Remove version fields without a demonstrated migration/compatibility consumer.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending future decision</div><ul class="checklist">
+    <div class="progress"><div class="progress-title">Implementation status · In progress · Future decision remains</div><ul class="checklist">
+      <li class="done">Remove manifest-level copies of target identity and aggregate recipe digests.</li>
       <li>Choose one authoritative target definition.</li><li>Remove repeated identity and unused compatibility fields.</li>
     </ul></div>
   </article>
@@ -560,7 +562,8 @@
     </div>
     <p class="remove"><strong>Question to resolve:</strong> does core submission need resumable multi-page registration with
       application hooks? If not, use one transaction or a much smaller idempotency contract and remove abandonment/lease paths.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending future decision</div><ul class="checklist">
+    <div class="progress"><div class="progress-title">Implementation status · In progress · Future decision remains</div><ul class="checklist">
+      <li class="done">Remove nested-source mutation detection and manifest exact-replay policing.</li>
       <li>Decide the required resumability and hook contract.</li><li>Remove protocol state outside that contract.</li>
     </ul></div>
   </article>
@@ -770,7 +773,7 @@
         <tr><td class="path">contracts/test_platform_v6_inspection_telemetry.py</td><td class="num">3</td><td class="num">3</td><td>PostgreSQL integration</td><td class="status-rewrite">Keep one public inspection path</td></tr>
         <tr><td class="path">contracts/test_platform_v6_publication_recovery.py</td><td class="num">7</td><td class="num">0</td><td>Publication source inspection</td><td class="status-keep">Removed in PR 1</td></tr>
         <tr><td class="path">contracts/test_platform_v6_reconciliation_retries.py</td><td class="num">29</td><td class="num">26</td><td>Mixed; DB integration + duplicated unit cases</td><td class="status-rewrite">Keep only distinct persistence/race evidence</td></tr>
-        <tr><td class="path">contracts/test_platform_v6_registration_targets.py</td><td class="num">54</td><td class="num">26</td><td>Mixed; DB integration + target/manifest units</td><td class="status-rewrite">Keep one transaction/idempotency path</td></tr>
+        <tr><td class="path">contracts/test_platform_v6_registration_targets.py</td><td class="num">54</td><td class="num">26</td><td>Mixed; DB integration + target/manifest units</td><td class="status-keep">Removed in PR 2; focused coverage retained</td></tr>
         <tr><td class="path">contracts/test_platform_v6_telemetry_hygiene.py</td><td class="num">7</td><td class="num">0</td><td>Unit; includes Whetstone policy</td><td class="status-rewrite">Remove downstream cases</td></tr>
         <tr><td class="path">contracts/test_platform_v6_vocabulary.py</td><td class="num">15</td><td class="num">0</td><td>API/model shape and absence assertions</td><td class="status-rewrite">Reduce to public contract</td></tr>
         <tr><td class="path">contracts/test_preflight_script.py</td><td class="num">15</td><td class="num">0</td><td>Vendor preflight implementation</td><td class="status-keep">Removed in PR 1</td></tr>
@@ -781,7 +784,7 @@
         <tr><td class="path">test_dbos_config.py</td><td class="num">13</td><td class="num">0</td><td>Unit; partly private DBOS behavior</td><td class="status-rewrite">Keep only wrapper behavior</td></tr>
         <tr><td class="path">test_enqueue_runtime.py</td><td class="num">28</td><td class="num">0</td><td>Unit with hand-written DBOS fakes</td><td class="status-keep">Core candidate after pruning</td></tr>
         <tr><td class="path">test_export.py</td><td class="num">17</td><td class="num">14</td><td>PostgreSQL + real DuckDB + projections</td><td class="status-keep">Removed in PR 1</td></tr>
-        <tr><td class="path">test_jsonl.py</td><td class="num">14</td><td class="num">0</td><td>Filesystem adapter units</td><td class="status-rewrite">Keep only if JSONL remains core</td></tr>
+        <tr><td class="path">test_jsonl.py</td><td class="num">6</td><td class="num">0</td><td>Single-read filesystem adapter units</td><td class="status-keep">Keep focused boundary coverage</td></tr>
         <tr><td class="path">test_migrations.py</td><td class="num">46</td><td class="num">41</td><td>PostgreSQL schema/trigger integration</td><td class="status-rewrite">Reduce to migration + critical constraints</td></tr>
         <tr><td class="path">test_publication.py</td><td class="num">30</td><td class="num">28</td><td>PostgreSQL/MotherDuck + real DuckDB/OpenSSL</td><td class="status-keep">Removed in PR 1</td></tr>
         <tr><td class="path">test_reconciliation.py</td><td class="num">20</td><td class="num">19</td><td>PostgreSQL integration + one pure lock-order test</td><td class="status-rewrite">Keep one core persistence/race path</td></tr>
@@ -800,7 +803,7 @@
     <li><strong>Repair package and dependency surfaces in the same change:</strong> remove 40 root exports, DuckDB,
       publication telemetry attributes, Whetstone fields, MotherDuck URL heuristics, and regenerate the lockfile.</li>
     <li><strong>Make the test boundary explicit:</strong> remove all DuckDB, MotherDuck, and OpenSSL integration cases. Preserve
-      PostgreSQL as the sole database/service integration dependency, then consolidate its 233 cases into a small suite where each test proves a
+      PostgreSQL as the sole database/service integration dependency, then consolidate the remaining cases into a small suite where each test proves a
       distinct migration, transaction, locking, constraint, persistence, inspection, or credential-handling guarantee.</li>
     <li><strong>Choose the remaining product:</strong> either retain a focused batch/sweep kernel or generalize scheduling,
       manifests, grouping, JSONL, and target definitions. Do not attempt both through optional fields and compatibility layers.</li>
@@ -818,7 +821,7 @@
   </div>
 
   <footer>
-    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 1 of the Graphite stack and was
+    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 2 of the Graphite stack and was
     refreshed with complete source search, AST-based API inventory, pytest fixture collection, dependency/configuration
     inspection, and focused/full-suite verification. Pending checklist items describe work not yet completed by this branch.
   </footer>

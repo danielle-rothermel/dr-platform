@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from pydantic import BaseModel, ConfigDict
@@ -15,7 +15,6 @@ from sqlalchemy import Engine, select, text, update
 from dr_platform import claims as claims_module
 from dr_platform import reconciliation as reconciliation_module
 from dr_platform import reconciliation_runtime as runtime_module
-from dr_platform import submission as submission_module
 from dr_platform.claims import ClaimPageOptions, claim_pending_attempts
 from dr_platform.db import PlatformSchema, upgrade_platform_schema
 from dr_platform.dbos_config import DbosWorkflowStatus
@@ -23,7 +22,6 @@ from dr_platform.enqueue_runtime import (
     EnqueuePageResult,
     QueueConfigurationError,
 )
-from dr_platform.manifests import ExecutionTargetRef
 from dr_platform.reconciliation import (
     NextAttemptRequest,
     ReconciliationConflictError,
@@ -50,19 +48,18 @@ from dr_platform.status import (
     FailureClass,
     NextAttemptDisposition,
     NextAttemptReason,
-    OperationStatus,
     ServiceClass,
 )
 from dr_platform.submission import (
     SubmitOptions,
-    SubmitResult,
-    prepare_manifest,
     submit,
 )
 from dr_platform.targets import ExecutionTarget, TargetRegistry
 from tests.conftest import engine_dsn
 from tests.test_claims import _Item, _register, _Source, _target
-from tests.test_submission_pipeline import _manifest
+
+if TYPE_CHECKING:
+    from dr_platform.manifests import ExecutionTargetRef
 
 
 class QueueConfiguration(BaseModel):
@@ -108,18 +105,13 @@ def _register_with_policy(
         )
     )
     options = SubmitOptions(page_size=1, retry_policy=policy)
-    manifest = prepare_manifest(
-        operation_key="policy-operation",
-        workflow_role=target.workflow_role,
-        group_key="policy-group",
-        target=target,
-        source=source,
-        options=options,
-    )
     with pytest.raises(QueueConfigurationError):
         submit(
-            manifest,
-            source,
+            operation_key="policy-operation",
+            workflow_role=target.workflow_role,
+            group_key="policy-group",
+            target=target,
+            source=source,
             engine=engine,
             resolver=registry,
             options=options,
@@ -1578,66 +1570,3 @@ def test_public_reconcile_uses_one_shared_budget_and_enqueues_new_work(
     ]
     assert result.enqueue_reset_count == 1
     assert result.replacement_enqueue_count == 1
-
-
-def test_exact_resubmit_reconciles_before_claim_repair_and_pending_enqueue(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target_ref = ExecutionTargetRef(
-        target_key="generation",
-        target_version=1,
-        target_contract_digest="target-digest",
-    )
-    manifest = _manifest(target_ref)
-    target = SimpleNamespace(ref=target_ref, workflow_role="generation")
-    events: list[str] = []
-    expected = SubmitResult(
-        operation_key="operation",
-        status=OperationStatus.RUNNING,
-        requested_count=1,
-        registration_cursor=1,
-        inserted_count=1,
-        already_present_count=0,
-        enqueued_count=1,
-        workflow_already_present_count=0,
-        enqueue_failed_count=0,
-        total_failure_count=0,
-    )
-
-    class Resolver:
-        def resolve(self, ref: object) -> object:
-            assert ref == target_ref
-            return target
-
-    def fake_reconcile(*args: object, **kwargs: object) -> Any:
-        del args, kwargs
-        events.extend(["reconcile", "claim-repair", "pending-enqueue"])
-        return SimpleNamespace()
-
-    monkeypatch.setattr(
-        submission_module,
-        "_validate_source",
-        lambda **kw: None,
-    )
-    monkeypatch.setattr(
-        submission_module, "_create_or_claim_operation", lambda **kw: 1
-    )
-    monkeypatch.setattr(
-        submission_module,
-        "_load_submit_result",
-        lambda **kw: expected,
-    )
-    monkeypatch.setattr(runtime_module, "reconcile", fake_reconcile)
-
-    result = submit(
-        manifest,
-        cast("Any", object()),
-        engine=cast("Engine", object()),
-        resolver=cast("Any", Resolver()),
-        options=SubmitOptions(page_size=1),
-        queue_lookup=FakeQueueLookup(),
-        reconciliation_reader=cast("Any", object()),
-    )
-
-    assert result is expected
-    assert events == ["reconcile", "claim-repair", "pending-enqueue"]

@@ -21,7 +21,6 @@ from pydantic import (
     model_validator,
 )
 
-from dr_platform.manifests import MANIFEST_FORMAT_VERSION
 from dr_platform.status import (
     CONFIRMED_ENQUEUE_STATES,
     RESOLVED_COMPENSATION_DISPOSITIONS,
@@ -111,11 +110,8 @@ class OperationRecord(BaseModel):
     workflow_role: NonEmptyStr
     status: OperationStatus
     requested_count: NonNegativeInt
-    manifest_version: PositiveInt
-    manifest_digest: NonEmptyStr
-    manifest_page_size: PositiveInt
-    manifest_page_count: NonNegativeInt
-    operation_execution_recipe_digest: NonEmptyStr
+    registration_page_size: PositiveInt
+    registration_page_count: NonNegativeInt
     target_key: NonEmptyStr
     target_version: PositiveInt
     target_contract_digest: NonEmptyStr
@@ -148,7 +144,7 @@ class OperationRecord(BaseModel):
 
     @model_validator(mode="after")
     def validate_operation(self) -> OperationRecord:
-        self._validate_manifest_and_counts()
+        self._validate_counts()
         self._validate_registration()
         self._validate_lifecycle()
         _validate_payload_size(self.spec, label="operation spec")
@@ -163,11 +159,7 @@ class OperationRecord(BaseModel):
             _validate_time_order(start=self.created_at, end=end, label=label)
         return self
 
-    def _validate_manifest_and_counts(self) -> None:
-        if self.manifest_version != MANIFEST_FORMAT_VERSION:
-            raise ValueError(
-                f"manifest_version must be {MANIFEST_FORMAT_VERSION}"
-            )
+    def _validate_counts(self) -> None:
         count_values = (
             self.inserted_count,
             self.already_present_count,
@@ -203,15 +195,17 @@ class OperationRecord(BaseModel):
         )
         if execution_total > self.requested_count:
             raise ValueError("execution counts cannot exceed requested_count")
-        if self.registration_cursor > self.manifest_page_count:
-            raise ValueError("registration_cursor exceeds manifest_page_count")
+        if self.registration_cursor > self.registration_page_count:
+            raise ValueError(
+                "registration_cursor exceeds registration_page_count"
+            )
         expected_page_count = (
-            self.requested_count + self.manifest_page_size - 1
-        ) // self.manifest_page_size
-        if self.manifest_page_count != expected_page_count:
-            raise ValueError("manifest page count does not cover item count")
+            self.requested_count + self.registration_page_size - 1
+        ) // self.registration_page_size
+        if self.registration_page_count != expected_page_count:
+            raise ValueError("registration pages do not cover item count")
         if self.registration_completed_at is not None and (
-            self.registration_cursor != self.manifest_page_count
+            self.registration_cursor != self.registration_page_count
         ):
             raise ValueError(
                 "registration completion requires the final cursor"

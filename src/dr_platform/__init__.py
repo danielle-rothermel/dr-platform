@@ -64,9 +64,7 @@ from dr_platform.jsonl import submit_jsonl
 from dr_platform.manifests import (
     ExecutionRecipeEnvelope,
     ExecutionTargetRef,
-    ManifestPage,
-    ManifestSource,
-    OperationManifest,
+    SubmissionSource,
 )
 from dr_platform.reconciliation import (
     NextAttemptRequest,
@@ -143,8 +141,6 @@ __all__ = [
     "ItemInsertStatus",
     "ItemInspection",
     "ItemRecord",
-    "ManifestPage",
-    "ManifestSource",
     "NextAttemptDisposition",
     "NextAttemptReason",
     "NextAttemptRequest",
@@ -153,7 +149,6 @@ __all__ = [
     "OperationCutMismatch",
     "OperationCutMismatchDisposition",
     "OperationInspection",
-    "OperationManifest",
     "OperationRecord",
     "OperationStatus",
     "OperationWaitOptions",
@@ -168,6 +163,7 @@ __all__ = [
     "RetryDisposition",
     "RetryPolicy",
     "ServiceClass",
+    "SubmissionSource",
     "SubmitOptions",
     "SubmitResult",
     "SubmittableItem",

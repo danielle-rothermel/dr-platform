@@ -62,7 +62,6 @@ from dr_platform.status import (
 from dr_platform.submission import (
     RegistrationConflictError,
     _validate_workflow_reference_guards,
-    prepare_manifest,
     submit,
 )
 from dr_platform.targets import TargetRegistry
@@ -122,19 +121,15 @@ def _register_operation(
             for item_key in item_keys
         )
     )
-    manifest = prepare_manifest(
-        operation_key=operation_key,
-        workflow_role=target.workflow_role,
-        group_key="cancel-group",
-        target=target,
-        source=source,
-    )
     registry = TargetRegistry()
     registry.register(target)
     with patch("dr_platform.submission._enqueue_registered_page"):
         submit(
-            manifest,
-            source,
+            operation_key=operation_key,
+            workflow_role=target.workflow_role,
+            group_key="cancel-group",
+            target=target,
+            source=source,
             engine=engine,
             resolver=registry,
             schema=schema,

@@ -1,4 +1,4 @@
-"""JSONL Manifest preflight and adapter contract tests."""
+"""Single-read JSONL source and submission adapter tests."""
 
 from __future__ import annotations
 
@@ -9,29 +9,22 @@ import pytest
 from dr_serialize import Jsonable, canonical_json
 from sqlalchemy import Engine
 
-import dr_platform.jsonl as jsonl_module
-import dr_platform.submission as submission_module
 from dr_platform.jsonl import (
     JsonlFieldNames,
-    index_jsonl_manifest_source,
-    prepare_jsonl_manifest,
+    read_jsonl_source,
     submit_jsonl,
 )
 from dr_platform.manifests import ExecutionRecipeEnvelope
 from dr_platform.records import FailureSnapshot
 from dr_platform.status import FailureClass, OperationStatus, ServiceClass
 from dr_platform.submission import (
-    RegistrationConflictError,
     SubmitOptions,
     SubmitResult,
-    prepare_manifest,
-    submit,
 )
 from dr_platform.targets import (
     ExecutionIdentity,
     ExecutionTarget,
     TargetContractDeclaration,
-    TargetRegistry,
     TargetResolver,
 )
 
@@ -91,48 +84,18 @@ def _rows() -> list[Jsonable]:
     ]
 
 
-def test_preflight_preserves_original_nonempty_record_indexes(
+def test_read_preserves_nonempty_record_order(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "items.jsonl"
     _write_rows(path, _rows(), prefix="\n  \n")
 
-    source = index_jsonl_manifest_source(path, group_key="experiment")
+    source = read_jsonl_source(path, group_key="experiment")
 
-    assert [ref.item_index for ref in source.refs] == [0, 1]
-    assert source.read_items(start_index=0, end_index=2)[1].item_key == (
-        "item-b"
-    )
-
-
-def test_path_and_byte_offsets_do_not_enter_manifest_identity(
-    tmp_path: Path,
-) -> None:
-    first = tmp_path / "first.jsonl"
-    second = tmp_path / "nested" / "second.jsonl"
-    second.parent.mkdir()
-    _write_rows(first, _rows())
-    _write_rows(second, _rows(), prefix="\n\n")
-    target = _target()
-
-    first_manifest = prepare_jsonl_manifest(
-        operation_key="operation",
-        workflow_role="generation",
-        group_key="experiment",
-        target=target,
-        path=first,
-        options=SubmitOptions(page_size=1),
-    )
-    second_manifest = prepare_jsonl_manifest(
-        operation_key="operation",
-        workflow_role="generation",
-        group_key="experiment",
-        target=target,
-        path=second,
-        options=SubmitOptions(page_size=1),
-    )
-
-    assert first_manifest == second_manifest
+    assert tuple(
+        item.item_key
+        for item in source.read_items(start_index=0, end_index=2)
+    ) == ("item-a", "item-b")
 
 
 def test_custom_fields_map_nested_spec_and_service_class(
@@ -157,7 +120,7 @@ def test_custom_fields_map_nested_spec_and_service_class(
         spec="payload",
     )
 
-    item = index_jsonl_manifest_source(
+    item = read_jsonl_source(
         path,
         group_key="experiment",
         fields=fields,
@@ -176,7 +139,7 @@ def test_custom_fields_map_nested_spec_and_service_class(
         {"item_key": "item", "group_key": 3},
     ],
 )
-def test_preflight_rejects_malformed_item_shape(
+def test_read_rejects_malformed_item_shape(
     tmp_path: Path,
     row: Jsonable,
 ) -> None:
@@ -184,18 +147,18 @@ def test_preflight_rejects_malformed_item_shape(
     _write_rows(path, [row])
 
     with pytest.raises(ValueError, match="JSONL"):
-        index_jsonl_manifest_source(path, group_key="experiment")
+        read_jsonl_source(path, group_key="experiment")
 
 
-def test_preflight_rejects_malformed_json(tmp_path: Path) -> None:
+def test_read_rejects_malformed_json(tmp_path: Path) -> None:
     path = tmp_path / "items.jsonl"
     path.write_text('{"item_key":', encoding="utf-8")
 
     with pytest.raises(ValueError, match="invalid JSONL Item JSON"):
-        index_jsonl_manifest_source(path, group_key="experiment")
+        read_jsonl_source(path, group_key="experiment")
 
 
-def test_preflight_rejects_multiple_operation_groups(tmp_path: Path) -> None:
+def test_read_rejects_multiple_operation_groups(tmp_path: Path) -> None:
     path = tmp_path / "items.jsonl"
     rows: list[Jsonable] = [
         {"item_key": "item-a", "group_key": "experiment"},
@@ -204,54 +167,16 @@ def test_preflight_rejects_multiple_operation_groups(tmp_path: Path) -> None:
     _write_rows(path, rows)
 
     with pytest.raises(ValueError, match="must match Operation group_key"):
-        index_jsonl_manifest_source(path, group_key="experiment")
+        read_jsonl_source(path, group_key="experiment")
 
 
-def test_reread_rejects_changed_descriptor(tmp_path: Path) -> None:
-    path = tmp_path / "items.jsonl"
-    _write_rows(path, _rows())
-    source = index_jsonl_manifest_source(path, group_key="experiment")
-    changed: list[Jsonable] = [
-        {"item_key": "changed", "group_key": "experiment", "value": 1},
-        {"item_key": "item-b", "group_key": "experiment", "value": 2},
-    ]
-    _write_rows(path, changed)
-
-    with pytest.raises(RegistrationConflictError, match="source changed"):
-        source.read_items(start_index=0, end_index=1)
-
-
-def test_reread_rejects_record_appended_after_preflight(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "items.jsonl"
-    _write_rows(path, _rows())
-    source = index_jsonl_manifest_source(path, group_key="experiment")
-    with path.open("a", encoding="utf-8") as file:
-        file.write(
-            canonical_json({"item_key": "item-c", "group_key": "experiment"})
-            + "\n"
-        )
-
-    with pytest.raises(RegistrationConflictError, match="source changed"):
-        source.read_items(start_index=0, end_index=1)
-
-
-def test_submit_jsonl_delegates_to_submit_with_fresh_source(
+def test_submit_jsonl_reads_once_and_delegates_to_submit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "items.jsonl"
     _write_rows(path, _rows())
     target = _target()
-    manifest = prepare_jsonl_manifest(
-        operation_key="operation",
-        workflow_role="generation",
-        group_key="experiment",
-        target=target,
-        path=path,
-        options=SubmitOptions(page_size=1),
-    )
     captured: dict[str, Any] = {}
     expected = SubmitResult(
         operation_key="operation",
@@ -266,124 +191,25 @@ def test_submit_jsonl_delegates_to_submit_with_fresh_source(
         total_failure_count=0,
     )
 
-    def fake_submit(manifest_arg: Any, source_arg: Any, **kwargs: Any) -> Any:
-        captured.update(
-            manifest=manifest_arg,
-            source=source_arg,
-            kwargs=kwargs,
-        )
+    def fake_submit(**kwargs: Any) -> Any:
+        captured.update(kwargs)
         return expected
 
     monkeypatch.setattr("dr_platform.jsonl.submit", fake_submit)
 
     result = submit_jsonl(
-        manifest,
-        path,
+        operation_key="operation",
+        workflow_role="generation",
+        group_key="experiment",
+        target=target,
+        path=path,
         engine=cast("Engine", object()),
         resolver=cast("TargetResolver", object()),
+        options=SubmitOptions(page_size=1),
     )
 
     assert result is expected
-    assert captured["manifest"] is manifest
     assert captured["source"].item_count == 2
-    assert captured["kwargs"]["options"].page_size == 1
-
-
-def test_complete_source_hash_count_is_independent_of_page_count(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = tmp_path / "items.jsonl"
-    rows: list[Jsonable] = [
-        {
-            "item_key": f"item-{index}",
-            "group_key": "experiment",
-            "value": index,
-        }
-        for index in range(5)
-    ]
-    _write_rows(path, rows)
-    target = _target()
-    source = index_jsonl_manifest_source(path, group_key="experiment")
-    manifest = prepare_manifest(
-        operation_key="operation",
-        workflow_role="generation",
-        group_key="experiment",
-        target=target,
-        source=source,
-        options=SubmitOptions(page_size=1),
-    )
-
-    original_source_cut = jsonl_module._source_cut
-    source_cut_calls = 0
-
-    def counted_source_cut(path_arg: Path) -> tuple[str, int]:
-        nonlocal source_cut_calls
-        source_cut_calls += 1
-        return original_source_cut(path_arg)
-
-    monkeypatch.setattr(jsonl_module, "_source_cut", counted_source_cut)
-
-    submission_module._validate_source(
-        manifest=manifest,
-        source=source,
-        target=target,
-    )
-
-    assert len(manifest.pages) == 5
-    assert source_cut_calls == 2
-
-
-def test_empty_source_append_fails_before_platform_row(tmp_path: Path) -> None:
-    path = tmp_path / "empty.jsonl"
-    path.write_text("", encoding="utf-8")
-    target = _target()
-    source = index_jsonl_manifest_source(path, group_key="experiment")
-    manifest = prepare_manifest(
-        operation_key="empty-operation",
-        workflow_role="generation",
-        group_key="experiment",
-        target=target,
-        source=source,
-        options=SubmitOptions(page_size=1),
-    )
-    registry = TargetRegistry()
-    registry.register(target)
-    with path.open("a", encoding="utf-8") as file:
-        file.write(
-            canonical_json(
-                {"item_key": "late-item", "group_key": "experiment"}
-            )
-            + "\n"
-        )
-
-    with pytest.raises(RegistrationConflictError, match="source changed"):
-        submit(
-            manifest,
-            source,
-            engine=cast("Engine", object()),
-            resolver=registry,
-            options=SubmitOptions(page_size=1),
-        )
-
-
-def test_submit_jsonl_rejects_page_size_drift(tmp_path: Path) -> None:
-    path = tmp_path / "items.jsonl"
-    _write_rows(path, _rows())
-    manifest = prepare_jsonl_manifest(
-        operation_key="operation",
-        workflow_role="generation",
-        group_key="experiment",
-        target=_target(),
-        path=path,
-        options=SubmitOptions(page_size=1),
-    )
-
-    with pytest.raises(RegistrationConflictError, match="page_size"):
-        submit_jsonl(
-            manifest,
-            path,
-            engine=cast("Engine", object()),
-            resolver=cast("TargetResolver", object()),
-            options=SubmitOptions(page_size=2),
-        )
+    assert captured["operation_key"] == "operation"
+    assert captured["target"] is target
+    assert captured["options"].page_size == 1

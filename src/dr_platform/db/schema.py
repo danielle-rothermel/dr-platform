@@ -75,17 +75,18 @@ AND active_count + succeeded_count + terminal_failed_count + cancelled_count
     <= requested_count
 """.strip()
 
-MANIFEST_BOUNDS_CHECK = """
-manifest_page_size > 0
-AND manifest_page_count >= 0
+REGISTRATION_BOUNDS_CHECK = """
+registration_page_size > 0
+AND registration_page_count >= 0
 AND registration_cursor >= 0
-AND registration_cursor <= manifest_page_count
+AND registration_cursor <= registration_page_count
 AND (
-  (requested_count = 0 AND manifest_page_count = 0)
+  (requested_count = 0 AND registration_page_count = 0)
   OR (
     requested_count > 0
-    AND manifest_page_count =
-      (requested_count + manifest_page_size - 1) / manifest_page_size
+    AND registration_page_count =
+      (requested_count + registration_page_size - 1)
+      / registration_page_size
   )
 )
 """.strip()
@@ -104,7 +105,7 @@ OR (
 REGISTRATION_COMPLETION_CHECK = """
 registration_completed_at IS NULL
 OR (
-  registration_cursor = manifest_page_count
+  registration_cursor = registration_page_count
   AND inserted_count + already_present_count = requested_count
   AND registration_lease_id IS NULL
   AND registration_lease_expires_at IS NULL
@@ -290,11 +291,8 @@ class PlatformSchema:
             Column("workflow_role", Text, nullable=False),
             Column("status", Text, nullable=False),
             Column("requested_count", Integer, nullable=False),
-            Column("manifest_version", Integer, nullable=False),
-            Column("manifest_digest", Text, nullable=False),
-            Column("manifest_page_size", Integer, nullable=False),
-            Column("manifest_page_count", Integer, nullable=False),
-            Column("operation_execution_recipe_digest", Text, nullable=False),
+            Column("registration_page_size", Integer, nullable=False),
+            Column("registration_page_count", Integer, nullable=False),
             Column("target_key", Text, nullable=False),
             Column("target_version", Integer, nullable=False),
             Column("target_contract_digest", Text, nullable=False),
@@ -333,8 +331,8 @@ class PlatformSchema:
                 name=name("ck_operations_counts"),
             ),
             CheckConstraint(
-                MANIFEST_BOUNDS_CHECK,
-                name=name("ck_operations_manifest"),
+                REGISTRATION_BOUNDS_CHECK,
+                name=name("ck_operations_registration_bounds"),
             ),
             CheckConstraint(
                 REGISTRATION_LEASE_CHECK,
@@ -347,10 +345,6 @@ class PlatformSchema:
             CheckConstraint(
                 REGISTRATION_ABANDONMENT_CHECK,
                 name=name("ck_operations_registration_abandoned"),
-            ),
-            CheckConstraint(
-                "manifest_version = 3",
-                name=name("ck_operations_manifest_version"),
             ),
             CheckConstraint(
                 "platform_cut_version > 0",

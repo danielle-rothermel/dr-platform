@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 from alembic import command
@@ -78,8 +77,8 @@ def test_fresh_upgrade_creates_complete_kernel_schema(
 
     operation_columns = _table_columns(pg_engine, "platform_operations")
     assert {
-        "manifest_digest",
-        "operation_execution_recipe_digest",
+        "registration_page_size",
+        "registration_page_count",
         "target_contract_digest",
         "platform_cut_version",
         "registration_cursor",
@@ -89,6 +88,23 @@ def test_fresh_upgrade_creates_complete_kernel_schema(
         "terminal_failed_count",
         "change_seq",
     } <= operation_columns
+    assert {
+        "manifest_version",
+        "manifest_digest",
+        "manifest_page_size",
+        "manifest_page_count",
+        "operation_execution_recipe_digest",
+    }.isdisjoint(operation_columns)
+    with pg_engine.connect() as connection:
+        assert (
+            connection.execute(
+                text(
+                    "SELECT version_num "
+                    "FROM platform_platform_alembic_version"
+                )
+            ).scalar_one()
+            == PLATFORM_HEAD_REVISION
+        )
 
     item_columns = _table_columns(pg_engine, "platform_items")
     assert {
@@ -162,19 +178,114 @@ def test_prefix_is_the_only_physical_naming_option(pg_engine: Engine) -> None:
     }
 
 
-def test_final_baseline_is_the_only_head_revision() -> None:
-    versions_dir = Path(migrate.__file__).parent / "alembic" / "versions"
-    revisions = sorted(path.name for path in versions_dir.glob("*.py"))
+def test_single_read_registration_revision_is_the_only_head() -> None:
     script = ScriptDirectory.from_config(
         migrate._alembic_config("postgresql://unused", "platform")
     )
 
-    assert PLATFORM_HEAD_REVISION == PLATFORM_BASELINE_REVISION
-    assert revisions == ["0001_platform_baseline.py"]
-    assert script.get_heads() == [PLATFORM_BASELINE_REVISION]
-    revision = script.get_revision(PLATFORM_BASELINE_REVISION)
-    assert revision is not None
-    assert revision.down_revision is None
+    assert PLATFORM_HEAD_REVISION != PLATFORM_BASELINE_REVISION
+    assert script.get_heads() == [PLATFORM_HEAD_REVISION]
+    head = script.get_revision(PLATFORM_HEAD_REVISION)
+    baseline = script.get_revision(PLATFORM_BASELINE_REVISION)
+    assert head is not None
+    assert head.down_revision == PLATFORM_BASELINE_REVISION
+    assert baseline is not None
+    assert baseline.down_revision is None
+
+
+def test_upgrade_from_baseline_preserves_registration_progress(
+    pg_engine: Engine,
+) -> None:
+    dsn = engine_dsn(pg_engine)
+    upgrade_platform_schema(dsn, revision=PLATFORM_BASELINE_REVISION)
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO platform_operations (
+                    operation_key, group_key, workflow_role, status,
+                    requested_count, manifest_version, manifest_digest,
+                    manifest_page_size, manifest_page_count,
+                    operation_execution_recipe_digest,
+                    target_key, target_version, target_contract_digest,
+                    platform_cut_version, registration_cursor, retry_policy,
+                    inserted_count, already_present_count, enqueued_count,
+                    workflow_already_present_count, enqueue_failed_count,
+                    active_count, succeeded_count, terminal_failed_count,
+                    cancelled_count, spec, metadata, created_at, updated_at
+                ) VALUES (
+                    'existing', 'group', 'role', 'registering',
+                    3, 3, 'manifest-digest', 2, 2, 'recipe-digest',
+                    'target', 1, 'target-contract',
+                    1, 1, '{"max_attempts": 3, "max_enqueue_tries": 3}',
+                    2, 0, 0, 0, 0, 0, 0, 0, 0,
+                    '{}', '{}', now(), now()
+                )
+                """
+            )
+        )
+
+    upgrade_platform_schema(dsn, revision=PLATFORM_HEAD_REVISION)
+
+    operation_columns = _table_columns(pg_engine, "platform_operations")
+    assert {"registration_page_size", "registration_page_count"} <= (
+        operation_columns
+    )
+    assert {
+        "manifest_version",
+        "manifest_digest",
+        "manifest_page_size",
+        "manifest_page_count",
+        "operation_execution_recipe_digest",
+    }.isdisjoint(operation_columns)
+    check_names = {
+        constraint["name"]
+        for constraint in inspect(pg_engine).get_check_constraints(
+            "platform_operations"
+        )
+    }
+    assert {
+        "platform_ck_operations_registration_bounds",
+        "platform_ck_operations_registration_completed",
+    } <= check_names
+    assert {
+        "platform_ck_operations_manifest",
+        "platform_ck_operations_manifest_version",
+    }.isdisjoint(check_names)
+    with pg_engine.connect() as connection:
+        assert connection.execute(
+            text(
+                """
+                SELECT registration_page_size, registration_page_count,
+                       registration_cursor, inserted_count
+                FROM platform_operations
+                WHERE operation_key = 'existing'
+                """
+            )
+        ).one() == (2, 2, 1, 2)
+        assert (
+            connection.execute(
+                text(
+                    "SELECT version_num "
+                    "FROM platform_platform_alembic_version"
+                )
+            ).scalar_one()
+            == PLATFORM_HEAD_REVISION
+        )
+
+    with (
+        pytest.raises(
+            Exception, match="Operation identity fields are immutable"
+        ),
+        pg_engine.begin() as connection,
+    ):
+        connection.execute(
+            text(
+                "UPDATE platform_operations "
+                "SET registration_page_size = 3 "
+                "WHERE operation_key = 'existing'"
+            )
+        )
 
 
 def test_baseline_upgrade_and_downgrade_are_exact(pg_engine: Engine) -> None:
@@ -345,9 +456,8 @@ def _insert_terminal_attempt_fixture(connection: Connection) -> None:
             """
             INSERT INTO platform_operations (
                 operation_key, group_key, workflow_role, status,
-                requested_count, manifest_version, manifest_digest,
-                manifest_page_size, manifest_page_count,
-                operation_execution_recipe_digest,
+                requested_count, registration_page_size,
+                registration_page_count,
                 target_key, target_version, target_contract_digest,
                 platform_cut_version, registration_cursor, retry_policy,
                 inserted_count, already_present_count, enqueued_count,
@@ -357,7 +467,7 @@ def _insert_terminal_attempt_fixture(connection: Connection) -> None:
                 registration_completed_at, updated_at, completed_at
             ) VALUES (
                 'op', 'group', 'role', 'succeeded',
-                1, 3, 'manifest', 500, 1, 'operation-recipe',
+                1, 500, 1,
                 'target', 1, 'target-contract',
                 1, 1, '{"max_attempts": 3, "max_enqueue_tries": 3}',
                 1, 0, 1, 0, 0, 0, 1, 0, 0, '{}', '{}', now(),
@@ -887,7 +997,7 @@ def test_lifecycle_ledger_guards_reject_immutable_mutation(
     ("statement", "message"),
     [
         (
-            "UPDATE platform_operations SET manifest_digest = 'different'",
+            "UPDATE platform_operations SET target_version = 2",
             "Operation identity fields are immutable",
         ),
         (
