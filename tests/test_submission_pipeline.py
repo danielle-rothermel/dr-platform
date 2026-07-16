@@ -95,7 +95,6 @@ def test_submit_materializes_pages_once_and_reconciles_completed_registration(
         requested_count=5,
         registration_cursor=3,
         inserted_count=5,
-        already_present_count=0,
         enqueued_count=1,
         workflow_already_present_count=0,
         enqueue_failed_count=0,

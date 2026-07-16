@@ -31,7 +31,6 @@ from dr_platform.status import (
     EnqueueCompensationDisposition,
     EnqueueCompensationReason,
     FailureClass,
-    ItemInsertStatus,
     NextAttemptDisposition,
     NextAttemptReason,
     OperationStatus,
@@ -113,7 +112,6 @@ class OperationRecord(BaseModel):
     registration_abandonment_reason: NonEmptyStr | None = None
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     inserted_count: NonNegativeInt = 0
-    already_present_count: NonNegativeInt = 0
     enqueued_count: NonNegativeInt = 0
     workflow_already_present_count: NonNegativeInt = 0
     enqueue_failed_count: NonNegativeInt = 0
@@ -143,7 +141,6 @@ class ItemRecord(BaseModel):
     service_class: ServiceClass = ServiceClass.STANDARD
     service_priority: PositiveInt = ServiceClass.STANDARD.priority
     spec: dict[StrictStr, Any] = Field(default_factory=dict)
-    insert_status: ItemInsertStatus
     current_attempt: NonNegativeInt = 0
     created_at: datetime
     updated_at: datetime

@@ -39,7 +39,6 @@ from dr_platform.status import (
     AttemptEnqueueState,
     EnqueueClaimDisposition,
     FailureClass,
-    ItemInsertStatus,
     ServiceClass,
 )
 from dr_platform.targets import (
@@ -96,7 +95,6 @@ def _item() -> ItemRecord:
         service_class=ServiceClass.URGENT,
         service_priority=ServiceClass.URGENT.priority,
         spec={"payload": "safe"},
-        insert_status=ItemInsertStatus.INSERTED,
         current_attempt=0,
         created_at=NOW,
         updated_at=NOW,

@@ -26,11 +26,6 @@ TERMINAL_OPERATION_STATUSES = frozenset(
 )
 
 
-class ItemInsertStatus(StrEnum):
-    INSERTED = "inserted"
-    ALREADY_PRESENT = "already_present"
-
-
 class AttemptEnqueueState(StrEnum):
     PENDING = "pending"
     CLAIMING = "claiming"

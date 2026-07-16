@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from threading import Barrier
 from typing import Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import Engine, func, select, text, update
+from sqlalchemy import Engine, func, insert, select, update
 from sqlalchemy.exc import DBAPIError
 
 from dr_platform import (
@@ -25,7 +25,6 @@ from dr_platform import (
     NextAttemptReason,
     NextAttemptRequest,
     PlatformSchema,
-    RegistrationResult,
     ServiceClass,
     TargetRegistry,
     cancel_operation,
@@ -45,6 +44,7 @@ from dr_platform.enqueue_runtime import (
     PreparedEnqueueCall,
     QueueConfigurationError,
 )
+from dr_platform.items import item_id, shuffle_rank
 from dr_platform.manifests import ExecutionRecipeEnvelope
 from dr_platform.reconciliation import ReconciliationConflictError
 from dr_platform.reconciliation_runtime import (
@@ -62,9 +62,6 @@ from dr_platform.status import (
 )
 from dr_platform.submission import (
     RegistrationConflictError,
-    RegistrationHook,
-    RegistrationItem,
-    RegistrationPageContext,
     SubmitOptions,
 )
 from dr_platform.targets import (
@@ -209,10 +206,7 @@ class _Canceller:
         self.cancelled.append(workflow_id)
 
 
-def _target(
-    *,
-    registration_hook: RegistrationHook | None = None,
-) -> ExecutionTarget:
+def _target() -> ExecutionTarget:
     declaration = TargetContractDeclaration(
         queue_name="lifecycle-queue",
         workflow_role="lifecycle",
@@ -220,12 +214,6 @@ def _target(
         managed_workflow_version=1,
         argument_recipe_version=1,
         classifier_version=1,
-        registration_hook_name=(
-            "failing-hook" if registration_hook is not None else None
-        ),
-        registration_hook_version=(
-            1 if registration_hook is not None else None
-        ),
     )
     ref = declaration.target_ref(
         target_key="lifecycle",
@@ -252,7 +240,6 @@ def _target(
             error_type=type(error).__name__,
             message=str(error),
         ),
-        registration_hook=registration_hook,
     )
 
 
@@ -377,106 +364,104 @@ def test_persisted_lifecycle_rows_enforce_immutability(
     assert item_key == "item-0"
 
 
-def test_submit_rolls_back_the_registration_page_when_its_hook_fails(
-    pg_engine: Engine,
-) -> None:
-    schema = _migrate(pg_engine)
-    with pg_engine.begin() as connection:
-        connection.exec_driver_sql(
-            "CREATE TABLE registration_hook_effects "
-            "(item_key text PRIMARY KEY)"
-        )
-
-    def failing_hook(
-        connection: Any,
-        *,
-        operation_key: str,
-        items: tuple[RegistrationItem, ...],
-        page: RegistrationPageContext,
-    ) -> RegistrationResult:
-        del operation_key, page
-        connection.execute(
-            text(
-                "INSERT INTO registration_hook_effects (item_key) "
-                "VALUES (:item_key)"
-            ),
-            {"item_key": items[0].item_key},
-        )
-        raise RuntimeError("hook failed")
-
-    target = _target(registration_hook=failing_hook)
-    registry = _registry(target)
-    with pytest.raises(RuntimeError, match="hook failed"):
-        submit(
-            operation_key="hook-rollback",
-            workflow_role=target.workflow_role,
-            group_key="lifecycle-group",
-            target=target,
-            source=_source(1),
-            engine=pg_engine,
-            resolver=registry,
-            schema=schema,
-        )
-
-    with pg_engine.connect() as connection:
-        hook_effect_count = connection.scalar(
-            text("SELECT count(*) FROM registration_hook_effects")
-        )
-        item_count = connection.scalar(
-            select(func.count()).select_from(schema.items)
-        )
-        cursor = connection.scalar(
-            select(schema.operations.c.registration_cursor)
-        )
-    assert (hook_effect_count, item_count, cursor) == (0, 0, 0)
-
-
 def test_resumed_registration_rejects_a_changed_source_prefix(
     pg_engine: Engine,
 ) -> None:
     schema = _migrate(pg_engine)
-
-    def fail_second_page(
-        connection: Any,
-        *,
-        operation_key: str,
-        items: tuple[RegistrationItem, ...],
-        page: RegistrationPageContext,
-    ) -> RegistrationResult:
-        del connection, operation_key
-        if page.page_index == 1:
-            raise RuntimeError("second page failed")
-        return RegistrationResult.model_validate(
-            {
-                "items": [
-                    {"item_key": item.item_key, "insert_status": "inserted"}
-                    for item in items
-                ]
-            }
-        )
-
-    target = _target(registration_hook=fail_second_page)
+    operation_key = "changed-source-replay"
+    source = _source(4)
+    options = SubmitOptions(page_size=2)
+    target = _target()
     registry = _registry(target)
-    submit_kwargs = {
-        "operation_key": "changed-source-replay",
-        "workflow_role": target.workflow_role,
-        "group_key": "lifecycle-group",
-        "target": target,
-        "engine": pg_engine,
-        "resolver": registry,
-        "schema": schema,
-        "options": SubmitOptions(page_size=2),
-    }
-    with pytest.raises(RuntimeError, match="second page failed"):
-        submit(source=_source(4), **submit_kwargs)
-
     with pg_engine.begin() as connection:
+        now = datetime(2026, 1, 1, tzinfo=UTC)
         connection.execute(
-            update(schema.operations).values(
-                registration_lease_expires_at=(
-                    func.clock_timestamp() - timedelta(seconds=1)
-                )
+            insert(schema.operations).values(
+                operation_key=operation_key,
+                group_key="lifecycle-group",
+                workflow_role=target.workflow_role,
+                status="registering",
+                requested_count=source.item_count,
+                registration_page_size=options.page_size,
+                registration_page_count=2,
+                target_key=target.ref.target_key,
+                target_version=target.ref.target_version,
+                target_contract_digest=target.ref.target_contract_digest,
+                platform_cut_version=1,
+                registration_cursor=1,
+                registration_lease_id="expired-registration-lease",
+                registration_lease_expires_at=(now - timedelta(seconds=1)),
+                retry_policy=options.retry_policy.model_dump(mode="json"),
+                inserted_count=2,
+                enqueued_count=0,
+                workflow_already_present_count=0,
+                enqueue_failed_count=0,
+                active_count=0,
+                succeeded_count=0,
+                terminal_failed_count=0,
+                cancelled_count=0,
+                spec={},
+                metadata={},
+                created_at=now,
+                updated_at=now,
             )
+        )
+        connection.execute(
+            insert(schema.items),
+            [
+                {
+                    "item_id": item_id(
+                        operation_key=operation_key,
+                        item_key=item.item_key,
+                    ),
+                    "operation_key": operation_key,
+                    "item_key": item.item_key,
+                    "item_index": index,
+                    "shuffle_rank": shuffle_rank(
+                        item_id=item_id(
+                            operation_key=operation_key,
+                            item_key=item.item_key,
+                        )
+                    ),
+                    "service_class": item.service_class.value,
+                    "service_priority": item.service_class.priority,
+                    "spec": item.spec,
+                    "current_attempt": 0,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for index, item in enumerate(source.items[:2])
+            ],
+        )
+        connection.execute(
+            insert(schema.item_attempts),
+            [
+                {
+                    "item_id": item_id(
+                        operation_key=operation_key,
+                        item_key=item.item_key,
+                    ),
+                    "attempt": 0,
+                    "workflow_role": target.workflow_role,
+                    "execution_key": f"execution:{item.item_key}:0",
+                    "workflow_id": f"workflow:{item.item_key}:0",
+                    "execution_recipe_digest": "seed-recipe-digest",
+                    "enqueue_state": AttemptEnqueueState.PENDING.value,
+                    "enqueue_try": 0,
+                    "execution_state": (
+                        AttemptExecutionState.NOT_STARTED.value
+                    ),
+                    "source_application_version": "test-v1",
+                    "missing_observation_count": 0,
+                    "requested_service_class": item.service_class.value,
+                    "requested_service_priority": (
+                        item.service_class.priority
+                    ),
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for item in source.items[:2]
+            ],
         )
 
     changed_source = _Source(
@@ -492,12 +477,22 @@ def test_resumed_registration_rejects_a_changed_source_prefix(
         RegistrationConflictError,
         match="persisted source Items",
     ):
-        submit(source=changed_source, **submit_kwargs)
+        submit(
+            operation_key=operation_key,
+            workflow_role=target.workflow_role,
+            group_key="lifecycle-group",
+            target=target,
+            source=changed_source,
+            engine=pg_engine,
+            resolver=registry,
+            schema=schema,
+            options=options,
+        )
 
     with pg_engine.connect() as connection:
-        persisted_keys = tuple(
-            connection.scalars(
-                select(schema.items.c.item_key).order_by(
+        persisted_items = tuple(
+            connection.execute(
+                select(schema.items.c.item_key, schema.items.c.spec).order_by(
                     schema.items.c.item_index
                 )
             )
@@ -505,7 +500,7 @@ def test_resumed_registration_rejects_a_changed_source_prefix(
         cursor = connection.scalar(
             select(schema.operations.c.registration_cursor)
         )
-    assert persisted_keys == ("item-0", "item-1")
+    assert persisted_items == (("item-0", {}), ("item-1", {}))
     assert cursor == 1
 
 
@@ -839,6 +834,8 @@ def test_public_inspection_reads_the_persisted_lifecycle(
 
     assert operation.current_item_count == 1
     assert operation.current_attempt_count == 1
+    assert operation.operation.inserted_count == 1
+    assert operation.operation.workflow_already_present_count == 0
     assert items[0].current_attempt == attempts[0].attempt
     assert attempts[0].claims[0].workflow_id == attempts[0].attempt.workflow_id
     assert attempts[0].attempt.enqueue_state == "enqueued"

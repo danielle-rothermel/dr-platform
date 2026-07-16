@@ -184,7 +184,6 @@ def test_submit_jsonl_materializes_file_once_before_submission(
         requested_count=2,
         registration_cursor=2,
         inserted_count=2,
-        already_present_count=0,
         enqueued_count=0,
         workflow_already_present_count=0,
         enqueue_failed_count=0,

@@ -24,9 +24,6 @@ from dr_platform.manifests import (
 )
 from dr_platform.records import FailureSnapshot, ItemRecord
 from dr_platform.status import WorkflowTopology
-from dr_platform.submission import (  # noqa: TC001 -- pydantic resolves it
-    RegistrationHook,
-)
 
 NonEmptyStr = Annotated[StrictStr, Field(min_length=1)]
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
@@ -60,8 +57,6 @@ class TargetContractDeclaration(BaseModel):
     argument_recipe_version: PositiveInt
     recipe_envelope_version: PositiveInt = EXECUTION_RECIPE_FORMAT_VERSION
     classifier_version: PositiveInt
-    registration_hook_name: NonEmptyStr | None = None
-    registration_hook_version: PositiveInt | None = None
 
     @model_validator(mode="after")
     def validate_declaration(self) -> TargetContractDeclaration:
@@ -72,20 +67,15 @@ class TargetContractDeclaration(BaseModel):
                 "unsupported execution recipe format version: "
                 f"{self.recipe_envelope_version}"
             )
-        hook_fields = (
-            self.registration_hook_name,
-            self.registration_hook_version,
-        )
-        if any(value is None for value in hook_fields) and any(
-            value is not None for value in hook_fields
-        ):
-            raise ValueError(
-                "registration hook name and version must be set together"
-            )
         return self
 
     def digest(self) -> str:
-        return sha256_json_digest(self.model_dump(mode="json"))
+        declaration = self.model_dump(mode="json")
+        # Keep no-hook target digests stable across removal of the legacy hook
+        # extension point. These fixed nulls are digest input, not public API.
+        declaration["registration_hook_name"] = None
+        declaration["registration_hook_version"] = None
+        return sha256_json_digest(declaration)
 
     def target_ref(
         self,
@@ -118,29 +108,11 @@ class ExecutionTarget(BaseModel):
     argument_recipe_version: PositiveInt
     recipe_envelope_version: PositiveInt = EXECUTION_RECIPE_FORMAT_VERSION
     classifier_version: PositiveInt
-    registration_hook_name: NonEmptyStr | None = None
-    registration_hook_version: PositiveInt | None = None
     workflow: WorkflowCallable = Field(exclude=True)
     execution_for: ExecutionIdentityCallable = Field(exclude=True)
     args_for: ArgumentsCallable = Field(exclude=True)
     recipe_for: RecipeCallable = Field(exclude=True)
     classify_error: ErrorClassifier = Field(exclude=True)
-    registration_hook: RegistrationHook | None = Field(
-        default=None,
-        exclude=True,
-    )
-
-    @model_validator(mode="after")
-    def validate_target(self) -> ExecutionTarget:
-        declaration = self.contract_declaration()
-        if (self.registration_hook is None) != (
-            declaration.registration_hook_name is None
-        ):
-            raise ValueError(
-                "registration hook callable and declaration must be set "
-                "together"
-            )
-        return self
 
     def contract_declaration(self) -> TargetContractDeclaration:
         return TargetContractDeclaration(
@@ -152,8 +124,6 @@ class ExecutionTarget(BaseModel):
             argument_recipe_version=self.argument_recipe_version,
             recipe_envelope_version=self.recipe_envelope_version,
             classifier_version=self.classifier_version,
-            registration_hook_name=self.registration_hook_name,
-            registration_hook_version=self.registration_hook_version,
         )
 
 
