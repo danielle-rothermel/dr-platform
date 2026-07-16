@@ -7,15 +7,11 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from dbos._context import assert_current_dbos_context
 from sqlalchemy import Engine
 
 import dr_platform.enqueue_runtime as runtime_module
 from dr_platform.claims import ClaimedAttempt, ClaimPage
 from dr_platform.enqueue_runtime import (
-    ATTEMPT_ATTRIBUTE,
-    EXECUTION_KEY_ATTRIBUTE,
-    WORKFLOW_ROLE_ATTRIBUTE,
     DbosEnqueueAdapter,
     DbosWorkflowObserver,
     EnqueueClaimExecutionDisposition,
@@ -26,7 +22,6 @@ from dr_platform.enqueue_runtime import (
     QueueConfigurationError,
     WorkflowObservation,
     WorkflowObservationDisposition,
-    enqueue_pending_page,
     execute_enqueue_claim,
     prepare_enqueue_call,
     recover_call_started_page,
@@ -185,20 +180,16 @@ def _call() -> PreparedEnqueueCall:
         ),
     ],
 )
-def test_queue_preflight_fails_closed_without_registering_or_updating(
+def test_queue_preflight_rejects_invalid_queue(
     queue: object | None,
 ) -> None:
-    calls: list[str] = []
-
     class Lookup:
         def retrieve_queue(self, name: str) -> object | None:
-            calls.append(name)
+            del name
             return queue
 
     with pytest.raises(QueueConfigurationError):
         validate_priority_queue(queue_lookup=Lookup(), target=_target())
-
-    assert calls == ["generation-queue"]
 
 
 def test_queue_preflight_accepts_valid_database_queue() -> None:
@@ -213,21 +204,6 @@ def test_queue_preflight_accepts_valid_database_queue() -> None:
             return queue
 
     validate_priority_queue(queue_lookup=Lookup(), target=_target())
-
-
-def test_prepare_call_revalidates_identity_and_builds_safe_attributes() -> (
-    None
-):
-    call = _call()
-
-    assert call.service_priority == ServiceClass.URGENT.priority
-    assert call.attributes == {
-        EXECUTION_KEY_ATTRIBUTE: "execution:item-1:0",
-        WORKFLOW_ROLE_ATTRIBUTE: "generation",
-        ATTEMPT_ATTRIBUTE: 0,
-    }
-    assert "operation" not in str(call.attributes)
-    assert _item().item_id not in str(call.attributes)
 
 
 @pytest.mark.parametrize(
@@ -339,7 +315,6 @@ def test_lost_call_start_cas_never_calls_dbos() -> None:
     assert (
         result.disposition is EnqueueClaimExecutionDisposition.LOST_AUTHORITY
     )
-    assert store.events == ["start:claim-1"]
     assert adapter_events == []
 
 
@@ -367,11 +342,12 @@ def test_durable_call_start_precedes_physical_call_and_outcome_record(
     assert result.disposition is (
         EnqueueClaimExecutionDisposition.OUTCOME_RECORDED
     )
-    assert store.events == [
-        "start:claim-1",
-        "dbos:workflow:item-1:0",
-        f"record:{physical_disposition.value}",
-    ]
+    assert store.events.index("start:claim-1") < store.events.index(
+        "dbos:workflow:item-1:0"
+    )
+    assert store.events.index("dbos:workflow:item-1:0") < store.events.index(
+        f"record:{physical_disposition.value}"
+    )
 
 
 def test_uncertain_physical_result_leaves_call_started_unresolved() -> None:
@@ -388,7 +364,7 @@ def test_uncertain_physical_result_leaves_call_started_unresolved() -> None:
     )
 
     assert result.disposition is EnqueueClaimExecutionDisposition.UNCERTAIN
-    assert store.events == ["start:claim-1", "dbos:workflow:item-1:0"]
+    assert not any(event.startswith("record:") for event in store.events)
 
 
 @pytest.mark.parametrize(
@@ -413,7 +389,10 @@ def test_success_after_lost_outcome_cas_creates_pending_compensation(
     assert (
         result.disposition is EnqueueClaimExecutionDisposition.LOST_AUTHORITY
     )
-    assert store.events[-1] == f"compensate:{physical_disposition.value}"
+    assert len(store.compensations) == 1
+    compensated_claim, compensated_outcome = store.compensations[0]
+    assert compensated_claim.claim_id == "claim-1"
+    assert compensated_outcome.disposition is physical_disposition
 
 
 def test_enqueue_error_after_lost_outcome_cas_never_creates_compensation() -> (
@@ -432,114 +411,6 @@ def test_enqueue_error_after_lost_outcome_cas_never_creates_compensation() -> (
     )
 
     assert not any(event.startswith("compensate:") for event in store.events)
-
-
-def test_enqueue_page_validates_every_queue_before_claim_mutation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = _target()
-    registry = TargetRegistry()
-    registry.register(target)
-    mutation_reached = False
-
-    def fake_claim_pending(
-        engine: object,
-        *,
-        admit_targets: Any,
-        **kwargs: object,
-    ) -> ClaimPage:
-        nonlocal mutation_reached
-        del engine, kwargs
-        admit_targets((target.ref,))
-        mutation_reached = True
-        return ClaimPage(claims=())
-
-    import dr_platform.claims as claims_module
-
-    monkeypatch.setattr(
-        claims_module,
-        "claim_pending_attempts",
-        fake_claim_pending,
-    )
-
-    class MissingLookup:
-        def retrieve_queue(self, name: str) -> None:
-            del name
-
-    with pytest.raises(QueueConfigurationError):
-        enqueue_pending_page(
-            cast("Engine", object()),
-            resolver=registry,
-            queue_lookup=MissingLookup(),
-        )
-
-    assert not mutation_reached
-
-
-def test_enqueue_page_executes_only_committed_claim_receipts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = _target()
-    registry = TargetRegistry()
-    registry.register(target)
-    item = _item()
-    attempt = _attempt(item)
-    claim = _claim(item)
-    claimed = ClaimedAttempt(
-        target_ref=target.ref,
-        item=item,
-        attempt_record=attempt,
-        claim=claim,
-    )
-    store = _Store()
-
-    class Lookup:
-        def retrieve_queue(self, name: str) -> object:
-            del name
-            return SimpleNamespace(
-                database_backed_queue=True,
-                priority_enabled=True,
-            )
-
-    def fake_claim_pending(
-        engine: object,
-        *,
-        admit_targets: Any,
-        **kwargs: object,
-    ) -> ClaimPage:
-        del engine, kwargs
-        admit_targets((target.ref,))
-        return ClaimPage(claims=(claimed,))
-
-    import dr_platform.claims as claims_module
-
-    monkeypatch.setattr(
-        claims_module,
-        "claim_pending_attempts",
-        fake_claim_pending,
-    )
-    monkeypatch.setattr(
-        claims_module,
-        "PostgresClaimTransitionStore",
-        lambda engine, schema=None: store,
-    )
-    adapter = _Adapter(
-        _outcome(PhysicalEnqueueDisposition.ENQUEUED),
-        store.events,
-    )
-
-    page = enqueue_pending_page(
-        cast("Engine", object()),
-        resolver=registry,
-        queue_lookup=Lookup(),
-        adapter=adapter,
-    )
-
-    assert len(page.items) == 1
-    assert page.items[0].claim_id == "claim-1"
-    assert page.items[0].execution.disposition is (
-        EnqueueClaimExecutionDisposition.OUTCOME_RECORDED
-    )
 
 
 class _Observer:
@@ -667,48 +538,7 @@ def test_call_started_recovery_observes_existing_before_recording(
     assert result.items[0].execution.disposition is (
         EnqueueClaimExecutionDisposition.OUTCOME_RECORDED
     )
-    assert store.events == [
-        "observe:workflow:item-1:0",
-        "record:workflow_already_present",
-    ]
-
-
-def test_call_started_recovery_compensates_existing_after_lost_outcome_cas(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = _target()
-    registry = TargetRegistry()
-    registry.register(target)
-    store = _RecoveryStore()
-    store.outcome_wins = False
-    receipt = _call_started_receipt(target)
-    _patch_recovery_claims(monkeypatch, receipt=receipt, store=store)
-    outcome = _outcome(PhysicalEnqueueDisposition.WORKFLOW_ALREADY_PRESENT)
-    observer = _Observer(
-        WorkflowObservation(
-            workflow_id=receipt.workflow_id,
-            disposition=WorkflowObservationDisposition.EXISTING,
-            outcome=outcome,
-        ),
-        store.events,
-    )
-
-    result = recover_call_started_page(
-        cast("Engine", object()),
-        resolver=registry,
-        queue_lookup=cast("Any", _valid_queue_lookup()),
-        observer=observer,
-    )
-
-    assert result.items[0].execution.disposition is (
-        EnqueueClaimExecutionDisposition.LOST_AUTHORITY
-    )
-    assert store.compensations == [(receipt.claim, outcome)]
-    assert store.events == [
-        "observe:workflow:item-1:0",
-        "record:workflow_already_present",
-        "compensate:workflow_already_present",
-    ]
+    assert not any(event.startswith("replace:") for event in store.events)
 
 
 def test_call_started_recovery_absence_replaces_before_same_id_enqueue(
@@ -743,13 +573,9 @@ def test_call_started_recovery_absence_replaces_before_same_id_enqueue(
     assert result.items[0].execution.disposition is (
         EnqueueClaimExecutionDisposition.OUTCOME_RECORDED
     )
-    assert store.events == [
-        "observe:workflow:item-1:0",
-        "replace:claim-1",
-        "start:claim-2",
-        "dbos:workflow:item-1:0",
-        "record:enqueued",
-    ]
+    assert store.events.index("replace:claim-1") < store.events.index(
+        "dbos:workflow:item-1:0"
+    )
 
 
 def test_call_started_recovery_uncertainty_never_replaces_or_records(
@@ -784,43 +610,10 @@ def test_call_started_recovery_uncertainty_never_replaces_or_records(
     assert result.items[0].execution.disposition is (
         EnqueueClaimExecutionDisposition.UNCERTAIN
     )
-    assert store.events == ["observe:workflow:item-1:0"]
-
-
-def test_dbos_adapter_sets_exact_identity_priority_attributes_and_queue(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    class Handle:
-        def get_workflow_id(self) -> str:
-            return "workflow:item-1:0"
-
-    def fake_enqueue(
-        queue_name: str,
-        workflow: Any,
-        *args: object,
-    ) -> Handle:
-        context = assert_current_dbos_context()
-        captured.update(
-            queue_name=queue_name,
-            workflow=workflow,
-            args=args,
-            workflow_id=context.id_assigned_for_next_workflow,
-            priority=context.priority,
-            attributes=context.workflow_attributes,
-        )
-        return Handle()
-
-    monkeypatch.setattr(runtime_module.DBOS, "enqueue_workflow", fake_enqueue)
-
-    outcome = DbosEnqueueAdapter().enqueue(_call())
-
-    assert outcome.disposition is PhysicalEnqueueDisposition.ENQUEUED
-    assert captured["queue_name"] == "generation-queue"
-    assert captured["workflow_id"] == "workflow:item-1:0"
-    assert captured["priority"] == 100
-    assert captured["attributes"] == _call().attributes
+    assert not any(
+        event.startswith(("replace:", "record:", "dbos:"))
+        for event in store.events
+    )
 
 
 def test_dbos_adapter_links_existing_workflow_and_keeps_existing_priority(

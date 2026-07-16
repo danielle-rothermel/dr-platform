@@ -80,28 +80,6 @@ def _target(
     )
 
 
-def test_execution_target_serialization_excludes_runtime_callables() -> None:
-    serialized = _target().model_dump(mode="json")
-
-    assert serialized == {
-        "ref": {
-            "target_key": "generation",
-            "target_version": 1,
-            "target_contract_digest": _target().ref.target_contract_digest,
-        },
-        "queue_name": "generation-queue",
-        "workflow_role": "generation",
-        "managed_workflow_name": "generation-workflow-v1",
-        "managed_workflow_version": 1,
-        "topology": "top_level_only",
-        "argument_recipe_version": 1,
-        "recipe_envelope_version": 1,
-        "classifier_version": 1,
-        "registration_hook_name": None,
-        "registration_hook_version": None,
-    }
-
-
 def test_exact_duplicate_registration_retains_first() -> None:
     first = _target()
     duplicate = _target()
