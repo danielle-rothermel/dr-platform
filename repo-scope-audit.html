@@ -196,7 +196,7 @@
     DBOS dependency self-tests, and Whetstone policy. PR 2 then replaced manifest preparation and
     source-mutation policing with one submission-owned read. PR 3 assigned validation to caller boundaries and PostgreSQL
     instead of re-auditing typed rows. PR 4 removed the remaining cycle-hiding runtime imports and internal private-module
-    crossings. PR 5 dissolved the contract-test layer and reduced database coverage to 12 distinct PostgreSQL guarantees.
+    crossings. PR 5 dissolved the contract-test layer and reduced database coverage to 13 distinct PostgreSQL guarantees.
     The targeted cleanup is complete; findings outside this approved stack remain highlighted below as future decisions.
   </div>
 
@@ -208,9 +208,9 @@
 
   <div class="summary-grid" aria-label="Audit summary">
     <div class="metric"><span class="value">0</span><span class="label">DuckDB/MotherDuck/OpenSSL integration paths remaining</span></div>
-    <div class="metric"><span class="value">12</span><span class="label">high-leverage PostgreSQL cases in the final 100-case suite</span></div>
+    <div class="metric"><span class="value">13</span><span class="label">high-leverage PostgreSQL cases in the final 100-case suite</span></div>
     <div class="metric"><span class="value">90</span><span class="label">root exports remaining after obsolete manifest types were removed</span></div>
-    <div class="metric"><span class="value">2,984</span><span class="label">test lines versus 13,038 source lines after PR 5</span></div>
+    <div class="metric"><span class="value">3,018</span><span class="label">test lines versus 13,093 source lines after PR 5</span></div>
   </div>
 
   <nav aria-label="Contents">
@@ -327,11 +327,11 @@
       <span class="severity high">High · consolidate</span>
     </div>
     <p>
-      After PR 5, Pytest collects 100 cases and fixture analysis finds 12 requiring PostgreSQL. No cases require
+      After PR 5, Pytest collects 100 cases and fixture analysis finds 13 requiring PostgreSQL. No cases require
       MotherDuck, open DuckDB, or spawn OpenSSL. The retained database cases cover public migration, representative
       upgrade compatibility from the published baseline, persisted integrity, transactional rollback, concurrent claims,
-      submit/request/cancel idempotency, retry reconciliation, shared-reference cancellation safety, public inspection, and
-      a real credential-bearing reconnect.
+      submit/request/cancel idempotency, safe source-identity checks when registration resumes, retry reconciliation,
+      shared-reference cancellation safety, public inspection, and a real credential-bearing reconnect.
     </p>
     <div class="evidence">
       <a href="tests/conftest.py">conftest.py</a> now owns only PostgreSQL fixtures;
@@ -428,8 +428,8 @@
     </div>
     <p>
       The original suite had 97 submodule imports, 145 monkeypatch mentions, 368 schema references, and 333 direct SQL calls.
-      The final suite has 100 collected cases in 2,984 lines. Its deterministic units target responsibility modules, while
-      only 12 PostgreSQL cases cross the storage boundary and 15 direct SQL calls remain for representative persisted
+      The final suite has 100 collected cases in 3,018 lines. Its deterministic units target responsibility modules, while
+      only 13 PostgreSQL cases cross the storage boundary and 16 explicit database calls remain for representative persisted
       integrity evidence.
     </p>
     <div class="evidence">
@@ -518,7 +518,9 @@
     </div>
     <p class="remove"><strong>Resolved contract:</strong> submission owns one authoritative read, validates caller input at that
       boundary, and persists only runtime identity and resumable-registration state. It does not defend against caller mutation
-      between a separate preparation and submission phase because that separate phase no longer exists.</p>
+      between a separate preparation and submission phase because that separate phase no longer exists. When resuming an
+      incomplete registration, it compares the current single-read input with the committed prefix so one operation cannot
+      silently combine two sources; this needs no digest tree, filesystem fingerprint, or second source read.</p>
     <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 2</div><ul class="checklist">
       <li class="done">Make submission own one authoritative source traversal.</li><li class="done">Remove filesystem mutation-defense metadata and rereads.</li>
       <li class="done">Remove digest layers without a remaining runtime consumer.</li>
@@ -771,9 +773,9 @@
         <tr><td class="path">test_backoff.py</td><td class="num">16</td><td class="num">0</td><td>Deterministic backoff and throttle units</td><td class="status-keep">Keep</td></tr>
         <tr><td class="path">test_database.py</td><td class="num">3</td><td class="num">3</td><td>Public migration, published-baseline upgrade, and credential-bearing reconnect</td><td class="status-keep">Keep</td></tr>
         <tr><td class="path">test_dbos_config.py</td><td class="num">8</td><td class="num">0</td><td>Package-owned DBOS configuration behavior</td><td class="status-keep">Keep</td></tr>
-        <tr><td class="path">test_enqueue_runtime.py</td><td class="num">24</td><td class="num">0</td><td>External enqueue outcome units with fakes</td><td class="status-keep">Keep</td></tr>
+        <tr><td class="path">test_enqueue_runtime.py</td><td class="num">23</td><td class="num">0</td><td>External enqueue outcome units with package-owned fakes</td><td class="status-keep">Keep</td></tr>
         <tr><td class="path">test_jsonl.py</td><td class="num">8</td><td class="num">0</td><td>Single-read JSONL boundary units</td><td class="status-keep">Keep</td></tr>
-        <tr><td class="path">test_lifecycle.py</td><td class="num">9</td><td class="num">9</td><td>Distinct PostgreSQL transaction/lifecycle guarantees</td><td class="status-keep">Keep</td></tr>
+        <tr><td class="path">test_lifecycle.py</td><td class="num">10</td><td class="num">10</td><td>Distinct PostgreSQL transaction/lifecycle guarantees</td><td class="status-keep">Keep</td></tr>
         <tr><td class="path">test_reconciliation_runtime.py</td><td class="num">17</td><td class="num">0</td><td>External DBOS observation normalization units</td><td class="status-keep">Keep</td></tr>
         <tr><td class="path">test_submission_pipeline.py</td><td class="num">1</td><td class="num">0</td><td>Single-read public submission orchestration</td><td class="status-keep">Keep</td></tr>
         <tr><td class="path">test_targets.py</td><td class="num">9</td><td class="num">0</td><td>Pure target-registry behavior</td><td class="status-keep">Keep</td></tr>

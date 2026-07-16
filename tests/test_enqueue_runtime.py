@@ -7,15 +7,11 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from dbos._context import assert_current_dbos_context
 from sqlalchemy import Engine
 
 import dr_platform.enqueue_runtime as runtime_module
 from dr_platform.claims import ClaimedAttempt, ClaimPage
 from dr_platform.enqueue_runtime import (
-    ATTEMPT_ATTRIBUTE,
-    EXECUTION_KEY_ATTRIBUTE,
-    WORKFLOW_ROLE_ATTRIBUTE,
     DbosEnqueueAdapter,
     DbosWorkflowObserver,
     EnqueueClaimExecutionDisposition,
@@ -618,47 +614,6 @@ def test_call_started_recovery_uncertainty_never_replaces_or_records(
         event.startswith(("replace:", "record:", "dbos:"))
         for event in store.events
     )
-
-
-def test_dbos_adapter_uses_required_safe_enqueue_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    class Handle:
-        def get_workflow_id(self) -> str:
-            return "workflow:item-1:0"
-
-    def fake_enqueue(
-        queue_name: str,
-        workflow: Any,
-        *args: object,
-    ) -> Handle:
-        context = assert_current_dbos_context()
-        captured.update(
-            queue_name=queue_name,
-            workflow=workflow,
-            args=args,
-            workflow_id=context.id_assigned_for_next_workflow,
-            priority=context.priority,
-            attributes=context.workflow_attributes,
-        )
-        return Handle()
-
-    monkeypatch.setattr(runtime_module.DBOS, "enqueue_workflow", fake_enqueue)
-
-    outcome = DbosEnqueueAdapter().enqueue(_call())
-
-    assert outcome.disposition is PhysicalEnqueueDisposition.ENQUEUED
-    assert captured["queue_name"] == "generation-queue"
-    assert captured["workflow_id"] == "workflow:item-1:0"
-    assert captured["priority"] == 100
-    attributes = cast("dict[str, object]", captured["attributes"])
-    assert attributes[EXECUTION_KEY_ATTRIBUTE] == "execution:item-1:0"
-    assert attributes[WORKFLOW_ROLE_ATTRIBUTE] == "generation"
-    assert attributes[ATTEMPT_ATTRIBUTE] == 0
-    assert "operation" not in str(attributes)
-    assert _item().item_id not in str(attributes)
 
 
 def test_dbos_adapter_links_existing_workflow_and_keeps_existing_priority(

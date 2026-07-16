@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from threading import Barrier
 from typing import Any
 
@@ -428,6 +429,84 @@ def test_submit_rolls_back_the_registration_page_when_its_hook_fails(
             select(schema.operations.c.registration_cursor)
         )
     assert (hook_effect_count, item_count, cursor) == (0, 0, 0)
+
+
+def test_resumed_registration_rejects_a_changed_source_prefix(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+
+    def fail_second_page(
+        connection: Any,
+        *,
+        operation_key: str,
+        items: tuple[RegistrationItem, ...],
+        page: RegistrationPageContext,
+    ) -> RegistrationResult:
+        del connection, operation_key
+        if page.page_index == 1:
+            raise RuntimeError("second page failed")
+        return RegistrationResult.model_validate(
+            {
+                "items": [
+                    {"item_key": item.item_key, "insert_status": "inserted"}
+                    for item in items
+                ]
+            }
+        )
+
+    target = _target(registration_hook=fail_second_page)
+    registry = _registry(target)
+    submit_kwargs = {
+        "operation_key": "changed-source-replay",
+        "workflow_role": target.workflow_role,
+        "group_key": "lifecycle-group",
+        "target": target,
+        "engine": pg_engine,
+        "resolver": registry,
+        "schema": schema,
+        "options": SubmitOptions(page_size=2),
+    }
+    with pytest.raises(RuntimeError, match="second page failed"):
+        submit(source=_source(4), **submit_kwargs)
+
+    with pg_engine.begin() as connection:
+        connection.execute(
+            update(schema.operations).values(
+                registration_lease_expires_at=(
+                    func.clock_timestamp() - timedelta(seconds=1)
+                )
+            )
+        )
+
+    changed_source = _Source(
+        items=tuple(
+            _Item(
+                item_key=f"item-{index}",
+                spec={"changed": True} if index == 0 else {},
+            )
+            for index in range(4)
+        )
+    )
+    with pytest.raises(
+        RegistrationConflictError,
+        match="persisted source Items",
+    ):
+        submit(source=changed_source, **submit_kwargs)
+
+    with pg_engine.connect() as connection:
+        persisted_keys = tuple(
+            connection.scalars(
+                select(schema.items.c.item_key).order_by(
+                    schema.items.c.item_index
+                )
+            )
+        )
+        cursor = connection.scalar(
+            select(schema.operations.c.registration_cursor)
+        )
+    assert persisted_keys == ("item-0", "item-1")
+    assert cursor == 1
 
 
 def test_concurrent_claimers_claim_each_attempt_once_by_durable_outcome(
