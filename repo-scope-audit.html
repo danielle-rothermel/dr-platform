@@ -200,7 +200,8 @@
     PR 6 replaced heuristic payload policing with an explicit application-owned workflow-argument boundary. Findings outside
     the approved cleanup layers remain highlighted below as future decisions. PR 7 retained resumable registration while
     removing caller-owned transaction hooks and their persisted classification state. PR 8 made the runtime target the single
-    caller-authored definition and derives its persisted reference without changing legacy no-hook digests.
+    caller-authored definition and derives its persisted reference without changing legacy no-hook digests. PR 9 curated the
+    root facade around the documented lifecycle while leaving advanced mechanisms in their responsibility modules.
   </div>
 
   <div class="note warn" style="margin-top: 18px;">
@@ -212,8 +213,8 @@
   <div class="summary-grid" aria-label="Audit summary">
     <div class="metric"><span class="value">0</span><span class="label">DuckDB/MotherDuck/OpenSSL integration paths remaining</span></div>
     <div class="metric"><span class="value">12</span><span class="label">high-leverage PostgreSQL cases in the current 97-case suite</span></div>
-    <div class="metric"><span class="value">86</span><span class="label">root exports remaining before final facade curation</span></div>
-    <div class="metric"><span class="value">2,982</span><span class="label">test lines versus 13,043 source lines after PR 8</span></div>
+    <div class="metric"><span class="value">80</span><span class="label">documented lifecycle verbs and their direct root contracts</span></div>
+    <div class="metric"><span class="value">2,984</span><span class="label">test lines versus 13,028 source lines after PR 9</span></div>
   </div>
 
   <nav aria-label="Contents">
@@ -431,7 +432,7 @@
     </div>
     <p>
       The original suite had 97 submodule imports, 145 monkeypatch mentions, 368 schema references, and 333 direct SQL calls.
-      The current suite has 97 collected cases in 2,998 lines. Its deterministic units target responsibility modules, while
+      The current suite has 97 collected cases in 2,984 lines. Its deterministic units target responsibility modules, while
       only 12 PostgreSQL cases cross the storage boundary and explicit database setup remains limited to representative persisted
       integrity evidence.
     </p>
@@ -509,15 +510,16 @@
       <span class="severity decision">Decision required</span>
     </div>
     <p>
-      One submission freezes format versions, target digests, per-item recipe digests, per-page digests, an all-items digest,
-      an operation-recipe digest, and a final manifest digest. Submission then rereads and recomputes the entire chain.
-      The JSONL adapter adds inode/device/size/mtime identity, content SHA-256, byte length, byte offsets, and before/after
-      identity checks around reads and hashing.
+      At the audit baseline, a separate preparation layer froze format versions, target digests, per-item recipe digests,
+      per-page digests, an all-items digest, an operation-recipe digest, and a final manifest digest. Submission reread and
+      recomputed that chain. The former JSONL adapter also recorded inode/device/size/mtime identity, content SHA-256, byte
+      length, byte offsets, and before/after identity checks around reads and hashing.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/manifests.py">manifests.py:22–125</a> defines versioned, self-hashing manifests;
-      <a href="src/dr_platform/submission.py">submission.py:274–351, 954–1075</a> computes and revalidates the digest tree;
-      <a href="src/dr_platform/jsonl.py">jsonl.py:68–167, 194–250, 335–352</a> adds filesystem drift detection.
+      The baseline inventory recorded those removed paths. In the current tree,
+      <a href="src/dr_platform/jsonl.py">jsonl.py</a> reads and validates the source once, while
+      <a href="src/dr_platform/submission.py">submission.py</a> validates the committed prefix only when resumable
+      registration continues. Neither module retains filesystem fingerprints, a manifest digest tree, or a second source read.
     </div>
     <p class="remove"><strong>Resolved contract:</strong> submission owns one authoritative read, validates caller input at that
       boundary, and persists only runtime identity and resumable-registration state. It does not defend against caller mutation
@@ -748,18 +750,21 @@
       <span class="severity high">High · curate</span>
     </div>
     <p>
-      The README describes a small flow—register, submit, reconcile/wait, inspect, cancel—but <code>dr_platform.__all__</code>
-      contains 132 names. Export/publication contribute 40; backoff contributes 14. Conversely, several protocols accepted by
-      public functions are not root-exported, so the root is simultaneously too wide and incomplete.
+      Before curation, the root mixed lifecycle verbs with raw persistence records, throttle storage, cut comparison, repair
+      operations, and low-level configuration helpers while omitting direct errors and result contracts. PR 9 now exposes 80
+      names: the documented configuration, target, submission, reconciliation, inspection, cancellation, and operator-action
+      flow plus the types required to call it and interpret its direct results.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/__init__.py">__init__.py:1–294</a> flattens records, statuses, publication recovery models,
-      projection schemas, local pin operations, telemetry capture, and throttle operations into one namespace.
+      <a href="src/dr_platform/__init__.py">__init__.py</a> explicitly imports the supported facade; inspection record types
+      are included because public results contain them, while record storage and mutation, backoff and throttle persistence,
+      cut comparison, abandonment, and repair APIs remain discoverable only from focused submodules.
+      <a href="README.md">README.md</a> documents the same root lifecycle and the advanced-submodule boundary.
     </div>
     <p class="remove"><strong>Standalone direction:</strong> after removal, expose only the remaining core verbs, their direct
       input/result types, and required public protocols. Leave implementation records and storage operations private.</p>
-    <div class="progress"><div class="progress-title">Implementation status · In progress</div><ul class="checklist">
-      <li class="done">Remove obsolete subsystem exports.</li><li>Curate the remaining root API around supported public verbs and types.</li>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 9</div><ul class="checklist">
+      <li class="done">Remove obsolete subsystem exports.</li><li class="done">Curate the remaining root API around supported public verbs and direct contracts.</li>
     </ul></div>
   </article>
 
@@ -814,7 +819,7 @@
   </div>
 
   <footer>
-    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 8 of the Graphite stack and was
+    Audit scope began at commit <code>5b8f984</code>. This cumulative version reflects PR 9 of the Graphite stack and was
     refreshed with complete source search, AST-based API inventory, pytest fixture collection, dependency/configuration
     inspection, and focused/full-suite verification. Pending checklist items describe work not yet completed by this branch.
   </footer>

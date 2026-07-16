@@ -12,9 +12,11 @@ from dr_platform import (
     FailureClass,
     PlatformSchema,
     list_operations,
+    upgrade_platform_schema,
+)
+from dr_platform.backoff import (
     list_throttle_states,
     record_throttle_failure,
-    upgrade_platform_schema,
 )
 from dr_platform.db.migrate import (
     PLATFORM_BASELINE_REVISION,

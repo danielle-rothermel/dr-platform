@@ -1,21 +1,5 @@
-"""Durable execution kernel contracts built on DBOS."""
+"""Supported public contracts for the durable execution kernel."""
 
-from dr_platform.backoff import (
-    RETRYABLE_BACKOFF_FAILURES,
-    ThrottleBackoffState,
-    clear_throttle_backoff,
-    clear_throttle_hold,
-    delay_until_unblocked_seconds,
-    hold_throttle_delay,
-    list_throttle_states,
-    load_throttle_backoff_state,
-    next_backoff_delay_seconds,
-    record_throttle_failure,
-    set_throttle_hold,
-    set_throttle_tags,
-    should_backoff_failure,
-    throttle_delay_seconds,
-)
 from dr_platform.cancellation import (
     CancellationAttemptCut,
     CancellationAttemptResult,
@@ -28,19 +12,10 @@ from dr_platform.cancellation import (
     CancellationResult,
     WorkflowCanceller,
     cancel_operation,
-    repair_late_enqueue_compensations,
-)
-from dr_platform.cut import (
-    OperationCutComparison,
-    OperationCutMismatch,
-    OperationCutMismatchDisposition,
-    PlatformOperationCut,
-    compare_operation_cuts,
 )
 from dr_platform.db import PlatformSchema, upgrade_platform_schema
 from dr_platform.dbos_config import (
     PlatformDbosConfig,
-    build_dbos_config,
     build_platform_dbos_config,
     initialize_dbos_runtime,
 )
@@ -60,7 +35,7 @@ from dr_platform.inspection import (
     wait_operation,
 )
 from dr_platform.items import SubmittableItem
-from dr_platform.jsonl import submit_jsonl
+from dr_platform.jsonl import JsonlFieldNames, submit_jsonl
 from dr_platform.manifests import (
     ExecutionRecipeEnvelope,
     ExecutionTargetRef,
@@ -69,9 +44,15 @@ from dr_platform.manifests import (
 from dr_platform.reconciliation import (
     NextAttemptRequest,
     NextAttemptResult,
+    ReconciliationConflictError,
     request_next_attempt,
 )
-from dr_platform.reconciliation_runtime import reconcile
+from dr_platform.reconciliation_runtime import (
+    DbosStepObservation,
+    ReconcileOptions,
+    ReconcileResult,
+    reconcile,
+)
 from dr_platform.records import (
     AttemptRecord,
     EligibilityReference,
@@ -82,11 +63,9 @@ from dr_platform.records import (
     ItemRecord,
     OperationRecord,
     RetryPolicy,
-    ThrottleState,
 )
 from dr_platform.status import (
-    AttemptEnqueueState,
-    AttemptExecutionState,
+    CancellationDisposition,
     FailureClass,
     NextAttemptDisposition,
     NextAttemptReason,
@@ -96,33 +75,44 @@ from dr_platform.status import (
     WorkflowTopology,
 )
 from dr_platform.submission import (
+    RegistrationAbandonedError,
+    RegistrationConflictError,
+    RegistrationError,
+    RegistrationIneligibleError,
+    RegistrationIntegrityError,
+    RegistrationLeaseHeldError,
+    SubmitFailurePreview,
     SubmitOptions,
     SubmitResult,
-    abandon_registration,
     submit,
 )
 from dr_platform.targets import (
     ExecutionIdentity,
     ExecutionTarget,
+    TargetConflictError,
     TargetRegistry,
+    TargetResolutionError,
+    TargetResolutionErrorCode,
+    TargetResolutionFailure,
     TargetResolver,
+    TargetUnavailableError,
 )
+from dr_platform.telemetry import TelemetryInitializationResult
 
 __all__ = [
-    "RETRYABLE_BACKOFF_FAILURES",
-    "AttemptEnqueueState",
-    "AttemptExecutionState",
     "AttemptInspection",
     "AttemptRecord",
     "CancellationAttemptCut",
     "CancellationAttemptResult",
     "CancellationConflictError",
     "CancellationCutDriftError",
+    "CancellationDisposition",
     "CancellationExpectedCut",
     "CancellationInspection",
     "CancellationInspectionDisposition",
     "CancellationRequest",
     "CancellationResult",
+    "DbosStepObservation",
     "EligibilityReference",
     "EnqueueClaimRecord",
     "EnqueueCompensationHazardRecord",
@@ -136,13 +126,11 @@ __all__ = [
     "HealthReport",
     "ItemInspection",
     "ItemRecord",
+    "JsonlFieldNames",
     "NextAttemptDisposition",
     "NextAttemptReason",
     "NextAttemptRequest",
     "NextAttemptResult",
-    "OperationCutComparison",
-    "OperationCutMismatch",
-    "OperationCutMismatchDisposition",
     "OperationInspection",
     "OperationRecord",
     "OperationStatus",
@@ -150,49 +138,46 @@ __all__ = [
     "OperationWaitResult",
     "OperationWaitTimeoutError",
     "PlatformDbosConfig",
-    "PlatformOperationCut",
     "PlatformSchema",
+    "ReconcileOptions",
+    "ReconcileResult",
+    "ReconciliationConflictError",
+    "RegistrationAbandonedError",
+    "RegistrationConflictError",
+    "RegistrationError",
+    "RegistrationIneligibleError",
+    "RegistrationIntegrityError",
+    "RegistrationLeaseHeldError",
     "RetryDisposition",
     "RetryPolicy",
     "ServiceClass",
     "SubmissionSource",
+    "SubmitFailurePreview",
     "SubmitOptions",
     "SubmitResult",
     "SubmittableItem",
+    "TargetConflictError",
     "TargetRegistry",
+    "TargetResolutionError",
+    "TargetResolutionErrorCode",
+    "TargetResolutionFailure",
     "TargetResolver",
-    "ThrottleBackoffState",
-    "ThrottleState",
+    "TargetUnavailableError",
+    "TelemetryInitializationResult",
     "WorkflowCanceller",
     "WorkflowTopology",
-    "abandon_registration",
-    "build_dbos_config",
     "build_platform_dbos_config",
     "cancel_operation",
-    "clear_throttle_backoff",
-    "clear_throttle_hold",
-    "compare_operation_cuts",
-    "delay_until_unblocked_seconds",
     "health_report",
-    "hold_throttle_delay",
     "initialize_dbos_runtime",
     "inspect_operation",
     "list_attempts",
     "list_items",
     "list_operations",
-    "list_throttle_states",
-    "load_throttle_backoff_state",
-    "next_backoff_delay_seconds",
     "reconcile",
-    "record_throttle_failure",
-    "repair_late_enqueue_compensations",
     "request_next_attempt",
-    "set_throttle_hold",
-    "set_throttle_tags",
-    "should_backoff_failure",
     "submit",
     "submit_jsonl",
-    "throttle_delay_seconds",
     "upgrade_platform_schema",
     "wait_operation",
 ]
