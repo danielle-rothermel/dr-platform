@@ -5,10 +5,7 @@ from __future__ import annotations
 import pytest
 
 from dr_platform.dbos_config import PlatformDbosConfig, initialize_dbos_runtime
-from dr_platform.telemetry import (
-    initialize_telemetry_safely,
-    validated_telemetry_attributes,
-)
+from dr_platform.telemetry import initialize_telemetry_safely
 
 
 def _config(*, enable_otlp: bool = True) -> PlatformDbosConfig:
@@ -87,17 +84,3 @@ def test_dbos_runtime_initialization_failure_is_not_treated_as_telemetry() -> (
             runtime_initializer=initialize_runtime,
             telemetry_initializer=lambda _config: None,
         )
-
-
-def test_unapproved_telemetry_attributes_are_rejected() -> None:
-    unapproved_attributes: dict[str, str | int] = {
-        "consumer.destination_id": "destination-1",
-        "consumer.disposition": "completed",
-        "consumer.snapshot_seq": 1,
-    }
-
-    for key, value in unapproved_attributes.items():
-        with pytest.raises(
-            ValueError, match="telemetry attribute key is not approved"
-        ):
-            validated_telemetry_attributes({key: value})

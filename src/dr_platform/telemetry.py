@@ -1,31 +1,13 @@
-"""Fail-open OTLP bootstrap and safe diagnostic attribute validation."""
+"""Fail-open OTLP bootstrap."""
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-
-_CREDENTIAL_VALUE_MARKERS = (
-    "://",
-    "api-key",
-    "api_key=",
-    "apikey=",
-    "authorization",
-    "bearer ",
-    "credential",
-    "password=",
-    "private_key",
-    "secret",
-    "token=",
-)
-_CREDENTIAL_VALUE_PREFIXES = ("ghp_", "github_pat_", "sk-", "sk_")
-_SAFE_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,255}$")
-_MAX_COUNTER = 2**63 - 1
+    from collections.abc import Callable
 
 
 class TelemetryInitializationResult(BaseModel):
@@ -57,40 +39,3 @@ def initialize_telemetry_safely(
             message="OTLP initialization failed",
         )
     return TelemetryInitializationResult(enabled=True, healthy=True)
-
-
-def validated_telemetry_attributes(
-    attributes: Mapping[str, str | int | float | bool],
-) -> dict[str, str | int | float | bool]:
-    """Return the closed set of safe, typed span attributes."""
-    validated: dict[str, str | int | float | bool] = {}
-    for key, value in attributes.items():
-        validator = _ATTRIBUTE_VALIDATORS.get(key)
-        if validator is None:
-            raise ValueError("telemetry attribute key is not approved")
-        validator(value)
-        validated[key] = value
-    return validated
-
-
-def _validate_safe_text(value: object) -> None:
-    if type(value) is not str or _SAFE_TEXT.fullmatch(value) is None:
-        raise ValueError("telemetry attribute value is not safe text")
-    normalized = value.casefold()
-    if normalized.startswith(_CREDENTIAL_VALUE_PREFIXES) or any(
-        marker in normalized for marker in _CREDENTIAL_VALUE_MARKERS
-    ):
-        raise ValueError("telemetry attribute value resembles a credential")
-
-
-def _validate_counter(value: object) -> None:
-    if type(value) is not int or not 0 <= value <= _MAX_COUNTER:
-        raise ValueError("telemetry attribute value is not a valid counter")
-
-
-_ATTRIBUTE_VALIDATORS = {
-    "platform.operation_key": _validate_safe_text,
-    "platform.execution_key": _validate_safe_text,
-    "platform.workflow_role": _validate_safe_text,
-    "platform.attempt": _validate_counter,
-}
