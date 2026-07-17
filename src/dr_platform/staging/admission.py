@@ -36,7 +36,11 @@ from dr_platform.staging.identities import (
     WorkKey,
 )
 from dr_platform.staging.schema import StagingSchema
-from dr_platform.staging.stage_attempts import append_stage_attempt
+from dr_platform.staging.stage_attempts import (
+    append_stage_attempt,
+    get_stage_attempt,
+    mark_stage_attempt_admitted,
+)
 from dr_platform.staging.stage_executions import transition_stage_execution
 from dr_platform.staging.states import StageExecutionState
 
@@ -46,6 +50,7 @@ if TYPE_CHECKING:
     from dbos import DBOSClient, EnqueueOptions
     from sqlalchemy.engine import RowMapping
 
+    from dr_platform.staging.records import StageAttemptRecord
     from dr_platform.staging.registry import PipelineRegistry
 
 DEFAULT_ADMISSION_BATCH_SIZE = 100
@@ -378,10 +383,9 @@ def _admit_candidate(  # noqa: PLR0913 -- explicit admission facts
     schema: StagingSchema,
 ) -> None:
     stage = _registered_stage(candidate, registry=registry)
-    attempt = append_stage_attempt(
+    attempt = _attempt_for_admission(
         connection,
         stage_execution_id=candidate.stage_execution_id,
-        created_at=admitted_at,
         admitted_at=admitted_at,
         schema=schema,
     )
@@ -415,6 +419,44 @@ def _admit_candidate(  # noqa: PLR0913 -- explicit admission facts
         connection,
         options,
         *workflow_args,
+    )
+
+
+def _attempt_for_admission(
+    connection: Connection,
+    *,
+    stage_execution_id: int,
+    admitted_at: datetime,
+    schema: StagingSchema,
+) -> StageAttemptRecord:
+    executions = schema.stage_executions
+    current_attempt = connection.execute(
+        select(executions.c.current_attempt).where(
+            executions.c.stage_execution_id == stage_execution_id
+        )
+    ).scalar_one()
+    if current_attempt:
+        prepared = get_stage_attempt(
+            connection,
+            stage_execution_id=stage_execution_id,
+            attempt_number=current_attempt,
+            schema=schema,
+        )
+        assert prepared is not None
+        if prepared.admitted_at is None and prepared.terminal_at is None:
+            return mark_stage_attempt_admitted(
+                connection,
+                stage_execution_id=stage_execution_id,
+                attempt_number=current_attempt,
+                admitted_at=admitted_at,
+                schema=schema,
+            )
+    return append_stage_attempt(
+        connection,
+        stage_execution_id=stage_execution_id,
+        created_at=admitted_at,
+        admitted_at=admitted_at,
+        schema=schema,
     )
 
 
