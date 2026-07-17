@@ -4,6 +4,9 @@ The registration hook constructs and owns one ``DBOSClient`` from the
 validated colocated system database URL.  Its returned registration handle
 keeps that client alive and provides explicit cleanup.  The scheduled
 workflow is deliberately only an adapter around ``run_admission_pass``.
+Every declared stage must have an empty-selector capacity control before its
+READY work is encountered; otherwise admission raises
+``MissingStageControlError`` and rolls back the pass.
 """
 
 from __future__ import annotations

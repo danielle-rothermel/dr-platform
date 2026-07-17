@@ -24,6 +24,7 @@ from dr_platform.staging import (
     StageExecutionState,
     StageKey,
     WorkKey,
+    stable_random_rank,
     stage_workflow_id,
 )
 from dr_platform.staging.admission import (
@@ -121,6 +122,118 @@ def _control(
             capacity=capacity,
             paused=paused,
             updated_at=NOW,
+        )
+
+
+def _starvation_registry() -> PipelineRegistry:
+    registry = PipelineRegistry()
+    for suffix in ("a", "b"):
+        registry.register(
+            PipelineDefinition(
+                key=f"pipeline-{suffix}",
+                version=1,
+                stages=(
+                    StageDefinition(
+                        key=f"stage-{suffix}",
+                        queue_name=f"queue-{suffix}",
+                        workflow=_workflow,
+                        args_for=_args_for,
+                    ),
+                ),
+            )
+        )
+    return registry
+
+
+def _submit_starvation_backlog(
+    engine: Engine,
+    registry: PipelineRegistry,
+) -> None:
+    campaign_key = "campaign-starvation"
+    ranked_keys = sorted(
+        (f"work-{index}" for index in range(64)),
+        key=lambda work_key: stable_random_rank(
+            work_identity=CampaignWorkIdentity(campaign_key, work_key)
+        ),
+    )
+    submit(
+        campaign_key=campaign_key,
+        run_key="run-a",
+        pipeline=("pipeline-a", 1),
+        config_ref="config:a",
+        items=(
+            WorkInput(work_key=work_key, input_ref=work_key, labels={})
+            for work_key in ranked_keys[:5]
+        ),
+        registry=registry,
+        engine=engine,
+        clock=lambda: NOW,
+    )
+    submit(
+        campaign_key=campaign_key,
+        run_key="run-b",
+        pipeline=("pipeline-b", 1),
+        config_ref="config:b",
+        items=(
+            WorkInput(
+                work_key=ranked_keys[-1],
+                input_ref=ranked_keys[-1],
+                labels={},
+            ),
+        ),
+        registry=registry,
+        engine=engine,
+        clock=lambda: NOW,
+    )
+
+
+def _pipeline_control(
+    engine: Engine,
+    *,
+    suffix: str,
+    capacity: int,
+    paused: bool,
+) -> None:
+    with engine.begin() as connection:
+        upsert_stage_control(
+            connection,
+            pipeline_key=f"pipeline-{suffix}",
+            pipeline_version=1,
+            stage_key=f"stage-{suffix}",
+            selector={},
+            capacity=capacity,
+            paused=paused,
+            updated_at=NOW,
+        )
+
+
+def _pipeline_states(
+    engine: Engine,
+    schema: StagingSchema,
+) -> list[tuple[str, str]]:
+    with engine.connect() as connection:
+        return list(
+            connection.execute(
+                select(
+                    schema.pipeline_runs.c.pipeline_key,
+                    schema.stage_executions.c.state,
+                )
+                .select_from(
+                    schema.stage_executions.join(
+                        schema.work_items,
+                        schema.stage_executions.c.work_item_id
+                        == schema.work_items.c.work_item_id,
+                    ).join(
+                        schema.pipeline_runs,
+                        schema.work_items.c.origin_run_key
+                        == schema.pipeline_runs.c.run_key,
+                    )
+                )
+                .order_by(
+                    schema.pipeline_runs.c.pipeline_key,
+                    schema.stage_executions.c.rank,
+                )
+            ).tuples()
         )
 
 
@@ -290,6 +403,79 @@ def test_selector_capacity_only_constrains_matching_labels(
     assert counts == {"blue": 1, "red": 2}
 
 
+def test_paused_stage_cannot_starve_higher_rank_unpaused_stage(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _starvation_registry()
+    _submit_starvation_backlog(pg_engine, registry)
+    _pipeline_control(
+        pg_engine,
+        suffix="a",
+        capacity=5,
+        paused=True,
+    )
+    _pipeline_control(
+        pg_engine,
+        suffix="b",
+        capacity=1,
+        paused=False,
+    )
+    client = _RecordingClient()
+
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        batch_size=1,
+        clock=lambda: NOW,
+    )
+
+    assert summary.admitted_total == 1
+    assert client.enqueued[0][0]["queue_name"] == "queue-b"
+    assert _pipeline_states(pg_engine, schema) == (
+        [("pipeline-a", StageExecutionState.READY.value)] * 5
+        + [("pipeline-b", StageExecutionState.ADMITTED.value)]
+    )
+
+
+def test_capacity_full_stage_cannot_starve_higher_rank_stage_with_room(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _starvation_registry()
+    _submit_starvation_backlog(pg_engine, registry)
+    _pipeline_control(
+        pg_engine,
+        suffix="a",
+        capacity=0,
+        paused=False,
+    )
+    _pipeline_control(
+        pg_engine,
+        suffix="b",
+        capacity=1,
+        paused=False,
+    )
+    client = _RecordingClient()
+
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        batch_size=1,
+        clock=lambda: NOW,
+    )
+
+    assert summary.admitted_total == 1
+    assert summary.skipped_for_capacity == 1
+    assert client.enqueued[0][0]["queue_name"] == "queue-b"
+    assert _pipeline_states(pg_engine, schema) == (
+        [("pipeline-a", StageExecutionState.READY.value)] * 5
+        + [("pipeline-b", StageExecutionState.ADMITTED.value)]
+    )
+
+
 def test_args_for_receives_only_the_frozen_admission_payload(
     pg_engine: Engine,
 ) -> None:
@@ -382,7 +568,7 @@ def test_pause_keeps_matching_ready_until_resume(
         states_by_label = dict(rows.all())
 
     assert paused.admitted_total == 1
-    assert paused.skipped_for_pause == 1
+    assert paused.skipped_for_pause == 0
     assert states_by_label == {
         "blue": StageExecutionState.READY.value,
         "red": StageExecutionState.ADMITTED.value,

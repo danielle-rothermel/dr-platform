@@ -13,7 +13,16 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Connection, Engine, and_, func, select, tuple_
+from sqlalchemy import (
+    Connection,
+    Engine,
+    and_,
+    exists,
+    func,
+    or_,
+    select,
+    tuple_,
+)
 
 from dr_platform.staging.definitions import (
     StageDefinition,
@@ -39,6 +48,7 @@ if TYPE_CHECKING:
     from dr_platform.staging.registry import PipelineRegistry
 
 DEFAULT_ADMISSION_BATCH_SIZE = 100
+MAX_CAPACITY_SKIPS_PER_PASS = 10_000
 
 _StageIdentity = tuple[str, int, str]
 
@@ -92,6 +102,7 @@ class PipelineStageMismatchError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class _Candidate:
     stage_execution_id: int
+    rank: int
     stage_index: int
     campaign_key: str
     work_key: str
@@ -128,7 +139,9 @@ def run_admission_pass(  # noqa: PLR0913 -- explicit admission dependencies
     """Run one bounded admission pass and commit it as one transaction.
 
     A supplied connection must be idle; this function begins and owns its
-    transaction just as it does when supplied an engine.
+    transaction just as it does when supplied an engine.  One pass considers
+    at most ``batch_size + MAX_CAPACITY_SKIPS_PER_PASS`` SQL-selected rows;
+    full controls exclude their matching backlog from later keyset pages.
     """
     validate_positive_integer(batch_size, label="admission batch size")
     selected_schema = schema or StagingSchema()
@@ -162,100 +175,92 @@ def _admit_in_transaction(  # noqa: PLR0913 -- transaction dependencies
     clock: Callable[[], datetime],
     schema: StagingSchema,
 ) -> AdmissionSummary:
-    candidates = _lock_candidates(connection, schema=schema, limit=batch_size)
-    if not candidates:
-        return AdmissionSummary((), 0, 0)
-
-    controls = _lock_controls(
-        connection,
-        schema=schema,
-        identities={item.stage_identity for item in candidates},
-    )
-    controls_by_stage: dict[_StageIdentity, list[_Control]] = {}
-    for control in controls:
-        controls_by_stage.setdefault(control.stage_identity, []).append(
-            control
-        )
-    for identity in {item.stage_identity for item in candidates}:
-        if not any(
-            not control.selector
-            for control in controls_by_stage.get(identity, ())
-        ):
-            raise MissingStageControlError(
-                "stage has no empty-selector capacity control: "
-                f"{identity[0]!r} version {identity[1]} stage {identity[2]!r}"
-            )
-
-    occupancy = _load_occupancy(
-        connection,
-        schema=schema,
-        control_ids=tuple(control.control_id for control in controls),
-    )
     admitted: dict[_StageIdentity, int] = {}
     skipped_for_capacity = 0
     skipped_for_pause = 0
     admitted_at = clock()
+    admitted_total = 0
+    considered = 0
+    considered_limit = batch_size + MAX_CAPACITY_SKIPS_PER_PASS
+    after: tuple[int, int] | None = None
+    full_control_ids: set[int] = set()
 
-    for candidate in candidates:
-        matching = tuple(
-            control
-            for control in controls_by_stage[candidate.stage_identity]
-            if _selector_matches(control.selector, candidate.labels)
+    while admitted_total < batch_size and considered < considered_limit:
+        candidates = _lock_candidates(
+            connection,
+            schema=schema,
+            limit=min(
+                batch_size - admitted_total,
+                considered_limit - considered,
+            ),
+            after=after,
+            full_control_ids=full_control_ids,
         )
-        if any(control.paused for control in matching):
-            skipped_for_pause += 1
-            continue
-        if any(
-            occupancy[control.control_id] >= control.capacity
-            for control in matching
-        ):
-            skipped_for_capacity += 1
-            continue
+        if not candidates:
+            break
+        considered += len(candidates)
+        last_candidate = candidates[-1]
+        after = last_candidate.rank, last_candidate.stage_execution_id
 
-        stage = _registered_stage(candidate, registry=registry)
-        attempt = append_stage_attempt(
+        controls = _lock_controls(
             connection,
-            stage_execution_id=candidate.stage_execution_id,
-            created_at=admitted_at,
-            admitted_at=admitted_at,
             schema=schema,
+            identities={item.stage_identity for item in candidates},
         )
-        transition_stage_execution(
+        controls_by_stage: dict[_StageIdentity, list[_Control]] = {}
+        for control in controls:
+            controls_by_stage.setdefault(
+                control.stage_identity, []
+            ).append(control)
+        _validate_default_controls(
+            identities={item.stage_identity for item in candidates},
+            controls_by_stage=controls_by_stage,
+        )
+        occupancy = _load_occupancy(
             connection,
-            stage_execution_id=candidate.stage_execution_id,
-            new_state=StageExecutionState.ADMITTED,
-            updated_at=admitted_at,
             schema=schema,
+            control_ids=tuple(control.control_id for control in controls),
         )
-        payload = AdmissionPayload(
-            campaign_key=CampaignKey(candidate.campaign_key),
-            work_key=WorkKey(candidate.work_key),
-            run_key=RunKey(candidate.run_key),
-            input_ref=candidate.input_ref,
-            labels=candidate.labels,
-            pipeline_key=candidate.pipeline_key,
-            pipeline_version=candidate.pipeline_version,
-            stage_key=StageKey(candidate.stage_key),
-            attempt_number=attempt.attempt_number,
-        )
-        workflow_args = stage.args_for(payload)
-        if not isinstance(workflow_args, tuple):
-            raise TypeError("stage args_for must return a tuple")
-        options: EnqueueOptions = {
-            "workflow_name": _workflow_name(stage),
-            "queue_name": stage.queue_name,
-            "workflow_id": attempt.workflow_id,
-        }
-        client.enqueue_in_transaction(
-            connection,
-            options,
-            *workflow_args,
-        )
-        for control in matching:
-            occupancy[control.control_id] += 1
-        admitted[candidate.stage_identity] = (
-            admitted.get(candidate.stage_identity, 0) + 1
-        )
+
+        for candidate in candidates:
+            matching = tuple(
+                control
+                for control in controls_by_stage[candidate.stage_identity]
+                if _selector_matches(control.selector, candidate.labels)
+            )
+            if any(control.paused for control in matching):
+                skipped_for_pause += 1
+                continue
+            full = tuple(
+                control
+                for control in matching
+                if occupancy[control.control_id] >= control.capacity
+            )
+            if full:
+                skipped_for_capacity += 1
+                full_control_ids.update(
+                    control.control_id for control in full
+                )
+                continue
+
+            _admit_candidate(
+                connection,
+                candidate=candidate,
+                client=client,
+                registry=registry,
+                admitted_at=admitted_at,
+                schema=schema,
+            )
+            admitted_total += 1
+            admitted[candidate.stage_identity] = (
+                admitted.get(candidate.stage_identity, 0) + 1
+            )
+            for control in matching:
+                occupancy[control.control_id] += 1
+                if occupancy[control.control_id] >= control.capacity:
+                    full_control_ids.add(control.control_id)
+            if admitted_total >= batch_size:
+                break
 
     counts = tuple(
         StageAdmissionCount(
@@ -273,18 +278,84 @@ def _admit_in_transaction(  # noqa: PLR0913 -- transaction dependencies
     )
 
 
+def _admit_candidate(  # noqa: PLR0913 -- explicit admission facts
+    connection: Connection,
+    *,
+    candidate: _Candidate,
+    client: DBOSClient,
+    registry: PipelineRegistry,
+    admitted_at: datetime,
+    schema: StagingSchema,
+) -> None:
+    stage = _registered_stage(candidate, registry=registry)
+    attempt = append_stage_attempt(
+        connection,
+        stage_execution_id=candidate.stage_execution_id,
+        created_at=admitted_at,
+        admitted_at=admitted_at,
+        schema=schema,
+    )
+    transition_stage_execution(
+        connection,
+        stage_execution_id=candidate.stage_execution_id,
+        new_state=StageExecutionState.ADMITTED,
+        updated_at=admitted_at,
+        schema=schema,
+    )
+    payload = AdmissionPayload(
+        campaign_key=CampaignKey(candidate.campaign_key),
+        work_key=WorkKey(candidate.work_key),
+        run_key=RunKey(candidate.run_key),
+        input_ref=candidate.input_ref,
+        labels=candidate.labels,
+        pipeline_key=candidate.pipeline_key,
+        pipeline_version=candidate.pipeline_version,
+        stage_key=StageKey(candidate.stage_key),
+        attempt_number=attempt.attempt_number,
+    )
+    workflow_args = stage.args_for(payload)
+    if not isinstance(workflow_args, tuple):
+        raise TypeError("stage args_for must return a tuple")
+    options: EnqueueOptions = {
+        "workflow_name": _workflow_name(stage),
+        "queue_name": stage.queue_name,
+        "workflow_id": attempt.workflow_id,
+    }
+    client.enqueue_in_transaction(
+        connection,
+        options,
+        *workflow_args,
+    )
+
+
 def _lock_candidates(
     connection: Connection,
     *,
     schema: StagingSchema,
     limit: int,
+    after: tuple[int, int] | None,
+    full_control_ids: set[int],
 ) -> tuple[_Candidate, ...]:
     executions = schema.stage_executions
     work_items = schema.work_items
     runs = schema.pipeline_runs
+    controls = schema.stage_controls
+    paused = exists(
+        select(1)
+        .select_from(controls)
+        .where(
+            controls.c.pipeline_key == runs.c.pipeline_key,
+            controls.c.pipeline_version == runs.c.pipeline_version,
+            controls.c.stage_key == executions.c.stage_key,
+            controls.c.paused.is_(True),
+            work_items.c.labels.contains(controls.c.selector),
+        )
+        .correlate(executions, work_items, runs)
+    )
     statement = (
         select(
             executions.c.stage_execution_id,
+            executions.c.rank,
             executions.c.stage_index,
             work_items.c.campaign_key,
             work_items.c.work_key,
@@ -304,15 +375,60 @@ def _lock_candidates(
                 work_items.c.origin_run_key == runs.c.run_key,
             )
         )
-        .where(executions.c.state == StageExecutionState.READY.value)
+        .where(
+            executions.c.state == StageExecutionState.READY.value,
+            ~paused,
+        )
         .order_by(executions.c.rank, executions.c.stage_execution_id)
-        .limit(limit)
-        .with_for_update(of=executions, skip_locked=True)
+    )
+    if after is not None:
+        statement = statement.where(
+            or_(
+                executions.c.rank > after[0],
+                and_(
+                    executions.c.rank == after[0],
+                    executions.c.stage_execution_id > after[1],
+                ),
+            )
+        )
+    if full_control_ids:
+        at_capacity = exists(
+            select(1)
+            .select_from(controls)
+            .where(
+                controls.c.stage_control_id.in_(sorted(full_control_ids)),
+                controls.c.pipeline_key == runs.c.pipeline_key,
+                controls.c.pipeline_version == runs.c.pipeline_version,
+                controls.c.stage_key == executions.c.stage_key,
+                work_items.c.labels.contains(controls.c.selector),
+            )
+            .correlate(executions, work_items, runs)
+        )
+        statement = statement.where(~at_capacity)
+    statement = statement.limit(limit).with_for_update(
+        of=executions,
+        skip_locked=True,
     )
     return tuple(
         _decode_candidate(row)
         for row in connection.execute(statement).mappings()
     )
+
+
+def _validate_default_controls(
+    *,
+    identities: set[_StageIdentity],
+    controls_by_stage: dict[_StageIdentity, list[_Control]],
+) -> None:
+    for identity in identities:
+        if not any(
+            not control.selector
+            for control in controls_by_stage.get(identity, ())
+        ):
+            raise MissingStageControlError(
+                "stage has no empty-selector capacity control: "
+                f"{identity[0]!r} version {identity[1]} stage {identity[2]!r}"
+            )
 
 
 def _lock_controls(
@@ -428,6 +544,7 @@ def _workflow_name(stage: StageDefinition) -> str:
 def _decode_candidate(row: RowMapping) -> _Candidate:
     return _Candidate(
         stage_execution_id=row["stage_execution_id"],
+        rank=row["rank"],
         stage_index=row["stage_index"],
         campaign_key=row["campaign_key"],
         work_key=row["work_key"],
