@@ -63,6 +63,6 @@ Install the locked environment and run the repository checks:
 ```bash
 uv sync
 uv run ruff check .
-uv run pyright src/dr_platform tests scripts
+uv run ty check
 uv run pytest
 ```

@@ -9,7 +9,6 @@
 .mypy_cache/
 .pytest_cache/
 .pyre/
-.pyright/
 .venv/
 build/
 dist/

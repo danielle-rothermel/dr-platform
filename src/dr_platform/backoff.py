@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from dr_serialize import sha256_json_digest
 from sqlalchemy import update
@@ -338,7 +338,7 @@ def _validate_throttle_metadata(value: object) -> dict[str, Any]:
             "throttle metadata must be a mapping with string keys"
         )
     validate_payload_size(value, label="throttle metadata")
-    return dict(value)
+    return dict(cast("dict[str, Any]", value))
 
 
 def _validate_non_empty_string(value: object, *, label: str) -> str:
@@ -354,7 +354,7 @@ def _validate_throttle_tags(value: object) -> dict[str, str]:
     ):
         raise ValueError("throttle tags must map strings to strings")
     validate_payload_size(value, label="throttle tags")
-    return dict(value)
+    return dict(cast("dict[str, str]", value))
 
 
 def _decode_throttle_state(row: RowMapping) -> ThrottleState:

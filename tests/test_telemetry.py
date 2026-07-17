@@ -10,8 +10,8 @@ from dr_platform.telemetry import initialize_telemetry_safely
 
 def _config(*, enable_otlp: bool = True) -> PlatformDbosConfig:
     return PlatformDbosConfig(
-        database_url="postgresql+psycopg://app",
-        system_database_url="postgresql+psycopg://system",
+        database_url="postgresql+psycopg://app/platform",
+        system_database_url="postgresql+psycopg://app/platform",
         enable_otlp=enable_otlp,
     )
 

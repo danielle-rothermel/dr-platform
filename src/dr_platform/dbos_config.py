@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Self
 
 from dbos import DBOS, DBOSConfig
 from dbos._dbos_config import (
@@ -24,7 +24,14 @@ from dbos._error import (
     DBOSWorkflowConflictIDError,
 )
 from dbos._tracer import dbos_tracer
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    StrictBool,
+    StrictStr,
+    model_validator,
+)
+from sqlalchemy.engine import make_url
 
 from dr_platform.telemetry import (
     TelemetryInitializationResult,
@@ -95,13 +102,70 @@ class PlatformDbosConfig(BaseModel):
     registers queues on its own.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        hide_input_in_errors=True,
+    )
 
     database_url: StrictStr
     system_database_url: StrictStr
     enable_otlp: StrictBool = False
     otlp_traces_endpoints: tuple[StrictStr, ...] = ()
     otel_attribute_format: Literal["semconv"] = "semconv"
+
+    @model_validator(mode="after")
+    def validate_database_colocation(self) -> Self:
+        validate_database_colocation(
+            database_url=self.database_url,
+            system_database_url=self.system_database_url,
+        )
+        return self
+
+
+def validate_database_colocation(
+    *,
+    database_url: str,
+    system_database_url: str,
+) -> None:
+    if _database_identity(database_url) == _database_identity(
+        system_database_url
+    ):
+        return
+
+    redacted_database_url = _redact_database_url(database_url)
+    redacted_system_database_url = _redact_database_url(system_database_url)
+    raise ValueError(
+        "Platform and DBOS system databases must be colocated; "
+        f"platform database URL={redacted_database_url}, "
+        f"DBOS system database URL={redacted_system_database_url}"
+    )
+
+
+def _database_identity(
+    database_url: str,
+) -> tuple[str | None, int | None, str | None]:
+    url = make_url(normalize_postgresql_driver_url(database_url))
+    if url.get_backend_name() in {"postgres", "postgresql"} and {
+        "host",
+        "port",
+    }.intersection(url.query):
+        raise ValueError(
+            "PostgreSQL database URLs must not use host or port query "
+            "parameters"
+        )
+    host = url.host.casefold() if url.host is not None else None
+    port = url.port
+    if url.get_backend_name() in {"postgres", "postgresql"} and port is None:
+        port = 5432
+    return host, port, url.database
+
+
+def _redact_database_url(database_url: str) -> str:
+    url = make_url(database_url)
+    return url.difference_update_query(url.query).render_as_string(
+        hide_password=True
+    )
 
 
 def resolve_database_url(
