@@ -104,6 +104,28 @@ class BulkStatusResult:
     statuses: Mapping[WorkKey, BulkWorkStatus]
 
 
+def inspect_campaign(
+    campaign_key: CampaignKey | str,
+    *,
+    engine: Engine,
+    schema: StagingSchema | None = None,
+) -> CampaignSummary:
+    """Return one campaign's stable identity and aggregate counts."""
+    selected_schema = schema or StagingSchema()
+    normalized_campaign = _campaign_key(campaign_key)
+    statement = _campaign_summary_statement(selected_schema)
+    with engine.connect() as connection:
+        row = connection.execute(
+            statement.where(
+                statement.selected_columns.campaign_key
+                == normalized_campaign.value
+            )
+        ).mappings().one_or_none()
+    if row is None:
+        raise ValueError(f"campaign is unknown: {normalized_campaign.value}")
+    return _decode_campaign_summary(row)
+
+
 def list_campaigns(
     *,
     engine: Engine,
@@ -114,44 +136,8 @@ def list_campaigns(
     """Return a keyset page ordered by stable campaign identity."""
     _validate_limit(limit)
     selected_schema = schema or StagingSchema()
-    runs = selected_schema.pipeline_runs
-    items = selected_schema.work_items
     normalized_cursor = _campaign_key(cursor) if cursor is not None else None
-    run_agg = (
-        select(
-            runs.c.campaign_key,
-            func.min(runs.c.created_at).label("created_at"),
-            func.count().label("run_count"),
-        )
-        .group_by(runs.c.campaign_key)
-        .subquery()
-    )
-    item_agg = (
-        select(
-            items.c.campaign_key,
-            func.count().label("work_item_count"),
-        )
-        .group_by(items.c.campaign_key)
-        .subquery()
-    )
-    statement = (
-        select(
-            run_agg.c.campaign_key,
-            run_agg.c.created_at,
-            run_agg.c.run_count,
-            func.coalesce(item_agg.c.work_item_count, 0).label(
-                "work_item_count"
-            ),
-        )
-        .select_from(
-            run_agg.outerjoin(
-                item_agg,
-                run_agg.c.campaign_key == item_agg.c.campaign_key,
-            )
-        )
-        .order_by(run_agg.c.campaign_key)
-        .limit(limit)
-    )
+    statement = _campaign_summary_statement(selected_schema).limit(limit)
     with engine.connect() as connection:
         if normalized_cursor is not None:
             _require_campaign(
@@ -160,15 +146,11 @@ def list_campaigns(
                 schema=selected_schema,
             )
             statement = statement.where(
-                run_agg.c.campaign_key > normalized_cursor.value
+                statement.selected_columns.campaign_key
+                > normalized_cursor.value
             )
         return tuple(
-            CampaignSummary(
-                campaign_key=CampaignKey(row["campaign_key"]),
-                created_at=row["created_at"],
-                run_count=row["run_count"],
-                work_item_count=row["work_item_count"],
-            )
+            _decode_campaign_summary(row)
             for row in connection.execute(statement).mappings()
         )
 
@@ -533,6 +515,54 @@ def _current_stage_indexes(schema: StagingSchema):
         )
         .group_by(executions.c.work_item_id)
         .subquery()
+    )
+
+
+def _campaign_summary_statement(schema: StagingSchema):
+    runs = schema.pipeline_runs
+    items = schema.work_items
+    run_agg = (
+        select(
+            runs.c.campaign_key,
+            func.min(runs.c.created_at).label("created_at"),
+            func.count().label("run_count"),
+        )
+        .group_by(runs.c.campaign_key)
+        .subquery()
+    )
+    item_agg = (
+        select(
+            items.c.campaign_key,
+            func.count().label("work_item_count"),
+        )
+        .group_by(items.c.campaign_key)
+        .subquery()
+    )
+    return (
+        select(
+            run_agg.c.campaign_key,
+            run_agg.c.created_at,
+            run_agg.c.run_count,
+            func.coalesce(item_agg.c.work_item_count, 0).label(
+                "work_item_count"
+            ),
+        )
+        .select_from(
+            run_agg.outerjoin(
+                item_agg,
+                run_agg.c.campaign_key == item_agg.c.campaign_key,
+            )
+        )
+        .order_by(run_agg.c.campaign_key)
+    )
+
+
+def _decode_campaign_summary(row: RowMapping) -> CampaignSummary:
+    return CampaignSummary(
+        campaign_key=CampaignKey(row["campaign_key"]),
+        created_at=row["created_at"],
+        run_count=row["run_count"],
+        work_item_count=row["work_item_count"],
     )
 
 

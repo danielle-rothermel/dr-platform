@@ -1,0 +1,210 @@
+"""Exit evidence for the staged-work root contract."""
+
+from __future__ import annotations
+
+import time
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from dbos import DBOS, DBOSConfig, Queue
+from sqlalchemy import Engine
+
+import dr_platform
+from dr_platform import (
+    AdmissionPayload,
+    PipelineDefinition,
+    PipelineRegistry,
+    PlatformDbosConfig,
+    StageDefinition,
+    StageExecutionState,
+    WorkInput,
+    bulk_work_statuses,
+    inspect_campaign,
+    register_scheduled_dispatcher,
+    set_stage_capacity,
+    submit,
+    upgrade_platform_schema,
+    wrap_pipeline_workflows,
+)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _wait_until_stage_finished(
+    campaign_key: str,
+    work_keys: tuple[str, ...],
+    *,
+    stage_index: int,
+    terminal_stage: bool,
+    engine: Engine,
+) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        statuses = bulk_work_statuses(
+            campaign_key,
+            work_keys,
+            engine=engine,
+        ).statuses.values()
+        if all(
+            (
+                status.current_stage_index is not None
+                and status.current_stage_index > stage_index
+            )
+            or (
+                terminal_stage
+                and status.state is StageExecutionState.SUCCEEDED
+            )
+            for status in statuses
+        ):
+            return
+        time.sleep(0.02)
+    raise AssertionError("timed out waiting for the public staged-work flow")
+
+
+def test_root_contract_defines_submits_executes_and_inspects(
+    clean_pg: str,
+    pg_engine: Engine,
+) -> None:
+    legacy_names = {
+        "AttemptRecord",
+        "EnqueueClaimRecord",
+        "JsonlFieldNames",
+        "OperationRecord",
+        "ServiceClass",
+        "cancel_operation",
+        "reconcile",
+        "request_next_attempt",
+        "submit_jsonl",
+    }
+    assert legacy_names.isdisjoint(dr_platform.__all__)
+
+    upgrade_platform_schema(clean_pg)
+    suffix = uuid4().hex[:10]
+    campaign_key = f"campaign-{suffix}"
+    work_keys = ("work-a", "work-b")
+
+    def args_for(payload: AdmissionPayload) -> tuple[object, ...]:
+        return (payload.input_ref,)
+
+    def prepare(input_ref: str) -> str:
+        return f"prepared:{input_ref}"
+
+    def execute(input_ref: str) -> str:
+        return f"executed:{input_ref}"
+
+    def score(input_ref: str) -> str:
+        return f"scored:{input_ref}"
+
+    declared = PipelineDefinition(
+        key=f"public-contract-{suffix}",
+        version=1,
+        stages=(
+            StageDefinition(
+                key="prepare",
+                queue_name=f"prepare-{suffix}",
+                workflow=prepare,
+                args_for=args_for,
+            ),
+            StageDefinition(
+                key="execute",
+                queue_name=f"execute-{suffix}",
+                workflow=execute,
+                args_for=args_for,
+            ),
+            StageDefinition(
+                key="score",
+                queue_name=f"score-{suffix}",
+                workflow=score,
+                args_for=args_for,
+            ),
+        ),
+    )
+    pipeline = wrap_pipeline_workflows(declared)
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    for stage in pipeline.stages:
+        Queue(stage.queue_name, polling_interval_sec=0.02)
+        set_stage_capacity(
+            pipeline=pipeline.identity,
+            stage_key=stage.key,
+            capacity=2,
+            engine=pg_engine,
+        )
+
+    yielded: list[str] = []
+
+    def items():
+        for work_key in work_keys:
+            yielded.append(work_key)
+            yield WorkInput(
+                work_key=work_key,
+                input_ref=f"input:{work_key}",
+                labels={"kind": "neutral"},
+            )
+
+    receipt = submit(
+        campaign_key=campaign_key,
+        run_key=f"run-{suffix}",
+        pipeline=pipeline.identity,
+        config_ref="config:public-contract",
+        items=items(),
+        registry=registry,
+        engine=pg_engine,
+        chunk_size=1,
+    )
+    assert yielded == list(work_keys)
+    assert receipt.inserted_count == 2
+
+    runtime_config: DBOSConfig = {
+        "name": f"drp-public-{suffix}",
+        "system_database_url": clean_pg,
+        "application_database_url": clean_pg,
+        "application_version": f"public-{suffix}",
+        "run_admin_server": False,
+        "use_listen_notify": False,
+        "notification_listener_polling_interval_sec": 0.01,
+    }
+    platform_config = PlatformDbosConfig(
+        database_url=clean_pg,
+        system_database_url=clean_pg,
+    )
+    registration = None
+    try:
+        DBOS(config=runtime_config)
+        registration = register_scheduled_dispatcher(
+            config=platform_config,
+            engine=pg_engine,
+            registry=registry,
+        )
+        DBOS.launch()
+        last_stage_index = len(pipeline.stages) - 1
+        for stage_index in range(len(pipeline.stages)):
+            registration.workflow(_utc_now(), _utc_now())
+            _wait_until_stage_finished(
+                campaign_key,
+                work_keys,
+                stage_index=stage_index,
+                terminal_stage=stage_index == last_stage_index,
+                engine=pg_engine,
+            )
+
+        campaign = inspect_campaign(campaign_key, engine=pg_engine)
+        statuses = bulk_work_statuses(
+            campaign_key,
+            work_keys,
+            engine=pg_engine,
+        )
+        assert campaign.run_count == 1
+        assert campaign.work_item_count == 2
+        assert all(
+            status.present
+            and str(status.current_stage_key) == "score"
+            and status.state is StageExecutionState.SUCCEEDED
+            for status in statuses.statuses.values()
+        )
+    finally:
+        if registration is not None:
+            registration.close()
+        DBOS.destroy(destroy_registry=True)
