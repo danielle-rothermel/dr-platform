@@ -27,26 +27,6 @@ def test_private_dbos_config_processing_seam() -> None:
     assert telemetry.get("disable_otlp") is True
 
 
-def test_private_dbos_error_seam() -> None:
-    from dbos._error import (
-        DBOSConflictingWorkflowError,
-        DBOSQueueDeduplicatedError,
-        DBOSWorkflowConflictIDError,
-    )
-
-    errors = (
-        DBOSConflictingWorkflowError("workflow-id"),
-        DBOSQueueDeduplicatedError(
-            "workflow-id",
-            "queue-name",
-            "deduplication-id",
-        ),
-        DBOSWorkflowConflictIDError("workflow-id"),
-    )
-
-    assert all(isinstance(error, BaseException) for error in errors)
-
-
 def test_private_dbos_tracer_seam() -> None:
     from dbos._dbos_config import (
         process_config,

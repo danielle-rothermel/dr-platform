@@ -232,6 +232,10 @@ recovery-exhausted workflows that remain platform-ADMITTED into terminal
 platform state. The sweep does not retry or wait. Use `retry_stage` explicitly
 for FAILED stages.
 
+An application obtains a `WorkflowCanceller` by constructing a `DBOSClient`
+against `PlatformDbosConfig.system_database_url`, the colocated system
+database URL.
+
 `cancel_work` makes platform state terminal before delegating cancellation of
 the exact admitted DBOS workflow. READY work has no workflow to delegate;
 already-terminal cancellation is an idempotent no-op. Cancellation is

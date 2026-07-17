@@ -1,4 +1,4 @@
-"""PostgreSQL guarantees for the staged replacement persistence model."""
+"""PostgreSQL guarantees for the staged-work persistence model."""
 
 from __future__ import annotations
 
@@ -10,7 +10,11 @@ import pytest
 from sqlalchemy import Connection, Engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
-from dr_platform.db.migrate import upgrade_platform_schema
+from dr_platform.db.migrate import (
+    PLATFORM_BASELINE_REVISION,
+    PLATFORM_HEAD_REVISION,
+    upgrade_platform_schema,
+)
 from dr_platform.staging.runs import (
     PipelineRunConflictError,
     insert_pipeline_run,
@@ -33,17 +37,6 @@ from tests.conftest import engine_dsn
 if TYPE_CHECKING:
     from dr_platform.staging.records import StageExecutionRecord
 
-LEGACY_TABLES = {
-    "platform_operations",
-    "platform_throttle_state",
-    "platform_items",
-    "platform_item_attempts",
-    "platform_enqueue_claims",
-    "platform_missing_reobservations",
-    "platform_next_attempt_requests",
-    "platform_enqueue_compensations",
-    "platform_enqueue_compensation_hazards",
-}
 STAGING_TABLES = {
     "platform_pipeline_runs",
     "platform_work_items",
@@ -87,14 +80,23 @@ def _create_stage_execution(
     )
 
 
-def test_staging_migration_applies_after_the_legacy_chain(
+def test_fresh_baseline_creates_only_the_staged_work_schema(
     pg_engine: Engine,
 ) -> None:
     _migrate(pg_engine)
 
     tables = set(inspect(pg_engine).get_table_names())
+    with pg_engine.connect() as connection:
+        installed_revision = connection.execute(
+            text(
+                "SELECT version_num FROM "
+                "platform_platform_alembic_version"
+            )
+        ).scalar_one()
 
-    assert tables >= LEGACY_TABLES | STAGING_TABLES
+    assert PLATFORM_BASELINE_REVISION == PLATFORM_HEAD_REVISION
+    assert installed_revision == PLATFORM_HEAD_REVISION
+    assert tables == STAGING_TABLES | {"platform_platform_alembic_version"}
 
 
 def test_campaign_work_identity_is_unique(pg_engine: Engine) -> None:

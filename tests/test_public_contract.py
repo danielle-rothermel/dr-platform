@@ -9,7 +9,6 @@ from uuid import uuid4
 from dbos import DBOS, DBOSConfig, Queue
 from sqlalchemy import Engine
 
-import dr_platform
 from dr_platform import (
     AdmissionPayload,
     PipelineDefinition,
@@ -69,19 +68,6 @@ def test_root_contract_defines_submits_executes_and_inspects(
     clean_pg: str,
     pg_engine: Engine,
 ) -> None:
-    legacy_names = {
-        "AttemptRecord",
-        "EnqueueClaimRecord",
-        "JsonlFieldNames",
-        "OperationRecord",
-        "ServiceClass",
-        "cancel_operation",
-        "reconcile",
-        "request_next_attempt",
-        "submit_jsonl",
-    }
-    assert legacy_names.isdisjoint(dr_platform.__all__)
-
     upgrade_platform_schema(clean_pg)
     suffix = uuid4().hex[:10]
     campaign_key = f"campaign-{suffix}"

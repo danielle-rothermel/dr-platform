@@ -582,7 +582,7 @@
   <article class="finding" id="f15">
     <div class="finding-head">
       <h3>F15 · Enqueue uncertainty recovery persists three ledgers and a compensation state machine</h3>
-      <span class="severity decision">Decision required</span>
+      <span class="severity decision">Resolved · simplify</span>
     </div>
     <p>
       The kernel records claims before DBOS calls, separately records call start and outcome, recovers expired call-started
@@ -596,18 +596,19 @@
       schema tables include <code>enqueue_claims</code>, <code>enqueue_compensations</code>, and
       <code>enqueue_compensation_hazards</code>.
     </div>
-    <p class="remove"><strong>Question to resolve:</strong> is exactly-once-ish recovery across a crash between DBOS enqueue and
-      local outcome persistence a core promise? If not, a simpler idempotent DBOS workflow ID plus retry policy can replace much
-      of this protocol. If yes, keep it and stop describing its checks as incidental defense.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending future decision</div><ul class="checklist">
-      <li>Decide whether lost-outcome recovery is a core promise.</li><li>Keep or remove ledgers consistently with that decision.</li>
+    <p class="remove"><strong>Resolution:</strong> Resolved 2026-07-17 by the staged-work rebuild
+      (<a href="platform-rebuild-implementation-guide.html">platform-rebuild-implementation-guide.html</a>), taking the simplify
+      branch. Transactional enqueue through <code>DBOSClient.enqueue_in_transaction</code> removes the dual-write window, so
+      exactly-once-ish enqueue recovery is not a core promise.</p>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 9</div><ul class="checklist">
+      <li class="done">Remove the enqueue-recovery ledgers and their state machine.</li><li class="done">Use transactional enqueue at the admission boundary.</li>
     </ul></div>
   </article>
 
   <article class="finding" id="f16">
     <div class="finding-head">
       <h3>F16 · Missing-workflow hysteresis and cancellation cuts expand ordinary retry/cancel semantics</h3>
-      <span class="severity decision">Decision required</span>
+      <span class="severity decision">Resolved · simplify</span>
     </div>
     <p>
       Missing DBOS rows are not treated as simple absence. The package persists repeated observations and grace periods,
@@ -620,10 +621,12 @@
       <a href="src/dr_platform/cut.py">cut.py:20–100</a> adds externally pinned cut comparison;
       the schema persists <code>missing_reobservations</code> and <code>next_attempt_requests</code>.
     </div>
-    <p class="remove"><strong>Question to resolve:</strong> which ambiguous/missing states have actually occurred and must be
-      durable? Remove speculative states and their ledgers; retain only recurrence-backed recovery behavior.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending future decision</div><ul class="checklist">
-      <li>Identify recurrence-backed ambiguous states.</li><li>Remove speculative recovery states and tests.</li>
+    <p class="remove"><strong>Resolution:</strong> Resolved 2026-07-17 by the staged-work rebuild
+      (<a href="platform-rebuild-implementation-guide.html">platform-rebuild-implementation-guide.html</a>), taking the simplify
+      branch. Cuts, missing-workflow hysteresis, and the throttle ledger are deleted; DBOS owns recovery, and the lazy sweep
+      projects only what DBOS abandons.</p>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 9</div><ul class="checklist">
+      <li class="done">Delete speculative cuts, hysteresis, and throttle state.</li><li class="done">Retain only lazy projection of DBOS-abandoned work.</li>
     </ul></div>
   </article>
 
@@ -701,7 +704,7 @@
   <article class="finding" id="f20">
     <div class="finding-head">
       <h3>F20 · Fixed batch scheduling policy prevents neutral reuse</h3>
-      <span class="severity high">High · redesign</span>
+      <span class="severity decision">Resolved · simplify</span>
     </div>
     <p>
       Every item must choose one of <code>urgent</code>, <code>standard</code>, or <code>backfill</code>; each maps to a fixed numeric
@@ -715,17 +718,18 @@
       <a href="src/dr_platform/enqueue_runtime.py">enqueue_runtime.py:281–299</a> rejects non-priority queues;
       migration checks pin the same values and numbers.
     </div>
-    <p class="remove"><strong>Standalone direction:</strong> accept a caller-supplied priority or make scheduling policy an
-      optional adapter. Do not persist downstream class names as universal package vocabulary.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending future decision</div><ul class="checklist">
-      <li>Choose caller-owned priority or an optional scheduling adapter.</li><li>Remove fixed downstream classes from the core.</li>
+    <p class="remove"><strong>Resolution:</strong> Resolved 2026-07-17 by the staged-work rebuild
+      (<a href="platform-rebuild-implementation-guide.html">platform-rebuild-implementation-guide.html</a>), taking the simplify
+      branch. Fixed service classes are deleted in favor of neutral stable random rank plus capacity and selector controls.</p>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 9</div><ul class="checklist">
+      <li class="done">Delete fixed service classes and priorities.</li><li class="done">Use stable rank with explicit capacity and selector controls.</li>
     </ul></div>
   </article>
 
   <article class="finding" id="f21">
     <div class="finding-head">
       <h3>F21 · The package describes and shapes itself around large sweeps</h3>
-      <span class="severity high">High · narrow or generalize</span>
+      <span class="severity decision">Resolved · simplify</span>
     </div>
     <p>
       Project metadata explicitly says “running large sweeps.” The core contract assumes operations contain ordered item sets,
@@ -737,10 +741,12 @@
       <a href="README.md">README.md:3–18</a> presents the operation/item/attempt pipeline;
       manifests, submission, JSONL, schema, and inspection all make the collection model structural.
     </div>
-    <p class="remove"><strong>Decision:</strong> either embrace a focused batch-execution package and stop claiming broad reuse,
-      or remove group/page/manifest/aggregate concepts from the core. A rename in documentation alone will not generalize the API.</p>
-    <div class="progress"><div class="progress-title">Implementation status · Pending future decision</div><ul class="checklist">
-      <li>Choose the package's durable product boundary.</li><li>Align metadata, API, schema, and documentation to that boundary.</li>
+    <p class="remove"><strong>Resolution:</strong> Resolved 2026-07-17 by the staged-work rebuild
+      (<a href="platform-rebuild-implementation-guide.html">platform-rebuild-implementation-guide.html</a>), taking the simplify
+      branch. The package is collection-model-neutral: submission streams opaque keyed work, with no manifests, pages, or JSONL
+      in core.</p>
+    <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 9</div><ul class="checklist">
+      <li class="done">Remove collection shape from the persistence and public contracts.</li><li class="done">Keep streaming submission of opaque keyed work.</li>
     </ul></div>
   </article>
 

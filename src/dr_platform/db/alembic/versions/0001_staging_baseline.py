@@ -1,7 +1,7 @@
-"""Add the staged replacement persistence tables.
+"""Create the staged-work persistence baseline.
 
-Revision ID: 0005_staging_persistence
-Revises: 0004_package_owned_registration
+Revision ID: 0001_staging_baseline
+Revises: None
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 from alembic import context, op
 from sqlalchemy.dialects import postgresql
 
-revision = "0005_staging_persistence"
-down_revision = "0004_package_owned_registration"
+revision = "0001_staging_baseline"
+down_revision = None
 branch_labels = None
 depends_on = None
 

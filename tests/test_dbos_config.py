@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from dr_platform import dbos_config
-from dr_platform.dbos_config import workflow_start_raced
-
-WORKFLOW_ID = "execute:item-1"
 
 
 def test_resolve_database_url_prefers_explicit_arg(
@@ -220,31 +215,3 @@ def test_resolve_database_url_leaves_non_postgresql_urls_unchanged() -> None:
 def test_resolve_database_url_leaves_psycopg_driver_suffix_unchanged() -> None:
     url = "postgresql+psycopg://user:pass@localhost/db"
     assert dbos_config.resolve_database_url(url) == url
-
-
-def test_workflow_start_raced_returns_false_without_status() -> None:
-    with patch(
-        "dr_platform.dbos_config.DBOS.get_workflow_status",
-        return_value=None,
-    ):
-        assert (
-            workflow_start_raced(
-                workflow_id=WORKFLOW_ID,
-                error=ValueError("connection refused"),
-            )
-            is False
-        )
-
-
-def test_workflow_start_raced_returns_true_when_status_exists() -> None:
-    with patch(
-        "dr_platform.dbos_config.DBOS.get_workflow_status",
-        return_value={"status": "ENQUEUED"},
-    ):
-        assert (
-            workflow_start_raced(
-                workflow_id=WORKFLOW_ID,
-                error=ValueError("race lost"),
-            )
-            is True
-        )

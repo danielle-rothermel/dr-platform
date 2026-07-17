@@ -25,6 +25,7 @@ from dr_platform.staging.inspection import (
     bulk_work_statuses,
     campaign_state_counts,
     get_work_item_stages,
+    inspect_campaign,
     list_campaigns,
     list_runs,
     list_work_items,
@@ -313,6 +314,15 @@ def test_list_campaigns_counts_runs_and_items_independently(
     assert campaign.created_at == NOW
     assert campaign.run_count == 2
     assert campaign.work_item_count == 5
+
+
+def test_inspect_campaign_rejects_an_unknown_campaign(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(ValueError, match="campaign is unknown: absent"):
+        inspect_campaign("absent", engine=pg_engine)
 
 
 def test_six_seed_top_up_uses_bulk_statuses_for_one_campaign(

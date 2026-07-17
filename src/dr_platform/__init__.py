@@ -61,6 +61,7 @@ from dr_platform.staging.operations import (
     set_selector_capacity,
     set_stage_capacity,
 )
+from dr_platform.staging.records import StageAttemptRecord
 from dr_platform.staging.registry import (
     PipelineConflictError,
     PipelineRegistry,
@@ -102,6 +103,7 @@ __all__ = [
     "PlatformDbosConfig",
     "RunKey",
     "RunSummary",
+    "StageAttemptRecord",
     "StageDefinition",
     "StageExecutionState",
     "StageExecutionSummary",
