@@ -351,6 +351,7 @@ def test_stage_capacity_uses_stable_rank_and_terminal_releases_slot(
             stage_execution_id=states[0][0],
             new_state=StageExecutionState.SUCCEEDED,
             updated_at=NOW + timedelta(seconds=1),
+            output_reference="output:released-slot",
         )
     second = run_admission_pass(
         pg_engine,

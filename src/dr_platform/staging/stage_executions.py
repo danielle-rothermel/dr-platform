@@ -45,6 +45,9 @@ class StageTransitionError(RuntimeError):
     """The requested logical state transition is not valid."""
 
 
+_OUTPUT_REFERENCE_UNSET = object()
+
+
 def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
     connection: Connection,
     *,
@@ -172,13 +175,26 @@ def transition_stage_execution(  # noqa: PLR0913 -- explicit transition facts
     stage_execution_id: int,
     new_state: StageExecutionState,
     updated_at: datetime,
-    output_reference: str | None = None,
+    output_reference: str | object = _OUTPUT_REFERENCE_UNSET,
     schema: StagingSchema | None = None,
 ) -> StageExecutionRecord:
-    """Apply one validated logical state transition under a row lock."""
+    """Apply one validated logical state transition under a row lock.
+
+    A successful transition requires its application-owned output reference.
+    Other transitions reject that argument and preserve any stored value.
+    """
     selected_schema = schema or StagingSchema()
     if not isinstance(new_state, StageExecutionState):
         raise TypeError("new state must be a StageExecutionState")
+    if new_state is StageExecutionState.SUCCEEDED:
+        if not isinstance(output_reference, str) or not output_reference:
+            raise ValueError(
+                "a SUCCEEDED transition requires a non-empty output reference"
+            )
+    elif output_reference is not _OUTPUT_REFERENCE_UNSET:
+        raise ValueError(
+            "output reference is only valid for a SUCCEEDED transition"
+        )
     table = selected_schema.stage_executions
     row = (
         connection.execute(
@@ -200,15 +216,17 @@ def transition_stage_execution(  # noqa: PLR0913 -- explicit transition facts
         raise StageTransitionError(
             f"invalid stage transition: {current.name} -> {new_state.name}"
         )
+    values: dict[str, object] = {
+        "state": new_state.value,
+        "updated_at": updated_at,
+    }
+    if new_state is StageExecutionState.SUCCEEDED:
+        values["output_reference"] = output_reference
     updated_row = (
         connection.execute(
             update(table)
             .where(table.c.stage_execution_id == stage_execution_id)
-            .values(
-                state=new_state.value,
-                output_reference=output_reference,
-                updated_at=updated_at,
-            )
+            .values(**values)
             .returning(*table.c)
         )
         .mappings()
