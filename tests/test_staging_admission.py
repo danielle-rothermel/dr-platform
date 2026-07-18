@@ -18,6 +18,7 @@ from dr_platform.staging import (
     CampaignKey,
     CampaignWorkIdentity,
     PipelineDefinition,
+    PipelineKey,
     PipelineRegistry,
     RunKey,
     StageDefinition,
@@ -61,11 +62,11 @@ def _registry() -> PipelineRegistry:
     registry = PipelineRegistry()
     registry.register(
         PipelineDefinition(
-            key="evaluation",
+            key=PipelineKey("evaluation"),
             version=1,
             stages=(
                 StageDefinition(
-                    key="execute",
+                    key=StageKey("execute"),
                     queue_name="execute-queue",
                     workflow=_workflow,
                     args_for=_args_for,
@@ -89,7 +90,7 @@ def _submit(
     submit(
         campaign_key="campaign-1",
         run_key="run-1",
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         config_ref="config:1",
         items=(
             WorkInput(
@@ -130,11 +131,11 @@ def _starvation_registry() -> PipelineRegistry:
     for suffix in ("a", "b"):
         registry.register(
             PipelineDefinition(
-                key=f"pipeline-{suffix}",
+                key=PipelineKey(f"pipeline-{suffix}"),
                 version=1,
                 stages=(
                     StageDefinition(
-                        key=f"stage-{suffix}",
+                        key=StageKey(f"stage-{suffix}"),
                         queue_name=f"queue-{suffix}",
                         workflow=_workflow,
                         args_for=_args_for,
@@ -153,13 +154,15 @@ def _submit_starvation_backlog(
     ranked_keys = sorted(
         (f"work-{index}" for index in range(64)),
         key=lambda work_key: stable_random_rank(
-            work_identity=CampaignWorkIdentity(campaign_key, work_key)
+            work_identity=CampaignWorkIdentity(
+                CampaignKey(campaign_key), WorkKey(work_key)
+            )
         ),
     )
     submit(
         campaign_key=campaign_key,
         run_key="run-a",
-        pipeline=("pipeline-a", 1),
+        pipeline=(PipelineKey("pipeline-a"), 1),
         config_ref="config:a",
         items=(
             WorkInput(work_key=work_key, input_ref=work_key, labels={})
@@ -172,7 +175,7 @@ def _submit_starvation_backlog(
     submit(
         campaign_key=campaign_key,
         run_key="run-b",
-        pipeline=("pipeline-b", 1),
+        pipeline=(PipelineKey("pipeline-b"), 1),
         config_ref="config:b",
         items=(
             WorkInput(
@@ -489,11 +492,11 @@ def test_args_for_receives_only_the_frozen_admission_payload(
     registry = PipelineRegistry()
     registry.register(
         PipelineDefinition(
-            key="evaluation",
+            key=PipelineKey("evaluation"),
             version=1,
             stages=(
                 StageDefinition(
-                    key="execute",
+                    key=StageKey("execute"),
                     queue_name="execute-queue",
                     workflow=_workflow,
                     args_for=args_for,
@@ -605,10 +608,12 @@ def test_enqueue_failure_rolls_back_platform_and_dbos_rows(
     _launch_dbos_schema(clean_pg)
     client = DBOSClient(system_database_url=clean_pg)
     workflow_id = stage_workflow_id(
-        work_identity=CampaignWorkIdentity("campaign-1", "work-0"),
-        pipeline_key="evaluation",
+        work_identity=CampaignWorkIdentity(
+            CampaignKey("campaign-1"), WorkKey("work-0")
+        ),
+        pipeline_key=PipelineKey("evaluation"),
         pipeline_version=1,
-        stage_key="execute",
+        stage_key=StageKey("execute"),
         attempt_number=1,
     )
     client.delete_workflow(workflow_id)
@@ -684,10 +689,12 @@ def test_real_dbos_client_enqueues_exactly_one_deterministic_workflow(
     _launch_dbos_schema(clean_pg)
     client = DBOSClient(system_database_url=clean_pg)
     workflow_id = stage_workflow_id(
-        work_identity=CampaignWorkIdentity("campaign-1", "work-0"),
-        pipeline_key="evaluation",
+        work_identity=CampaignWorkIdentity(
+            CampaignKey("campaign-1"), WorkKey("work-0")
+        ),
+        pipeline_key=PipelineKey("evaluation"),
         pipeline_version=1,
-        stage_key="execute",
+        stage_key=StageKey("execute"),
         attempt_number=1,
     )
     client.delete_workflow(workflow_id)

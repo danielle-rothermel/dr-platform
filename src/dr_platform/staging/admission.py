@@ -30,6 +30,7 @@ from dr_platform.staging.definitions import (
 )
 from dr_platform.staging.identities import (
     CampaignKey,
+    PipelineKey,
     RunKey,
     StageKey,
     WorkKey,
@@ -512,7 +513,7 @@ def _registered_stage(
     registry: PipelineRegistry,
 ) -> StageDefinition:
     pipeline = registry.get(
-        key=candidate.pipeline_key,
+        key=PipelineKey(candidate.pipeline_key),
         version=candidate.pipeline_version,
     )
     try:
