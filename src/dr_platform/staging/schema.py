@@ -24,12 +24,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
+from dr_platform.prefix import DEFAULT_PREFIX
 from dr_platform.staging.states import StageExecutionState
 
 if TYPE_CHECKING:
     from enum import StrEnum
 
-DEFAULT_PREFIX = "platform"
 PREFIX_PATTERN = re.compile(r"[a-z_][a-z0-9_]*")
 MAX_PREFIX_BYTES = 21
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-from dr_platform.staging.schema import DEFAULT_PREFIX
+from dr_platform.prefix import DEFAULT_PREFIX
 
 PLATFORM_BASELINE_REVISION = "0001_staging_baseline"
 PLATFORM_HEAD_REVISION = PLATFORM_BASELINE_REVISION
