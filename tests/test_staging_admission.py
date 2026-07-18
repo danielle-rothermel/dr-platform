@@ -1062,7 +1062,7 @@ def _submit_two_stage_backlog(
         submit(
             campaign_key="campaign-two-stage",
             run_key=f"run-{suffix}",
-            pipeline=(f"pipeline-{suffix}", 1),
+            pipeline=(PipelineKey(f"pipeline-{suffix}"), 1),
             config_ref=f"config:{suffix}",
             items=(
                 WorkInput(
@@ -1143,11 +1143,11 @@ def test_args_for_failure_isolates_to_its_stage(
     registry = PipelineRegistry()
     registry.register(
         PipelineDefinition(
-            key="pipeline-a",
+            key=PipelineKey("pipeline-a"),
             version=1,
             stages=(
                 StageDefinition(
-                    key="stage-a",
+                    key=StageKey("stage-a"),
                     queue_name="queue-a",
                     workflow=_workflow,
                     args_for=_args_for,
@@ -1157,11 +1157,11 @@ def test_args_for_failure_isolates_to_its_stage(
     )
     registry.register(
         PipelineDefinition(
-            key="pipeline-b",
+            key=PipelineKey("pipeline-b"),
             version=1,
             stages=(
                 StageDefinition(
-                    key="stage-b",
+                    key=StageKey("stage-b"),
                     queue_name="queue-b",
                     workflow=_workflow,
                     args_for=failing_args_for,
