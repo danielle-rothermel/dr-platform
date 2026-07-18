@@ -45,7 +45,12 @@ def insert_work_item(  # noqa: PLR0913 -- explicit persistence facts
 ) -> WorkItemRecord:
     """Insert one work item, or resolve an identical idempotent replay."""
     selected_schema = schema or StagingSchema()
-    identity = CampaignWorkIdentity(campaign_key, work_key)
+    identity = CampaignWorkIdentity(
+        campaign_key
+        if isinstance(campaign_key, CampaignKey)
+        else CampaignKey(campaign_key),
+        work_key if isinstance(work_key, WorkKey) else WorkKey(work_key),
+    )
     normalized_run_key = (
         origin_run_key
         if isinstance(origin_run_key, RunKey)
@@ -118,7 +123,12 @@ def get_work_item(
     schema: StagingSchema | None = None,
 ) -> WorkItemRecord | None:
     selected_schema = schema or StagingSchema()
-    identity = CampaignWorkIdentity(campaign_key, work_key)
+    identity = CampaignWorkIdentity(
+        campaign_key
+        if isinstance(campaign_key, CampaignKey)
+        else CampaignKey(campaign_key),
+        work_key if isinstance(work_key, WorkKey) else WorkKey(work_key),
+    )
     table = selected_schema.work_items
     row = (
         connection.execute(

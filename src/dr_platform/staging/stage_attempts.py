@@ -8,8 +8,11 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select, update
 
 from dr_platform.staging.identities import (
+    CampaignKey,
     CampaignWorkIdentity,
+    PipelineKey,
     StageKey,
+    WorkKey,
 )
 from dr_platform.staging.recipes import stage_workflow_id
 from dr_platform.staging.records import StageAttemptRecord
@@ -73,9 +76,10 @@ def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
     attempt_number = source["current_attempt"] + 1
     workflow_id = stage_workflow_id(
         work_identity=CampaignWorkIdentity(
-            source["campaign_key"], source["work_key"]
+            CampaignKey(source["campaign_key"]),
+            WorkKey(source["work_key"]),
         ),
-        pipeline_key=source["pipeline_key"],
+        pipeline_key=PipelineKey(source["pipeline_key"]),
         pipeline_version=source["pipeline_version"],
         stage_key=StageKey(source["stage_key"]),
         attempt_number=attempt_number,
