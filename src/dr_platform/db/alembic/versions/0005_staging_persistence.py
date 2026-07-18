@@ -43,6 +43,10 @@ def _name(prefix: str, suffix: str) -> str:
     return f"{prefix}_{suffix}"
 
 
+def _execute(sql: str) -> None:
+    op.execute(sa.text(sql))
+
+
 def upgrade() -> None:
     prefix = _prefix()
     pipeline_runs = _name(prefix, "pipeline_runs")
@@ -76,6 +80,42 @@ def upgrade() -> None:
             name=_name(prefix, "ck_pipeline_runs_submission_time"),
         ),
         sa.PrimaryKeyConstraint("run_key"),
+    )
+    provenance_guard = _name(prefix, "guard_pipeline_run_provenance")
+    _execute(
+        f"""
+        CREATE FUNCTION {provenance_guard}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF ROW(
+            NEW.run_key,
+            NEW.campaign_key,
+            NEW.pipeline_key,
+            NEW.pipeline_version,
+            NEW.execution_config_reference,
+            NEW.created_at
+          ) IS DISTINCT FROM ROW(
+            OLD.run_key,
+            OLD.campaign_key,
+            OLD.pipeline_key,
+            OLD.pipeline_version,
+            OLD.execution_config_reference,
+            OLD.created_at
+          ) THEN
+            RAISE EXCEPTION 'pipeline run provenance is immutable'
+              USING ERRCODE = 'check_violation';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    _execute(
+        f"""
+        CREATE TRIGGER {provenance_guard}
+        BEFORE UPDATE ON {pipeline_runs}
+        FOR EACH ROW EXECUTE FUNCTION {provenance_guard}()
+        """
     )
 
     op.create_table(
@@ -289,6 +329,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     prefix = _prefix()
+    provenance_guard = _name(prefix, "guard_pipeline_run_provenance")
+    _execute(
+        f"DROP TRIGGER {provenance_guard} "
+        f"ON {_name(prefix, 'pipeline_runs')}"
+    )
+    _execute(f"DROP FUNCTION {provenance_guard}()")
     op.drop_table(_name(prefix, "stage_controls"))
     op.drop_table(_name(prefix, "stage_attempts"))
     op.drop_index(

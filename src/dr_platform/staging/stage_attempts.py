@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import select, update
 
@@ -19,7 +20,6 @@ from dr_platform.staging.records import StageAttemptRecord
 from dr_platform.staging.schema import StagingSchema
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from datetime import datetime
 
     from sqlalchemy import Connection
@@ -50,6 +50,7 @@ def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
         select(
             executions.c.current_attempt,
             executions.c.stage_key,
+            executions.c.updated_at,
             work_items.c.campaign_key,
             work_items.c.work_key,
             runs.c.pipeline_key,
@@ -71,6 +72,11 @@ def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
     if source is None:
         raise LookupError(
             f"stage execution does not exist: {stage_execution_id}"
+        )
+    if created_at < source["updated_at"]:
+        raise ValueError(
+            "stage attempt created_at cannot precede the stage execution "
+            "updated_at"
         )
 
     attempt_number = source["current_attempt"] + 1
@@ -168,10 +174,28 @@ def _decode_stage_attempt(row: RowMapping) -> StageAttemptRecord:
         attempt_number=row["attempt_number"],
         workflow_id=row["workflow_id"],
         terminal_summary=(
-            None if summary is None else MappingProxyType(dict(summary))
+            None
+            if summary is None
+            else _freeze_json_mapping(cast("Mapping[str, object]", summary))
         ),
         terminal_reference=row["terminal_reference"],
         created_at=row["created_at"],
         admitted_at=row["admitted_at"],
         terminal_at=row["terminal_at"],
     )
+
+
+def _freeze_json_mapping(
+    value: Mapping[str, object],
+) -> Mapping[str, object]:
+    return MappingProxyType(
+        {key: _freeze_json_value(item) for key, item in value.items()}
+    )
+
+
+def _freeze_json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _freeze_json_mapping(cast("Mapping[str, object]", value))
+    if isinstance(value, list):
+        return tuple(_freeze_json_value(item) for item in value)
+    return value

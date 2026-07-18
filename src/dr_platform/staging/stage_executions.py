@@ -193,6 +193,8 @@ def transition_stage_execution(  # noqa: PLR0913 -- explicit transition facts
         raise LookupError(
             f"stage execution does not exist: {stage_execution_id}"
         )
+    if updated_at < row["updated_at"]:
+        raise ValueError("stage execution updated_at cannot move backwards")
     current = StageExecutionState(row["state"])
     if new_state not in VALID_STAGE_TRANSITIONS[current]:
         raise StageTransitionError(
