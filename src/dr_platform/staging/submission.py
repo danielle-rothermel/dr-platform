@@ -119,7 +119,7 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
             connection,
             run_key=normalized_run_key,
             campaign_key=normalized_campaign_key,
-            pipeline_key=pipeline_definition.key,
+            pipeline_key=pipeline_definition.key.value,
             pipeline_version=pipeline_definition.version,
             execution_config_reference=config_ref,
             created_at=clock(),

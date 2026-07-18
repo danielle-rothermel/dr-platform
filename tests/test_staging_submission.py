@@ -11,9 +11,11 @@ from sqlalchemy import Engine, func, select
 from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
     PipelineDefinition,
+    PipelineKey,
     PipelineRegistry,
     StageDefinition,
     StageExecutionState,
+    StageKey,
 )
 from dr_platform.staging.runs import (
     PipelineRunConflictError,
@@ -36,17 +38,17 @@ def _args_for(*args: object) -> tuple[object, ...]:
 
 def _registry() -> tuple[PipelineRegistry, PipelineDefinition]:
     pipeline = PipelineDefinition(
-        key="evaluation",
+        key=PipelineKey("evaluation"),
         version=1,
         stages=(
             StageDefinition(
-                key="prepare",
+                key=StageKey("prepare"),
                 queue_name="prepare",
                 workflow=_workflow,
                 args_for=_args_for,
             ),
             StageDefinition(
-                key="execute",
+                key=StageKey("execute"),
                 queue_name="execute",
                 workflow=_workflow,
                 args_for=_args_for,
