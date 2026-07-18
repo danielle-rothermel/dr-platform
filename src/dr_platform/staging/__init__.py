@@ -9,6 +9,7 @@ from dr_platform.staging.definitions import (
 from dr_platform.staging.identities import (
     CampaignKey,
     CampaignWorkIdentity,
+    PipelineKey,
     RunKey,
     StageKey,
     WorkKey,
@@ -26,6 +27,7 @@ __all__ = [
     "CampaignWorkIdentity",
     "PipelineConflictError",
     "PipelineDefinition",
+    "PipelineKey",
     "PipelineRegistry",
     "RunKey",
     "StageDefinition",

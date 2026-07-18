@@ -68,27 +68,22 @@ class StageKey(_ValidatedKey):
     _label: ClassVar[str] = "stage key"
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True)
+class PipelineKey(_ValidatedKey):
+    """Identity of one declared linear pipeline across its versions."""
+
+    _label: ClassVar[str] = "pipeline key"
+
+
+@dataclass(frozen=True, slots=True)
 class CampaignWorkIdentity:
     """The campaign-scoped uniqueness identity for logical work."""
 
     campaign_key: CampaignKey
     work_key: WorkKey
 
-    def __init__(
-        self,
-        campaign_key: CampaignKey | str,
-        work_key: WorkKey | str,
-    ) -> None:
-        object.__setattr__(
-            self,
-            "campaign_key",
-            campaign_key
-            if isinstance(campaign_key, CampaignKey)
-            else CampaignKey(campaign_key),
-        )
-        object.__setattr__(
-            self,
-            "work_key",
-            work_key if isinstance(work_key, WorkKey) else WorkKey(work_key),
-        )
+    def __post_init__(self) -> None:
+        if not isinstance(self.campaign_key, CampaignKey):
+            raise TypeError("campaign_key must be a CampaignKey")
+        if not isinstance(self.work_key, WorkKey):
+            raise TypeError("work_key must be a WorkKey")

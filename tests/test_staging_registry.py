@@ -7,8 +7,10 @@ import pytest
 from dr_platform.staging import (
     PipelineConflictError,
     PipelineDefinition,
+    PipelineKey,
     PipelineRegistry,
     StageDefinition,
+    StageKey,
 )
 
 
@@ -22,11 +24,11 @@ def _args_for(*args: object) -> tuple[object, ...]:
 
 def _pipeline(*, queue_name: str = "execute") -> PipelineDefinition:
     return PipelineDefinition(
-        key="evaluation",
+        key=PipelineKey("evaluation"),
         version=1,
         stages=(
             StageDefinition(
-                key="execute",
+                key=StageKey("execute"),
                 queue_name=queue_name,
                 workflow=_workflow,
                 args_for=_args_for,
@@ -40,7 +42,7 @@ def test_registry_lookup_returns_the_registered_pipeline() -> None:
     registry = PipelineRegistry()
 
     assert registry.register(pipeline) is pipeline
-    assert registry.get(key="evaluation", version=1) is pipeline
+    assert registry.get(key=PipelineKey("evaluation"), version=1) is pipeline
 
 
 def test_identical_registration_is_an_idempotent_no_op() -> None:
@@ -50,7 +52,7 @@ def test_identical_registration_is_an_idempotent_no_op() -> None:
 
     assert registry.register(first) is first
     assert registry.register(identical) is first
-    assert registry.get(key="evaluation", version=1) is first
+    assert registry.get(key=PipelineKey("evaluation"), version=1) is first
 
 
 def test_registry_rejects_a_conflicting_definition() -> None:
@@ -60,4 +62,4 @@ def test_registry_rejects_a_conflicting_definition() -> None:
     with pytest.raises(PipelineConflictError) as caught:
         registry.register(_pipeline(queue_name="other-queue"))
 
-    assert caught.value.identity == ("evaluation", 1)
+    assert caught.value.identity == (PipelineKey("evaluation"), 1)

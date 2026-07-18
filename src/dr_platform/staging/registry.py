@@ -9,6 +9,7 @@ if TYPE_CHECKING:
         PipelineDefinition,
         PipelineIdentity,
     )
+    from dr_platform.staging.identities import PipelineKey
 
 
 class PipelineConflictError(RuntimeError):
@@ -38,5 +39,5 @@ class PipelineRegistry:
             raise PipelineConflictError(pipeline.identity)
         return existing
 
-    def get(self, *, key: str, version: int) -> PipelineDefinition:
+    def get(self, *, key: PipelineKey, version: int) -> PipelineDefinition:
         return self._pipelines[key, version]
