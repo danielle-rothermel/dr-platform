@@ -13,9 +13,11 @@ from sqlalchemy import Engine, event, func, select
 from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
     PipelineDefinition,
+    PipelineKey,
     PipelineRegistry,
     StageDefinition,
     StageExecutionState,
+    StageKey,
     WorkKey,
 )
 from dr_platform.staging.admission import AdmissionPayload, run_admission_pass
@@ -57,11 +59,11 @@ def _registry() -> PipelineRegistry:
     registry = PipelineRegistry()
     registry.register(
         PipelineDefinition(
-            key="evaluation",
+            key=PipelineKey("evaluation"),
             version=1,
             stages=(
                 StageDefinition(
-                    key="execute",
+                    key=StageKey("execute"),
                     queue_name="execute-queue",
                     workflow=_workflow,
                     args_for=_args_for,
@@ -89,7 +91,7 @@ def _submit(  # noqa: PLR0913 -- explicit desired-state test facts
     submit(
         campaign_key=campaign_key,
         run_key=run_key,
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         config_ref="config:1",
         items=(
             WorkInput(
@@ -217,7 +219,7 @@ def test_inspection_readers_are_bounded_cursor_stable_and_frozen(
         clock=NOW + timedelta(seconds=2),
     )
     set_stage_capacity(
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=4,
         engine=pg_engine,
@@ -255,7 +257,7 @@ def test_inspection_readers_are_bounded_cursor_stable_and_frozen(
         engine=pg_engine,
     )
     controls = read_controls(
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         stage_key="execute",
         engine=pg_engine,
     )
@@ -279,7 +281,7 @@ def test_inspection_readers_are_bounded_cursor_stable_and_frozen(
     )[0].count == 3
     assert run_state_counts("run-a1", engine=pg_engine)[0].count == 2
     with pytest.raises(FrozenInstanceError):
-        first_item[0].state = StageExecutionState.FAILED  # pyright: ignore[reportAttributeAccessIssue]
+        first_item[0].state = StageExecutionState.FAILED  # ty: ignore[invalid-assignment]
     with pytest.raises(TypeError):
         cast("dict[str, str]", first_item[0].labels)["new"] = "value"
 
@@ -362,7 +364,7 @@ def test_six_seed_top_up_uses_bulk_statuses_for_one_campaign(
     receipt = submit(
         campaign_key="estimate-v1",
         run_key="run-top-up",
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         config_ref="config:1",
         items=(
             WorkInput(
@@ -425,7 +427,7 @@ def test_attempts_never_count_as_additional_samples(
         clock=lambda: NOW + timedelta(seconds=2),
     )
     set_stage_capacity(
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=1,
         engine=pg_engine,

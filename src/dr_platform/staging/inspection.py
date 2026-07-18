@@ -15,10 +15,10 @@ from dr_platform.staging.definitions import (
 )
 from dr_platform.staging.identities import (
     CampaignKey,
+    PipelineKey,
     RunKey,
     StageKey,
     WorkKey,
-    validate_key_value,
 )
 from dr_platform.staging.records import (
     StageAttemptRecord,
@@ -332,7 +332,7 @@ def read_controls(
     with engine.connect() as connection:
         return list_stage_controls(
             connection,
-            pipeline_key=pipeline_key,
+            pipeline_key=pipeline_key.value,
             pipeline_version=pipeline_version,
             stage_key=stage_key,
             labels=labels,
@@ -616,11 +616,10 @@ def _validate_pipeline(pipeline: PipelineIdentity) -> PipelineIdentity:
     if (
         not isinstance(pipeline, tuple)
         or len(pipeline) != PIPELINE_IDENTITY_PARTS
-        or not isinstance(pipeline[0], str)
+        or not isinstance(pipeline[0], PipelineKey)
         or not isinstance(pipeline[1], int)
     ):
         raise TypeError("pipeline must be a (key, version) tuple")
-    validate_key_value(pipeline[0], label="pipeline key")
     validate_positive_integer(pipeline[1], label="pipeline version")
     return pipeline
 

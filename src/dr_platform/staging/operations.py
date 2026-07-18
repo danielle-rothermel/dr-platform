@@ -20,9 +20,9 @@ from dr_platform.staging.definitions import (
 from dr_platform.staging.identities import (
     CampaignKey,
     CampaignWorkIdentity,
+    PipelineKey,
     StageKey,
     WorkKey,
-    validate_key_value,
 )
 from dr_platform.staging.schema import StagingSchema
 from dr_platform.staging.stage_attempts import (
@@ -303,7 +303,7 @@ def _set_capacity(  # noqa: PLR0913 -- explicit operator dependencies
     with engine.begin() as connection:
         return set_stage_control_capacity(
             connection,
-            pipeline_key=pipeline_key,
+            pipeline_key=pipeline_key.value,
             pipeline_version=pipeline_version,
             stage_key=stage_key,
             selector=labels,
@@ -328,7 +328,7 @@ def _set_paused(  # noqa: PLR0913 -- explicit operator dependencies
     with engine.begin() as connection:
         return set_stage_control_paused(
             connection,
-            pipeline_key=pipeline_key,
+            pipeline_key=pipeline_key.value,
             pipeline_version=pipeline_version,
             stage_key=stage_key,
             selector=labels,
@@ -342,11 +342,10 @@ def _validate_pipeline(pipeline: PipelineIdentity) -> PipelineIdentity:
     if (
         not isinstance(pipeline, tuple)
         or len(pipeline) != PIPELINE_IDENTITY_PARTS
-        or not isinstance(pipeline[0], str)
+        or not isinstance(pipeline[0], PipelineKey)
         or not isinstance(pipeline[1], int)
     ):
         raise TypeError("pipeline must be a (key, version) tuple")
-    validate_key_value(pipeline[0], label="pipeline key")
     validate_positive_integer(pipeline[1], label="pipeline version")
     return pipeline
 
@@ -376,7 +375,12 @@ def _resolve_work_item_id(
             table.c.work_item_id == work_item_id
         )
     elif campaign_key is not None and work_key is not None:
-        identity = CampaignWorkIdentity(campaign_key, work_key)
+        identity = CampaignWorkIdentity(
+            campaign_key
+            if isinstance(campaign_key, CampaignKey)
+            else CampaignKey(campaign_key),
+            work_key if isinstance(work_key, WorkKey) else WorkKey(work_key),
+        )
         statement = select(table.c.work_item_id).where(
             table.c.campaign_key == identity.campaign_key.value,
             table.c.work_key == identity.work_key.value,

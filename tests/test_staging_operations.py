@@ -11,9 +11,11 @@ from sqlalchemy import Engine, func, select
 from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
     PipelineDefinition,
+    PipelineKey,
     PipelineRegistry,
     StageDefinition,
     StageExecutionState,
+    StageKey,
 )
 from dr_platform.staging.admission import AdmissionPayload, run_admission_pass
 from dr_platform.staging.handoff import _complete_stage_in_transaction
@@ -53,7 +55,7 @@ def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
 def _registry(*, two_stages: bool = False) -> PipelineRegistry:
     stages = [
         StageDefinition(
-            key="execute",
+            key=StageKey("execute"),
             queue_name="execute-queue",
             workflow=_workflow,
             args_for=_args_for,
@@ -62,7 +64,7 @@ def _registry(*, two_stages: bool = False) -> PipelineRegistry:
     if two_stages:
         stages.append(
             StageDefinition(
-                key="score",
+                key=StageKey("score"),
                 queue_name="score-queue",
                 workflow=_workflow,
                 args_for=_args_for,
@@ -71,7 +73,7 @@ def _registry(*, two_stages: bool = False) -> PipelineRegistry:
     registry = PipelineRegistry()
     registry.register(
         PipelineDefinition(
-            key="evaluation",
+            key=PipelineKey("evaluation"),
             version=1,
             stages=tuple(stages),
         )
@@ -94,7 +96,7 @@ def _submit(
     submit(
         campaign_key="campaign-1",
         run_key=run_key,
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         config_ref="config:1",
         items=(
             WorkInput(
@@ -171,7 +173,7 @@ def test_lowering_capacity_drains_without_preempting_admitted_work(
         work_keys=("work-0", "work-1", "work-2"),
     )
     set_stage_capacity(
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=3,
         engine=pg_engine,
@@ -186,7 +188,7 @@ def test_lowering_capacity_drains_without_preempting_admitted_work(
     ).admitted_total == 3
 
     set_stage_capacity(
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=1,
         engine=pg_engine,
@@ -239,7 +241,7 @@ def test_retry_preserves_lineage_and_readmits_prepared_attempt(
         work_keys=("work-retry",),
     )
     set_stage_capacity(
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=1,
         engine=pg_engine,
@@ -310,7 +312,7 @@ def test_cancellation_delegates_only_an_admitted_exact_attempt(
         work_keys=("work-a", "work-b"),
     )
     set_stage_capacity(
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=1,
         engine=pg_engine,
@@ -391,7 +393,7 @@ def test_exact_label_pause_resume_preserves_capacity(
 ) -> None:
     _migrate(pg_engine)
     control = set_selector_capacity(
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         stage_key="execute",
         labels={"cohort": "blue"},
         capacity=4,
@@ -399,14 +401,14 @@ def test_exact_label_pause_resume_preserves_capacity(
         clock=lambda: NOW,
     )
     paused = pause(
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         stage_key="execute",
         labels={"cohort": "blue"},
         engine=pg_engine,
         clock=lambda: NOW + timedelta(seconds=1),
     )
     resumed = resume(
-        pipeline=("evaluation", 1),
+        pipeline=(PipelineKey("evaluation"), 1),
         stage_key="execute",
         labels={"cohort": "blue"},
         engine=pg_engine,
