@@ -682,6 +682,7 @@ def test_sweep_projects_only_cancelled_or_abandoned_admitted_attempts(
 
     assert summary.inspected_count == 3
     assert summary.projected_count == 2
+    assert summary.next_cursor is None
     assert {item.state for item in summary.projections} == {
         StageExecutionState.CANCELLED,
         StageExecutionState.FAILED,
@@ -778,6 +779,8 @@ def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
     # project the abandoned one that lives past the first page.
     assert summary.inspected_count == admitted_total
     assert summary.projected_count == 1
+    # One pass drains the backlog to its end, so there is nothing to resume.
+    assert summary.next_cursor is None
     assert summary.projections[0].workflow_id == abandoned_id
     assert summary.projections[0].state == StageExecutionState.FAILED
     # More than one page was queried, reaching the abandoned id later.
