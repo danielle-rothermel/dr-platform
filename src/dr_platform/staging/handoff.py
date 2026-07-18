@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
     from sqlalchemy.engine import RowMapping
 
-    from dr_platform.staging.identities import StageKey
+    from dr_platform.staging.identities import PipelineKey, StageKey
 
 
 class StageHandoffMismatchError(RuntimeError):
@@ -113,7 +113,7 @@ def _wrap_stage_workflow(
             error_type = f"{type(error).__module__}.{type(error).__qualname__}"
             complete_stage(
                 workflow_id=workflow_id,
-                pipeline_key=pipeline.key,
+                pipeline_key=pipeline.key.value,
                 pipeline_version=pipeline.version,
                 stage_key=stage.key.value,
                 stage_index=stage_index,
@@ -133,7 +133,7 @@ def _wrap_stage_workflow(
 
         complete_stage(
             workflow_id=workflow_id,
-            pipeline_key=pipeline.key,
+            pipeline_key=pipeline.key.value,
             pipeline_version=pipeline.version,
             stage_key=stage.key.value,
             stage_index=stage_index,
@@ -355,11 +355,15 @@ def _current_workflow_id() -> str:
 
 def _stage_workflow_name(
     *,
-    pipeline_key: str,
+    pipeline_key: PipelineKey,
     pipeline_version: int,
     stage_key: StageKey,
 ) -> str:
-    identity = f"{pipeline_key}\0{pipeline_version}\0{stage_key.value}"
+    identity = (
+        f"{pipeline_key.value}\0{pipeline_version}\0{stage_key.value}"
+    )
     digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
-    readable = re.sub(r"[^A-Za-z0-9_]", "_", f"{pipeline_key}_{stage_key}")
+    readable = re.sub(
+        r"[^A-Za-z0-9_]", "_", f"{pipeline_key.value}_{stage_key.value}"
+    )
     return f"dr_platform_stage_{readable}_v{pipeline_version}_{digest}"

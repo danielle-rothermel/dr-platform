@@ -14,11 +14,15 @@ from sqlalchemy import Engine, func, select
 
 from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
+    CampaignKey,
     CampaignWorkIdentity,
     PipelineDefinition,
+    PipelineKey,
     PipelineRegistry,
     StageDefinition,
     StageExecutionState,
+    StageKey,
+    WorkKey,
     stable_random_rank,
 )
 from dr_platform.staging.admission import AdmissionPayload, run_admission_pass
@@ -52,11 +56,11 @@ def _pipeline(
     stage_logic: tuple[tuple[str, Callable[[str], str]], ...],
 ) -> PipelineDefinition:
     return PipelineDefinition(
-        key=key,
+        key=PipelineKey(key),
         version=1,
         stages=tuple(
             StageDefinition(
-                key=stage_key,
+                key=StageKey(stage_key),
                 queue_name=f"{key}-{stage_key}-queue",
                 workflow=logic,
                 args_for=_args_for,
@@ -81,7 +85,7 @@ def _configure_controls(
         for stage in pipeline.stages:
             upsert_stage_control(
                 connection,
-                pipeline_key=pipeline.key,
+                pipeline_key=pipeline.key.value,
                 pipeline_version=pipeline.version,
                 stage_key=stage.key,
                 selector={},
@@ -138,6 +142,27 @@ def _wait_for(
             return
         time.sleep(0.02)
     raise AssertionError("timed out waiting for DBOS stage workflow")
+
+
+def _wait_for_workflow_statuses(
+    client: DBOSClient,
+    workflow_ids: list[str],
+    *,
+    expected_status: str,
+) -> None:
+    _wait_for(
+        lambda: (
+            len(
+                client.list_workflows(
+                    workflow_ids=workflow_ids,
+                    status=expected_status,
+                    load_input=False,
+                    load_output=False,
+                )
+            )
+            == len(workflow_ids)
+        )
+    )
 
 
 def _stage_state_count(
@@ -271,13 +296,10 @@ def test_three_stage_pipeline_streams_end_to_end_through_wrapped_workflows(
         )
         assert all(row[3] for row in rows)
         assert len(workflow_ids) == 6
-        assert all(
-            status.status == "SUCCESS"
-            for status in client.list_workflows(
-                workflow_ids=list(workflow_ids),
-                load_input=False,
-                load_output=False,
-            )
+        _wait_for_workflow_statuses(
+            client,
+            list(workflow_ids),
+            expected_status="SUCCESS",
         )
     finally:
         if client is not None:
@@ -326,7 +348,7 @@ def test_completion_and_next_ready_insert_roll_back_together(
         _complete_stage_in_transaction(
             connection,
             workflow_id=workflow_id,
-            pipeline_key=pipeline.key,
+            pipeline_key=pipeline.key.value,
             pipeline_version=pipeline.version,
             stage_key="prepare",
             stage_index=0,
@@ -367,7 +389,9 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
     first_work_key = min(
         work_keys,
         key=lambda work_key: stable_random_rank(
-            work_identity=CampaignWorkIdentity(campaign_key, work_key)
+            work_identity=CampaignWorkIdentity(
+                CampaignKey(campaign_key), WorkKey(work_key)
+            )
         ),
     )
 
@@ -437,10 +461,11 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
                     == StageExecutionState.FAILED.value
                 )
             ).scalar_one()
-        failed_status = client.retrieve_workflow(
-            failed_workflow_id
-        ).get_status()
-        assert failed_status.status == "SUCCESS"
+        _wait_for_workflow_statuses(
+            client,
+            [failed_workflow_id],
+            expected_status="SUCCESS",
+        )
 
         second = run_admission_pass(
             pg_engine,
