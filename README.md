@@ -55,9 +55,11 @@ from sqlalchemy import create_engine
 from dr_platform import (
     AdmissionPayload,
     PipelineDefinition,
+    PipelineKey,
     PipelineRegistry,
     StageDefinition,
     StageExecutionState,
+    StageKey,
     WorkInput,
     build_platform_dbos_config,
     bulk_work_statuses,
@@ -93,23 +95,23 @@ upgrade_platform_schema(config.database_url)
 initialize_dbos_runtime(config, app_name="staged-work-example")
 
 declared = PipelineDefinition(
-    key="generic-work",
+    key=PipelineKey("generic-work"),
     version=1,
     stages=(
         StageDefinition(
-            key="prepare",
+            key=StageKey("prepare"),
             queue_name="prepare",
             workflow=prepare,
             args_for=args_for,
         ),
         StageDefinition(
-            key="execute",
+            key=StageKey("execute"),
             queue_name="execute",
             workflow=execute,
             args_for=args_for,
         ),
         StageDefinition(
-            key="score",
+            key=StageKey("score"),
             queue_name="score",
             workflow=score,
             args_for=args_for,

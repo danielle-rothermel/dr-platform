@@ -26,6 +26,7 @@ from dr_platform.staging.handoff import (
 )
 from dr_platform.staging.identities import (
     CampaignKey,
+    PipelineKey,
     RunKey,
     StageKey,
     WorkKey,
@@ -94,6 +95,7 @@ __all__ = [
     "PipelineConflictError",
     "PipelineDefinition",
     "PipelineIdentity",
+    "PipelineKey",
     "PipelineRegistry",
     "PipelineRunConflictError",
     "PipelineStageMismatchError",

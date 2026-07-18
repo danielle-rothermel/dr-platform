@@ -13,10 +13,12 @@ import dr_platform
 from dr_platform import (
     AdmissionPayload,
     PipelineDefinition,
+    PipelineKey,
     PipelineRegistry,
     PlatformDbosConfig,
     StageDefinition,
     StageExecutionState,
+    StageKey,
     WorkInput,
     bulk_work_statuses,
     inspect_campaign,
@@ -98,23 +100,23 @@ def test_root_contract_defines_submits_executes_and_inspects(
         return f"scored:{input_ref}"
 
     declared = PipelineDefinition(
-        key=f"public-contract-{suffix}",
+        key=PipelineKey(f"public-contract-{suffix}"),
         version=1,
         stages=(
             StageDefinition(
-                key="prepare",
+                key=StageKey("prepare"),
                 queue_name=f"prepare-{suffix}",
                 workflow=prepare,
                 args_for=args_for,
             ),
             StageDefinition(
-                key="execute",
+                key=StageKey("execute"),
                 queue_name=f"execute-{suffix}",
                 workflow=execute,
                 args_for=args_for,
             ),
             StageDefinition(
-                key="score",
+                key=StageKey("score"),
                 queue_name=f"score-{suffix}",
                 workflow=score,
                 args_for=args_for,
