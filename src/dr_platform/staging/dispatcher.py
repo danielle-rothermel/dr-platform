@@ -4,13 +4,15 @@ The registration hook constructs and owns one ``DBOSClient`` from the
 validated colocated system database URL.  Its returned registration handle
 keeps that client alive and provides explicit cleanup.  The scheduled
 workflow is deliberately only an adapter around ``run_admission_pass``.
-Every declared stage must have an empty-selector capacity control before its
-READY work is encountered; otherwise admission raises
-``MissingStageControlError`` and rolls back the pass.
+A pass never aborts for one unhealthy stage: stages lacking an empty-selector
+capacity control, and stages whose ``args_for`` or enqueue raises, are skipped
+and reported on the returned :class:`AdmissionSummary`.  This adapter logs
+those signals so operators can act, while healthy admission still commits.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,6 +34,8 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from dr_platform.staging.registry import PipelineRegistry
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DISPATCHER_CRON = "*/5 * * * * *"
 DISPATCHER_WORKFLOW_NAME = "dr_platform_staging_dispatcher"
@@ -73,12 +77,34 @@ def register_scheduled_dispatcher(
             _scheduled_time: datetime,
             _actual_time: datetime,
         ) -> None:
-            run_admission_pass(
+            summary = run_admission_pass(
                 engine,
                 client=client,
                 registry=registry,
                 batch_size=batch_size,
             )
+            if summary.unconfigured_stages:
+                logger.warning(
+                    "admission skipped stages without an empty-selector "
+                    "control: %s",
+                    ", ".join(
+                        f"{stage.pipeline_key!r} version "
+                        f"{stage.pipeline_version} stage "
+                        f"{stage.stage_key.value!r}"
+                        for stage in summary.unconfigured_stages
+                    ),
+                )
+            if summary.failed_stages:
+                logger.warning(
+                    "admission failed for stages: %s",
+                    ", ".join(
+                        f"{stage.pipeline_key!r} version "
+                        f"{stage.pipeline_version} stage "
+                        f"{stage.stage_key.value!r}: "
+                        f"{stage.error_type}: {stage.message}"
+                        for stage in summary.failed_stages
+                    ),
+                )
 
     except Exception:
         client.destroy()

@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 
 from dr_platform.dbos_config import PlatformDbosConfig
 from dr_platform.staging import PipelineRegistry, dispatcher
+from dr_platform.staging.admission import AdmissionSummary
 
 
 class _FakeClient:
@@ -50,11 +51,17 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
         "workflow",
         lambda *, name: decorator("workflow", name),
     )
-    monkeypatch.setattr(
-        dispatcher,
-        "run_admission_pass",
-        lambda engine, **kwargs: calls.append(("pass", (engine, kwargs))),
-    )
+    def fake_pass(engine: object, **kwargs: object) -> AdmissionSummary:
+        calls.append(("pass", (engine, kwargs)))
+        return AdmissionSummary(
+            admitted_counts=(),
+            skipped_for_capacity=0,
+            skipped_for_pause=0,
+            unconfigured_stages=(),
+            failed_stages=(),
+        )
+
+    monkeypatch.setattr(dispatcher, "run_admission_pass", fake_pass)
     config = PlatformDbosConfig(
         database_url=(
             "postgresql+psycopg://user:secret@db/platform"

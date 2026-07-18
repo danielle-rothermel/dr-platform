@@ -8,7 +8,6 @@ from dr_platform.dbos_config import (
 )
 from dr_platform.staging.admission import (
     AdmissionPayload,
-    MissingStageControlError,
     PipelineStageMismatchError,
 )
 from dr_platform.staging.definitions import (
@@ -92,7 +91,6 @@ __all__ = [
     "CampaignSummary",
     "CancellationDisposition",
     "DispatcherRegistration",
-    "MissingStageControlError",
     "PipelineConflictError",
     "PipelineDefinition",
     "PipelineIdentity",

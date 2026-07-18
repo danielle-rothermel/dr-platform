@@ -31,6 +31,8 @@ from dr_platform.staging import (
 from dr_platform.staging.admission import (
     AdmissionPayload,
     StageAdmissionCount,
+    StageAdmissionFailure,
+    StageIdentityRecord,
     _Admit,
     _Candidate,
     _Control,
@@ -283,6 +285,32 @@ class _EnqueueThenFail:
             **kwargs,
         )
         raise RuntimeError("failure after enqueue")
+
+
+class _EnqueueOnceThenFail:
+    """Enqueue the first candidate, then fail after enqueuing the second."""
+
+    def __init__(self, client: DBOSClient) -> None:
+        self._client = client
+        self._calls = 0
+
+    def enqueue_in_transaction(
+        self,
+        connection: Connection,
+        options: EnqueueOptions,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        self._calls += 1
+        result = self._client.enqueue_in_transaction(
+            connection,
+            options,
+            *args,
+            **kwargs,
+        )
+        if self._calls >= 2:  # second candidate
+            raise RuntimeError("failure after enqueue")
+        return result
 
 
 def _as_dbos_client(client: object) -> DBOSClient:
@@ -612,43 +640,65 @@ def test_enqueue_failure_rolls_back_platform_and_dbos_rows(
 ) -> None:
     schema = _migrate(pg_engine)
     registry = _registry()
-    _submit(pg_engine, registry, ({},))
-    _control(pg_engine, selector=None, capacity=1)
+    _submit(pg_engine, registry, ({}, {}))
+    _control(pg_engine, selector=None, capacity=2)
     _launch_dbos_schema(clean_pg)
     client = DBOSClient(system_database_url=clean_pg)
-    workflow_id = stage_workflow_id(
-        work_identity=CampaignWorkIdentity(
-            CampaignKey("campaign-1"), WorkKey("work-0")
-        ),
-        pipeline_key=PipelineKey("evaluation"),
-        pipeline_version=1,
-        stage_key=StageKey("execute"),
-        attempt_number=1,
-    )
-    client.delete_workflow(workflow_id)
+    workflow_ids = [
+        stage_workflow_id(
+            work_identity=CampaignWorkIdentity(
+                CampaignKey("campaign-1"), WorkKey(work_key)
+            ),
+            pipeline_key=PipelineKey("evaluation"),
+            pipeline_version=1,
+            stage_key=StageKey("execute"),
+            attempt_number=1,
+        )
+        for work_key in ("work-0", "work-1")
+    ]
+    for workflow_id in workflow_ids:
+        client.delete_workflow(workflow_id)
 
     try:
-        with pytest.raises(RuntimeError, match="failure after enqueue"):
-            run_admission_pass(
-                pg_engine,
-                client=_as_dbos_client(_EnqueueThenFail(client)),
-                registry=registry,
-                clock=lambda: NOW,
-            )
-
-        assert _execution_states(pg_engine, schema)[0][1:] == (
-            StageExecutionState.READY.value,
-            0,
+        summary = run_admission_pass(
+            pg_engine,
+            client=_as_dbos_client(_EnqueueOnceThenFail(client)),
+            registry=registry,
+            clock=lambda: NOW,
         )
+
+        states = _execution_states(pg_engine, schema)
+        admitted = [
+            state
+            for _, state, _ in states
+            if state == StageExecutionState.ADMITTED.value
+        ]
+        ready = [
+            state
+            for _, state, _ in states
+            if state == StageExecutionState.READY.value
+        ]
+        # The pass no longer aborts: the healthy candidate commits while
+        # the failing candidate's platform and DBOS rows roll back.
+        assert summary.admitted_total == 1
+        assert len(admitted) == 1
+        assert len(ready) == 1
         with pg_engine.connect() as connection:
             assert connection.execute(
                 select(func.count()).select_from(schema.stage_attempts)
-            ).scalar_one() == 0
-        assert client.list_workflows(
-            workflow_ids=[workflow_id],
+            ).scalar_one() == 1
+        enqueued = client.list_workflows(
+            workflow_ids=workflow_ids,
             load_input=False,
             load_output=False,
-        ) == []
+        )
+        assert len(enqueued) == 1
+        assert len(summary.failed_stages) == 1
+        failure = summary.failed_stages[0]
+        assert failure.pipeline_key == "evaluation"
+        assert failure.stage_key == StageKey("execute")
+        assert failure.error_type == "RuntimeError"
+        assert failure.message == "failure after enqueue"
     finally:
         client.destroy()
 
@@ -1001,4 +1051,156 @@ def test_pass_tally_to_summary_sorts_and_converts_stage_keys() -> None:
     assert all(
         isinstance(item.stage_key, StageKey)
         for item in summary.admitted_counts
+    )
+
+
+def _submit_two_stage_backlog(
+    engine: Engine,
+    registry: PipelineRegistry,
+) -> None:
+    for suffix in ("a", "b"):
+        submit(
+            campaign_key="campaign-two-stage",
+            run_key=f"run-{suffix}",
+            pipeline=(f"pipeline-{suffix}", 1),
+            config_ref=f"config:{suffix}",
+            items=(
+                WorkInput(
+                    work_key=f"work-{suffix}",
+                    input_ref=f"input-{suffix}",
+                    labels={},
+                ),
+            ),
+            registry=registry,
+            engine=engine,
+            clock=lambda: NOW,
+        )
+
+
+def _states_by_pipeline(
+    engine: Engine,
+    schema: StagingSchema,
+) -> dict[str, str]:
+    return dict(_pipeline_states(engine, schema))
+
+
+def test_unconfigured_stage_is_skipped_and_reported_then_admitted(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _starvation_registry()
+    _submit_two_stage_backlog(pg_engine, registry)
+    _pipeline_control(pg_engine, suffix="a", capacity=5, paused=False)
+    client = _RecordingClient()
+
+    first = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+
+    assert first.admitted_total == 1
+    assert client.enqueued[0][0]["queue_name"] == "queue-a"
+    assert _states_by_pipeline(pg_engine, schema) == {
+        "pipeline-a": StageExecutionState.ADMITTED.value,
+        "pipeline-b": StageExecutionState.READY.value,
+    }
+    assert first.unconfigured_stages == (
+        StageIdentityRecord(
+            pipeline_key="pipeline-b",
+            pipeline_version=1,
+            stage_key=StageKey("stage-b"),
+        ),
+    )
+    assert first.failed_stages == ()
+
+    _pipeline_control(pg_engine, suffix="b", capacity=5, paused=False)
+    second = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+
+    assert second.admitted_total == 1
+    assert second.unconfigured_stages == ()
+    assert second.failed_stages == ()
+    assert _states_by_pipeline(pg_engine, schema) == {
+        "pipeline-a": StageExecutionState.ADMITTED.value,
+        "pipeline-b": StageExecutionState.ADMITTED.value,
+    }
+
+
+def test_args_for_failure_isolates_to_its_stage(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+
+    def failing_args_for(_payload: AdmissionPayload) -> tuple[object, ...]:
+        raise ValueError("args_for exploded")
+
+    registry = PipelineRegistry()
+    registry.register(
+        PipelineDefinition(
+            key="pipeline-a",
+            version=1,
+            stages=(
+                StageDefinition(
+                    key="stage-a",
+                    queue_name="queue-a",
+                    workflow=_workflow,
+                    args_for=_args_for,
+                ),
+            ),
+        )
+    )
+    registry.register(
+        PipelineDefinition(
+            key="pipeline-b",
+            version=1,
+            stages=(
+                StageDefinition(
+                    key="stage-b",
+                    queue_name="queue-b",
+                    workflow=_workflow,
+                    args_for=failing_args_for,
+                ),
+            ),
+        )
+    )
+    _submit_two_stage_backlog(pg_engine, registry)
+    _pipeline_control(pg_engine, suffix="a", capacity=5, paused=False)
+    _pipeline_control(pg_engine, suffix="b", capacity=5, paused=False)
+    client = _RecordingClient()
+
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+
+    assert summary.admitted_total == 1
+    assert [options["queue_name"] for options, _ in client.enqueued] == [
+        "queue-a"
+    ]
+    assert _states_by_pipeline(pg_engine, schema) == {
+        "pipeline-a": StageExecutionState.ADMITTED.value,
+        "pipeline-b": StageExecutionState.READY.value,
+    }
+    with pg_engine.connect() as connection:
+        attempt_count = connection.execute(
+            select(func.count()).select_from(schema.stage_attempts)
+        ).scalar_one()
+    assert attempt_count == 1
+    assert summary.unconfigured_stages == ()
+    assert summary.failed_stages == (
+        StageAdmissionFailure(
+            pipeline_key="pipeline-b",
+            pipeline_version=1,
+            stage_key=StageKey("stage-b"),
+            error_type="ValueError",
+            message="args_for exploded",
+        ),
     )

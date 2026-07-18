@@ -87,18 +87,36 @@ class StageAdmissionCount:
 
 
 @dataclass(frozen=True, slots=True)
+class StageIdentityRecord:
+    """A stage identity excluded from a pass without any admission."""
+
+    pipeline_key: str
+    pipeline_version: int
+    stage_key: StageKey
+
+
+@dataclass(frozen=True, slots=True)
+class StageAdmissionFailure:
+    """The first args_for/enqueue failure recorded for a stage identity."""
+
+    pipeline_key: str
+    pipeline_version: int
+    stage_key: StageKey
+    error_type: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class AdmissionSummary:
     admitted_counts: tuple[StageAdmissionCount, ...]
     skipped_for_capacity: int
     skipped_for_pause: int
+    unconfigured_stages: tuple[StageIdentityRecord, ...]
+    failed_stages: tuple[StageAdmissionFailure, ...]
 
     @property
     def admitted_total(self) -> int:
         return sum(item.count for item in self.admitted_counts)
-
-
-class MissingStageControlError(RuntimeError):
-    """A registered stage has no required empty-selector capacity control."""
 
 
 class PipelineStageMismatchError(RuntimeError):
@@ -140,10 +158,18 @@ class _PassTally:
     admitted: dict[_StageIdentity, int] = field(default_factory=dict)
     skipped_for_capacity: int = 0
     skipped_for_pause: int = 0
+    unconfigured: set[_StageIdentity] = field(default_factory=set)
+    failed: dict[_StageIdentity, StageAdmissionFailure] = field(
+        default_factory=dict
+    )
 
     @property
     def admitted_total(self) -> int:
         return sum(self.admitted.values())
+
+    @property
+    def excluded(self) -> set[_StageIdentity]:
+        return self.unconfigured | self.failed.keys()
 
     def record_admitted(self, identity: _StageIdentity) -> None:
         self.admitted[identity] = self.admitted.get(identity, 0) + 1
@@ -153,6 +179,23 @@ class _PassTally:
 
     def record_capacity_skip(self) -> None:
         self.skipped_for_capacity += 1
+
+    def record_unconfigured(self, identities: set[_StageIdentity]) -> None:
+        self.unconfigured.update(identities)
+
+    def record_failure(
+        self, identity: _StageIdentity, error: Exception
+    ) -> None:
+        self.failed.setdefault(
+            identity,
+            StageAdmissionFailure(
+                pipeline_key=identity[0],
+                pipeline_version=identity[1],
+                stage_key=StageKey(identity[2]),
+                error_type=type(error).__name__,
+                message=str(error),
+            ),
+        )
 
     def to_summary(self) -> AdmissionSummary:
         counts = tuple(
@@ -164,10 +207,23 @@ class _PassTally:
             )
             for identity, count in sorted(self.admitted.items())
         )
+        unconfigured_stages = tuple(
+            StageIdentityRecord(
+                pipeline_key=identity[0],
+                pipeline_version=identity[1],
+                stage_key=StageKey(identity[2]),
+            )
+            for identity in sorted(self.unconfigured)
+        )
+        failed_stages = tuple(
+            self.failed[identity] for identity in sorted(self.failed)
+        )
         return AdmissionSummary(
             admitted_counts=counts,
             skipped_for_capacity=self.skipped_for_capacity,
             skipped_for_pause=self.skipped_for_pause,
+            unconfigured_stages=unconfigured_stages,
+            failed_stages=failed_stages,
         )
 
 
@@ -177,6 +233,8 @@ class _Page:
     controls_by_stage: dict[_StageIdentity, tuple[_Control, ...]]
     # Page-scoped occupancy snapshot; mutated as admissions land this page.
     occupancy: dict[int, int]
+    # Identities in this page lacking an empty-selector capacity control.
+    unconfigured: set[_StageIdentity]
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +267,12 @@ def run_admission_pass(  # noqa: PLR0913 -- explicit admission dependencies
     transaction just as it does when supplied an engine.  One pass considers
     at most ``batch_size + MAX_CAPACITY_SKIPS_PER_PASS`` SQL-selected rows;
     full controls exclude their matching backlog from later keyset pages.
+
+    A single unhealthy stage never aborts the pass: candidates whose stage
+    lacks an empty-selector control, and candidates whose ``args_for`` or
+    enqueue raises, are skipped and reported by stage identity through
+    :attr:`AdmissionSummary.unconfigured_stages` and
+    :attr:`AdmissionSummary.failed_stages`; all other admissions commit.
     """
     validate_positive_integer(batch_size, label="admission batch size")
     selected_schema = schema or StagingSchema()
@@ -242,6 +306,14 @@ def _admit_in_transaction(  # noqa: PLR0913 -- transaction dependencies
     clock: Callable[[], datetime],
     schema: StagingSchema,
 ) -> AdmissionSummary:
+    """Admit READY work on ``connection`` and report per-stage outcomes.
+
+    Failures never abort the pass.  A stage lacking an empty-selector
+    control is excluded and reported; an ``args_for`` or enqueue failure
+    rolls back that candidate through a savepoint, excludes its stage from
+    the remainder of the pass, and is reported by stage identity.  All other
+    admissions commit with the surrounding transaction.
+    """
     tally = _PassTally()
     admitted_at = clock()
     considered = 0
@@ -265,8 +337,11 @@ def _admit_in_transaction(  # noqa: PLR0913 -- transaction dependencies
         considered += len(page.candidates)
         last_candidate = page.candidates[-1]
         after = last_candidate.rank, last_candidate.stage_execution_id
+        tally.record_unconfigured(page.unconfigured)
 
         for candidate in page.candidates:
+            if candidate.stage_identity in tally.excluded:
+                continue
             controls = page.controls_by_stage[candidate.stage_identity]
             match _evaluate_candidate(
                 candidate,
@@ -279,14 +354,24 @@ def _admit_in_transaction(  # noqa: PLR0913 -- transaction dependencies
                     tally.record_capacity_skip()
                     full_control_ids.update(ids)
                 case _Admit(matching=matching):
-                    _admit_candidate(
-                        connection,
-                        candidate=candidate,
-                        client=client,
-                        registry=registry,
-                        admitted_at=admitted_at,
-                        schema=schema,
-                    )
+                    # ``args_for`` is the application boundary: any
+                    # exception it (or the enqueue) raises must isolate to
+                    # this candidate, not abort the shared pass.
+                    try:
+                        with connection.begin_nested():
+                            _admit_candidate(
+                                connection,
+                                candidate=candidate,
+                                client=client,
+                                registry=registry,
+                                admitted_at=admitted_at,
+                                schema=schema,
+                            )
+                    except Exception as error:  # noqa: BLE001 -- boundary
+                        tally.record_failure(
+                            candidate.stage_identity, error
+                        )
+                        continue
                     tally.record_admitted(candidate.stage_identity)
                     for control in matching:
                         page.occupancy[control.control_id] += 1
@@ -327,7 +412,7 @@ def _lock_page(
     grouped: dict[_StageIdentity, list[_Control]] = {}
     for control in controls:
         grouped.setdefault(control.stage_identity, []).append(control)
-    _validate_default_controls(
+    unconfigured = _unconfigured_identities(
         identities=identities,
         controls_by_stage=grouped,
     )
@@ -343,6 +428,7 @@ def _lock_page(
             for identity, stage_controls in grouped.items()
         },
         occupancy=occupancy,
+        unconfigured=unconfigured,
     )
 
 
@@ -547,20 +633,20 @@ def _lock_candidates(
     )
 
 
-def _validate_default_controls(
+def _unconfigured_identities(
     *,
     identities: set[_StageIdentity],
     controls_by_stage: dict[_StageIdentity, list[_Control]],
-) -> None:
-    for identity in identities:
+) -> set[_StageIdentity]:
+    """Return identities lacking any empty-selector capacity control."""
+    return {
+        identity
+        for identity in identities
         if not any(
             not control.selector
             for control in controls_by_stage.get(identity, ())
-        ):
-            raise MissingStageControlError(
-                "stage has no empty-selector capacity control: "
-                f"{identity[0]!r} version {identity[1]} stage {identity[2]!r}"
-            )
+        )
+    }
 
 
 def _lock_controls(
