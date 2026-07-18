@@ -8,7 +8,7 @@ arguments, and the package never interprets the resulting domain payloads.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -128,6 +128,67 @@ class _Control:
     paused: bool
 
 
+@dataclass(slots=True)
+class _PassTally:
+    """Mutable accumulator for one admission pass's outcomes."""
+
+    admitted: dict[_StageIdentity, int] = field(default_factory=dict)
+    skipped_for_capacity: int = 0
+    skipped_for_pause: int = 0
+
+    @property
+    def admitted_total(self) -> int:
+        return sum(self.admitted.values())
+
+    def record_admitted(self, identity: _StageIdentity) -> None:
+        self.admitted[identity] = self.admitted.get(identity, 0) + 1
+
+    def record_pause_skip(self) -> None:
+        self.skipped_for_pause += 1
+
+    def record_capacity_skip(self) -> None:
+        self.skipped_for_capacity += 1
+
+    def to_summary(self) -> AdmissionSummary:
+        counts = tuple(
+            StageAdmissionCount(
+                pipeline_key=identity[0],
+                pipeline_version=identity[1],
+                stage_key=StageKey(identity[2]),
+                count=count,
+            )
+            for identity, count in sorted(self.admitted.items())
+        )
+        return AdmissionSummary(
+            admitted_counts=counts,
+            skipped_for_capacity=self.skipped_for_capacity,
+            skipped_for_pause=self.skipped_for_pause,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _Page:
+    candidates: tuple[_Candidate, ...]
+    controls_by_stage: dict[_StageIdentity, tuple[_Control, ...]]
+    # Page-scoped occupancy snapshot; mutated as admissions land this page.
+    occupancy: dict[int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _Admit:
+    matching: tuple[_Control, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _SkipPaused:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _SkipFull:
+    full_control_ids: frozenset[int]
+
+
 def run_admission_pass(  # noqa: PLR0913 -- explicit admission dependencies
     database: Engine | Connection,
     *,
@@ -176,107 +237,135 @@ def _admit_in_transaction(  # noqa: PLR0913 -- transaction dependencies
     clock: Callable[[], datetime],
     schema: StagingSchema,
 ) -> AdmissionSummary:
-    admitted: dict[_StageIdentity, int] = {}
-    skipped_for_capacity = 0
-    skipped_for_pause = 0
+    tally = _PassTally()
     admitted_at = clock()
-    admitted_total = 0
     considered = 0
     considered_limit = batch_size + MAX_CAPACITY_SKIPS_PER_PASS
     after: tuple[int, int] | None = None
     full_control_ids: set[int] = set()
 
-    while admitted_total < batch_size and considered < considered_limit:
-        candidates = _lock_candidates(
+    while tally.admitted_total < batch_size and considered < considered_limit:
+        page = _lock_page(
             connection,
             schema=schema,
             limit=min(
-                batch_size - admitted_total,
+                batch_size - tally.admitted_total,
                 considered_limit - considered,
             ),
             after=after,
             full_control_ids=full_control_ids,
         )
-        if not candidates:
+        if page is None:
             break
-        considered += len(candidates)
-        last_candidate = candidates[-1]
+        considered += len(page.candidates)
+        last_candidate = page.candidates[-1]
         after = last_candidate.rank, last_candidate.stage_execution_id
 
-        controls = _lock_controls(
-            connection,
-            schema=schema,
-            identities={item.stage_identity for item in candidates},
-        )
-        controls_by_stage: dict[_StageIdentity, list[_Control]] = {}
-        for control in controls:
-            controls_by_stage.setdefault(
-                control.stage_identity, []
-            ).append(control)
-        _validate_default_controls(
-            identities={item.stage_identity for item in candidates},
-            controls_by_stage=controls_by_stage,
-        )
-        occupancy = _load_occupancy(
-            connection,
-            schema=schema,
-            control_ids=tuple(control.control_id for control in controls),
-        )
+        for candidate in page.candidates:
+            controls = page.controls_by_stage[candidate.stage_identity]
+            match _evaluate_candidate(
+                candidate,
+                controls=controls,
+                occupancy=page.occupancy,
+            ):
+                case _SkipPaused():
+                    tally.record_pause_skip()
+                case _SkipFull(full_control_ids=ids):
+                    tally.record_capacity_skip()
+                    full_control_ids.update(ids)
+                case _Admit(matching=matching):
+                    _admit_candidate(
+                        connection,
+                        candidate=candidate,
+                        client=client,
+                        registry=registry,
+                        admitted_at=admitted_at,
+                        schema=schema,
+                    )
+                    tally.record_admitted(candidate.stage_identity)
+                    for control in matching:
+                        page.occupancy[control.control_id] += 1
+                        if (
+                            page.occupancy[control.control_id]
+                            >= control.capacity
+                        ):
+                            full_control_ids.add(control.control_id)
+                    if tally.admitted_total >= batch_size:
+                        break
 
-        for candidate in candidates:
-            matching = tuple(
-                control
-                for control in controls_by_stage[candidate.stage_identity]
-                if _selector_matches(control.selector, candidate.labels)
-            )
-            if any(control.paused for control in matching):
-                skipped_for_pause += 1
-                continue
-            full = tuple(
-                control
-                for control in matching
-                if occupancy[control.control_id] >= control.capacity
-            )
-            if full:
-                skipped_for_capacity += 1
-                full_control_ids.update(
-                    control.control_id for control in full
-                )
-                continue
+    return tally.to_summary()
 
-            _admit_candidate(
-                connection,
-                candidate=candidate,
-                client=client,
-                registry=registry,
-                admitted_at=admitted_at,
-                schema=schema,
-            )
-            admitted_total += 1
-            admitted[candidate.stage_identity] = (
-                admitted.get(candidate.stage_identity, 0) + 1
-            )
-            for control in matching:
-                occupancy[control.control_id] += 1
-                if occupancy[control.control_id] >= control.capacity:
-                    full_control_ids.add(control.control_id)
-            if admitted_total >= batch_size:
-                break
 
-    counts = tuple(
-        StageAdmissionCount(
-            pipeline_key=identity[0],
-            pipeline_version=identity[1],
-            stage_key=StageKey(identity[2]),
-            count=count,
-        )
-        for identity, count in sorted(admitted.items())
+def _lock_page(
+    connection: Connection,
+    *,
+    schema: StagingSchema,
+    limit: int,
+    after: tuple[int, int] | None,
+    full_control_ids: set[int],
+) -> _Page | None:
+    candidates = _lock_candidates(
+        connection,
+        schema=schema,
+        limit=limit,
+        after=after,
+        full_control_ids=full_control_ids,
     )
-    return AdmissionSummary(
-        admitted_counts=counts,
-        skipped_for_capacity=skipped_for_capacity,
-        skipped_for_pause=skipped_for_pause,
+    if not candidates:
+        return None
+    identities = {item.stage_identity for item in candidates}
+    controls = _lock_controls(
+        connection,
+        schema=schema,
+        identities=identities,
     )
+    grouped: dict[_StageIdentity, list[_Control]] = {}
+    for control in controls:
+        grouped.setdefault(control.stage_identity, []).append(control)
+    _validate_default_controls(
+        identities=identities,
+        controls_by_stage=grouped,
+    )
+    occupancy = _load_occupancy(
+        connection,
+        schema=schema,
+        control_ids=tuple(control.control_id for control in controls),
+    )
+    return _Page(
+        candidates=candidates,
+        controls_by_stage={
+            identity: tuple(stage_controls)
+            for identity, stage_controls in grouped.items()
+        },
+        occupancy=occupancy,
+    )
+
+
+def _evaluate_candidate(
+    candidate: _Candidate,
+    *,
+    controls: tuple[_Control, ...],
+    occupancy: Mapping[int, int],
+) -> _Admit | _SkipPaused | _SkipFull:
+    matching = tuple(
+        control
+        for control in controls
+        if _selector_matches(control.selector, candidate.labels)
+    )
+    if any(control.paused for control in matching):
+        return _SkipPaused()
+    full = tuple(
+        control
+        for control in matching
+        if occupancy[control.control_id] >= control.capacity
+    )
+    if full:
+        return _SkipFull(
+            full_control_ids=frozenset(
+                control.control_id for control in full
+            )
+        )
+    return _Admit(matching=matching)
 
 
 def _admit_candidate(  # noqa: PLR0913 -- explicit admission facts

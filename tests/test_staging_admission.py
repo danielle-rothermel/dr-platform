@@ -30,6 +30,14 @@ from dr_platform.staging import (
 )
 from dr_platform.staging.admission import (
     AdmissionPayload,
+    StageAdmissionCount,
+    _Admit,
+    _Candidate,
+    _Control,
+    _evaluate_candidate,
+    _PassTally,
+    _SkipFull,
+    _SkipPaused,
     run_admission_pass,
 )
 from dr_platform.staging.controls import (
@@ -814,3 +822,182 @@ def test_empty_selector_is_default_and_upserts_as_one_control(
     ) == ({}, 3, True)
     assert red_controls == (replaced,)
     assert blue_controls == (replaced, selected)
+
+
+def _candidate(
+    *,
+    labels: Mapping[str, str],
+    stage_execution_id: int = 1,
+    rank: int = 1,
+    stage_identity: tuple[str, int, str] = ("evaluation", 1, "execute"),
+) -> _Candidate:
+    return _Candidate(
+        stage_execution_id=stage_execution_id,
+        rank=rank,
+        stage_index=0,
+        campaign_key="campaign-1",
+        work_key="work-0",
+        run_key="run-1",
+        input_ref="input:0",
+        labels=labels,
+        pipeline_key=stage_identity[0],
+        pipeline_version=stage_identity[1],
+        stage_key=stage_identity[2],
+    )
+
+
+def _make_control(
+    *,
+    control_id: int,
+    selector: Mapping[str, str],
+    capacity: int,
+    paused: bool = False,
+    stage_identity: tuple[str, int, str] = ("evaluation", 1, "execute"),
+) -> _Control:
+    return _Control(
+        control_id=control_id,
+        stage_identity=stage_identity,
+        selector=selector,
+        capacity=capacity,
+        paused=paused,
+    )
+
+
+def test_evaluate_candidate_paused_beats_full() -> None:
+    candidate = _candidate(labels={"cohort": "blue"})
+    default = _make_control(control_id=1, selector={}, capacity=1)
+    paused = _make_control(
+        control_id=2,
+        selector={"cohort": "blue"},
+        capacity=5,
+        paused=True,
+    )
+    occupancy = {1: 5, 2: 0}
+
+    result = _evaluate_candidate(
+        candidate,
+        controls=(default, paused),
+        occupancy=occupancy,
+    )
+
+    assert isinstance(result, _SkipPaused)
+
+
+def test_evaluate_candidate_occupancy_at_capacity_is_full() -> None:
+    candidate = _candidate(labels={})
+    control = _make_control(control_id=1, selector={}, capacity=2)
+
+    result = _evaluate_candidate(
+        candidate,
+        controls=(control,),
+        occupancy={1: 2},
+    )
+
+    assert result == _SkipFull(full_control_ids=frozenset({1}))
+
+
+def test_evaluate_candidate_occupancy_below_capacity_admits() -> None:
+    candidate = _candidate(labels={})
+    control = _make_control(control_id=1, selector={}, capacity=2)
+
+    result = _evaluate_candidate(
+        candidate,
+        controls=(control,),
+        occupancy={1: 1},
+    )
+
+    assert result == _Admit(matching=(control,))
+
+
+def test_evaluate_candidate_empty_selector_matches_any_labels() -> None:
+    candidate = _candidate(labels={"cohort": "red", "tier": "gold"})
+    control = _make_control(control_id=1, selector={}, capacity=3)
+
+    result = _evaluate_candidate(
+        candidate,
+        controls=(control,),
+        occupancy={1: 0},
+    )
+
+    assert result == _Admit(matching=(control,))
+
+
+def test_evaluate_candidate_reports_only_the_full_matching_control() -> None:
+    candidate = _candidate(labels={"cohort": "blue"})
+    default = _make_control(control_id=1, selector={}, capacity=5)
+    selective = _make_control(
+        control_id=2,
+        selector={"cohort": "blue"},
+        capacity=1,
+    )
+
+    result = _evaluate_candidate(
+        candidate,
+        controls=(default, selective),
+        occupancy={1: 0, 2: 1},
+    )
+
+    assert result == _SkipFull(full_control_ids=frozenset({2}))
+
+
+def test_evaluate_candidate_full_but_non_matching_control_does_not_block(
+) -> None:
+    candidate = _candidate(labels={"cohort": "red"})
+    default = _make_control(control_id=1, selector={}, capacity=5)
+    other = _make_control(
+        control_id=2,
+        selector={"cohort": "blue"},
+        capacity=1,
+    )
+
+    result = _evaluate_candidate(
+        candidate,
+        controls=(default, other),
+        occupancy={1: 0, 2: 1},
+    )
+
+    assert result == _Admit(matching=(default,))
+
+
+def test_pass_tally_admitted_total_derives_from_per_stage_counts() -> None:
+    tally = _PassTally()
+    tally.record_admitted(("evaluation", 1, "execute"))
+    tally.record_admitted(("evaluation", 1, "execute"))
+    tally.record_admitted(("other", 2, "stage"))
+
+    assert tally.admitted_total == 3
+    assert tally.admitted == {
+        ("evaluation", 1, "execute"): 2,
+        ("other", 2, "stage"): 1,
+    }
+
+
+def test_pass_tally_to_summary_sorts_and_converts_stage_keys() -> None:
+    tally = _PassTally()
+    tally.record_admitted(("evaluation", 1, "zeta"))
+    tally.record_admitted(("evaluation", 1, "alpha"))
+    tally.record_capacity_skip()
+    tally.record_pause_skip()
+
+    summary = tally.to_summary()
+
+    assert summary.skipped_for_capacity == 1
+    assert summary.skipped_for_pause == 1
+    assert summary.admitted_counts == (
+        StageAdmissionCount(
+            pipeline_key="evaluation",
+            pipeline_version=1,
+            stage_key=StageKey("alpha"),
+            count=1,
+        ),
+        StageAdmissionCount(
+            pipeline_key="evaluation",
+            pipeline_version=1,
+            stage_key=StageKey("zeta"),
+            count=1,
+        ),
+    )
+    assert all(
+        isinstance(item.stage_key, StageKey)
+        for item in summary.admitted_counts
+    )
