@@ -145,6 +145,7 @@ def test_build_platform_dbos_config_redacts_query_values() -> None:
         "host=other.example",
         "port=6543",
         "host=primary.example&host=standby.example",
+        "dbname=other",
     ],
 )
 def test_build_platform_dbos_config_rejects_query_routing(
@@ -153,8 +154,8 @@ def test_build_platform_dbos_config_rejects_query_routing(
     with pytest.raises(
         ValueError,
         match=(
-            "PostgreSQL database URLs must not use host or port query "
-            "parameters"
+            "PostgreSQL database URLs must not use host, port, or dbname "
+            "query parameters"
         ),
     ):
         dbos_config.build_platform_dbos_config(
@@ -162,6 +163,17 @@ def test_build_platform_dbos_config_rejects_query_routing(
             system_database_url=(
                 f"postgresql://system@db.example/platform?{routing_query}"
             ),
+        )
+
+
+def test_build_platform_dbos_config_rejects_missing_database_name() -> None:
+    with pytest.raises(
+        ValueError,
+        match="PostgreSQL database URLs must name an explicit database",
+    ):
+        dbos_config.build_platform_dbos_config(
+            database_url="postgresql://platform_user@db.example",
+            system_database_url="postgresql://dbos_user@db.example",
         )
 
 

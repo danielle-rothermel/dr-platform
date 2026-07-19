@@ -146,17 +146,23 @@ def _database_identity(
     database_url: str,
 ) -> tuple[str | None, int | None, str | None]:
     url = make_url(normalize_postgresql_driver_url(database_url))
-    if url.get_backend_name() in {"postgres", "postgresql"} and {
+    is_postgres = url.get_backend_name() in {"postgres", "postgresql"}
+    if is_postgres and {
         "host",
         "port",
+        "dbname",
     }.intersection(url.query):
         raise ValueError(
-            "PostgreSQL database URLs must not use host or port query "
-            "parameters"
+            "PostgreSQL database URLs must not use host, port, or dbname "
+            "query parameters"
+        )
+    if is_postgres and url.database is None:
+        raise ValueError(
+            "PostgreSQL database URLs must name an explicit database"
         )
     host = url.host.casefold() if url.host is not None else None
     port = url.port
-    if url.get_backend_name() in {"postgres", "postgresql"} and port is None:
+    if is_postgres and port is None:
         port = 5432
     return host, port, url.database
 
