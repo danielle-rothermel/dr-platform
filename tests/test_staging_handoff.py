@@ -489,6 +489,87 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
         DBOS.destroy(destroy_registry=True)
 
 
+class _UnprintableError(RuntimeError):
+    def __str__(self) -> str:
+        raise ValueError("this error message cannot be rendered")
+
+
+def test_application_failure_with_unprintable_error_lands_failed(
+    clean_pg: str,
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+
+    def raises_unprintable(_input_ref: str) -> str:
+        raise _UnprintableError
+
+    declared = _pipeline(
+        key=f"unprintable-{suffix}",
+        stage_logic=(("execute", raises_unprintable),),
+    )
+    pipeline = wrap_pipeline_workflows(declared, clock=_utc_now)
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    _configure_controls(pg_engine, pipeline, capacity=1)
+    _submit_items(
+        pg_engine,
+        registry,
+        pipeline,
+        campaign_key=f"campaign-unprintable-{suffix}",
+        run_key=f"run-unprintable-{suffix}",
+        items=(WorkInput(work_key="work", input_ref="input", labels={}),),
+    )
+    Queue(pipeline.stages[0].queue_name, polling_interval_sec=0.02)
+
+    client: DBOSClient | None = None
+    try:
+        _launch_dbos(clean_pg, suffix=suffix)
+        client = DBOSClient(system_database_url=clean_pg)
+        admitted = run_admission_pass(
+            pg_engine,
+            client=client,
+            registry=registry,
+            clock=_utc_now,
+        )
+        assert admitted.admitted_total == 1
+        _wait_for(
+            lambda: _stage_state_count(
+                pg_engine,
+                schema,
+                stage_index=0,
+                state=StageExecutionState.FAILED,
+            )
+            == 1
+        )
+
+        with pg_engine.connect() as connection:
+            terminal_summary = connection.execute(
+                select(schema.stage_attempts.c.terminal_summary)
+                .join(
+                    schema.stage_executions,
+                    schema.stage_attempts.c.stage_execution_id
+                    == schema.stage_executions.c.stage_execution_id,
+                )
+                .where(
+                    schema.stage_executions.c.state
+                    == StageExecutionState.FAILED.value
+                )
+            ).scalar_one()
+    finally:
+        if client is not None:
+            client.destroy()
+        DBOS.destroy(destroy_registry=True)
+
+    expected_type = (
+        f"{_UnprintableError.__module__}.{_UnprintableError.__qualname__}"
+    )
+    assert terminal_summary["error_type"] == expected_type
+    assert terminal_summary["message"] == (
+        f"<unprintable {expected_type} message>"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _Status:
     workflow_id: str

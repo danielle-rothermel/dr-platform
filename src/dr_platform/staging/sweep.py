@@ -88,7 +88,6 @@ def sweep_abandoned_stages(
     validate_positive_integer(batch_size, label="sweep batch size")
     selected_schema = schema or StagingSchema()
     projections: list[SweepProjection] = []
-    projected_at = clock()
     inspected_count = 0
     cursor: int | None = None
     while True:
@@ -126,13 +125,17 @@ def sweep_abandoned_stages(
             }
             if status.error is not None:
                 terminal_summary["message"] = str(status.error)
+            # Read the clock per projection: pages commit separately, so a
+            # single up-front timestamp can fall behind a row bumped after the
+            # sweep started and drive updated_at backwards.
+            terminal_at = clock()
             with engine.begin() as connection:
                 if not _project_terminal_status(
                     connection,
                     attempt=attempt,
                     target_state=target_state,
                     terminal_summary=terminal_summary,
-                    terminal_at=projected_at,
+                    terminal_at=terminal_at,
                     schema=selected_schema,
                 ):
                     continue

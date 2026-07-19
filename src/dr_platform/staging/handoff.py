@@ -51,6 +51,13 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _safe_error_message(error: BaseException, *, error_type: str) -> str:
+    try:
+        return str(error)
+    except Exception:  # noqa: BLE001 -- defend against a broken __str__
+        return f"<unprintable {error_type} message>"
+
+
 def wrap_pipeline_workflows(
     pipeline: PipelineDefinition,
     *,
@@ -60,6 +67,11 @@ def wrap_pipeline_workflows(
 
     The input declaration remains unchanged.  Register and submit against the
     returned declaration so admission enqueues the generated workflows.
+
+    Application stage callables may re-execute: if DBOS recovers a workflow
+    that crashed before its completion transaction checkpointed, the stage body
+    runs again.  Applications must tolerate at-least-once execution of stage
+    bodies; only the completion transaction itself commits exactly once.
     """
     wrapped_stages = tuple(
         StageDefinition(
@@ -155,7 +167,9 @@ def _wrap_stage_workflow(
                 terminal_summary={
                     "outcome": StageExecutionState.FAILED.value,
                     "error_type": error_type,
-                    "message": str(error),
+                    "message": _safe_error_message(
+                        error, error_type=error_type
+                    ),
                 },
                 terminal_reference=error_type,
                 next_stage_key=None,
