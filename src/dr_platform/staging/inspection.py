@@ -117,23 +117,39 @@ def list_campaigns(
     runs = selected_schema.pipeline_runs
     items = selected_schema.work_items
     normalized_cursor = _campaign_key(cursor) if cursor is not None else None
-    statement = (
+    run_agg = (
         select(
             runs.c.campaign_key,
             func.min(runs.c.created_at).label("created_at"),
-            func.count(func.distinct(runs.c.run_key)).label("run_count"),
-            func.count(func.distinct(items.c.work_item_id)).label(
+            func.count().label("run_count"),
+        )
+        .group_by(runs.c.campaign_key)
+        .subquery()
+    )
+    item_agg = (
+        select(
+            items.c.campaign_key,
+            func.count().label("work_item_count"),
+        )
+        .group_by(items.c.campaign_key)
+        .subquery()
+    )
+    statement = (
+        select(
+            run_agg.c.campaign_key,
+            run_agg.c.created_at,
+            run_agg.c.run_count,
+            func.coalesce(item_agg.c.work_item_count, 0).label(
                 "work_item_count"
             ),
         )
         .select_from(
-            runs.outerjoin(
-                items,
-                runs.c.campaign_key == items.c.campaign_key,
+            run_agg.outerjoin(
+                item_agg,
+                run_agg.c.campaign_key == item_agg.c.campaign_key,
             )
         )
-        .group_by(runs.c.campaign_key)
-        .order_by(runs.c.campaign_key)
+        .order_by(run_agg.c.campaign_key)
         .limit(limit)
     )
     with engine.connect() as connection:
@@ -144,7 +160,7 @@ def list_campaigns(
                 schema=selected_schema,
             )
             statement = statement.where(
-                runs.c.campaign_key > normalized_cursor.value
+                run_agg.c.campaign_key > normalized_cursor.value
             )
         return tuple(
             CampaignSummary(

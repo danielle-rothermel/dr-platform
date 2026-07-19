@@ -286,6 +286,35 @@ def test_inspection_readers_are_bounded_cursor_stable_and_frozen(
         cast("dict[str, str]", first_item[0].labels)["new"] = "value"
 
 
+def test_list_campaigns_counts_runs_and_items_independently(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry = _registry()
+    _submit(
+        pg_engine,
+        registry,
+        campaign_key="campaign-counts",
+        run_key="run-1",
+        work_keys=("work-1", "work-2", "work-3"),
+    )
+    _submit(
+        pg_engine,
+        registry,
+        campaign_key="campaign-counts",
+        run_key="run-2",
+        work_keys=("work-4", "work-5"),
+        clock=NOW + timedelta(seconds=1),
+    )
+
+    (campaign,) = list_campaigns(engine=pg_engine)
+
+    assert str(campaign.campaign_key) == "campaign-counts"
+    assert campaign.created_at == NOW
+    assert campaign.run_count == 2
+    assert campaign.work_item_count == 5
+
+
 def test_six_seed_top_up_uses_bulk_statuses_for_one_campaign(
     pg_engine: Engine,
 ) -> None:
