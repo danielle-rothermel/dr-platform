@@ -76,64 +76,80 @@ def sweep_abandoned_stages(
 
     Missing and active workflows are deliberately ignored.  The sweep never
     retries, resumes, replaces, or waits for a workflow.
+
+    ``batch_size`` is a keyset page size, not a cap: a single sweep paginates
+    through every ADMITTED attempt so long-running healthy attempts with low
+    ids cannot starve abandoned ones out of inspection.  An out-of-band DBOS
+    resume races benignly with projection -- platform state is authoritative,
+    so a workflow that resumes and completes after projection fails the
+    handoff identity guard (:class:`StageHandoffMismatchError`) rather than
+    corrupting state.
     """
     validate_positive_integer(batch_size, label="sweep batch size")
     selected_schema = schema or StagingSchema()
-    with engine.connect() as connection:
-        admitted = _list_admitted_attempts(
-            connection,
-            schema=selected_schema,
-            limit=batch_size,
-        )
-    if not admitted:
-        return SweepSummary(projections=(), inspected_count=0)
-
-    statuses = client.list_workflows(
-        workflow_ids=[attempt.workflow_id for attempt in admitted],
-        load_input=False,
-        load_output=False,
-    )
-    statuses_by_id = {status.workflow_id: status for status in statuses}
     projections: list[SweepProjection] = []
     projected_at = clock()
-    for attempt in admitted:
-        status = statuses_by_id.get(attempt.workflow_id)
-        if status is None:
-            continue
-        if status.status == DbosWorkflowStatus.CANCELLED.value:
-            target_state = StageExecutionState.CANCELLED
-        elif status.status in _FAILED_DBOS_STATUSES:
-            target_state = StageExecutionState.FAILED
-        else:
-            continue
-        terminal_summary: dict[str, object] = {
-            "outcome": target_state.value,
-            "dbos_status": status.status,
-        }
-        if status.error is not None:
-            terminal_summary["message"] = str(status.error)
-        with engine.begin() as connection:
-            if not _project_terminal_status(
+    inspected_count = 0
+    cursor: int | None = None
+    while True:
+        with engine.connect() as connection:
+            admitted = _list_admitted_attempts(
                 connection,
-                attempt=attempt,
-                target_state=target_state,
-                terminal_summary=terminal_summary,
-                terminal_at=projected_at,
                 schema=selected_schema,
-            ):
-                continue
-        projections.append(
-            SweepProjection(
-                workflow_id=attempt.workflow_id,
-                stage_execution_id=attempt.stage_execution_id,
-                stage_key=attempt.stage_key,
-                state=target_state,
-                dbos_status=status.status,
+                limit=batch_size,
+                after=cursor,
             )
+        if not admitted:
+            break
+        inspected_count += len(admitted)
+        cursor = admitted[-1].stage_execution_id
+
+        statuses = client.list_workflows(
+            workflow_ids=[attempt.workflow_id for attempt in admitted],
+            load_input=False,
+            load_output=False,
         )
+        statuses_by_id = {status.workflow_id: status for status in statuses}
+        for attempt in admitted:
+            status = statuses_by_id.get(attempt.workflow_id)
+            if status is None:
+                continue
+            if status.status == DbosWorkflowStatus.CANCELLED.value:
+                target_state = StageExecutionState.CANCELLED
+            elif status.status in _FAILED_DBOS_STATUSES:
+                target_state = StageExecutionState.FAILED
+            else:
+                continue
+            terminal_summary: dict[str, object] = {
+                "outcome": target_state.value,
+                "dbos_status": status.status,
+            }
+            if status.error is not None:
+                terminal_summary["message"] = str(status.error)
+            with engine.begin() as connection:
+                if not _project_terminal_status(
+                    connection,
+                    attempt=attempt,
+                    target_state=target_state,
+                    terminal_summary=terminal_summary,
+                    terminal_at=projected_at,
+                    schema=selected_schema,
+                ):
+                    continue
+            projections.append(
+                SweepProjection(
+                    workflow_id=attempt.workflow_id,
+                    stage_execution_id=attempt.stage_execution_id,
+                    stage_key=attempt.stage_key,
+                    state=target_state,
+                    dbos_status=status.status,
+                )
+            )
+        if len(admitted) < batch_size:
+            break
     return SweepSummary(
         projections=tuple(projections),
-        inspected_count=len(admitted),
+        inspected_count=inspected_count,
     )
 
 
@@ -142,9 +158,17 @@ def _list_admitted_attempts(
     *,
     schema: StagingSchema,
     limit: int,
+    after: int | None = None,
 ) -> tuple[_AdmittedAttempt, ...]:
     executions = schema.stage_executions
     attempts = schema.stage_attempts
+    conditions = [
+        executions.c.state == StageExecutionState.ADMITTED.value,
+        attempts.c.attempt_number == executions.c.current_attempt,
+        attempts.c.terminal_at.is_(None),
+    ]
+    if after is not None:
+        conditions.append(executions.c.stage_execution_id > after)
     rows = connection.execute(
         select(
             attempts.c.workflow_id,
@@ -159,11 +183,7 @@ def _list_admitted_attempts(
                 == attempts.c.stage_execution_id,
             )
         )
-        .where(
-            executions.c.state == StageExecutionState.ADMITTED.value,
-            attempts.c.attempt_number == executions.c.current_attempt,
-            attempts.c.terminal_at.is_(None),
-        )
+        .where(*conditions)
         .order_by(executions.c.stage_execution_id)
         .limit(limit)
     ).mappings()

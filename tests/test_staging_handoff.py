@@ -504,6 +504,29 @@ class _StatusClient:
         return list(self._statuses)
 
 
+class _PagingStatusClient:
+    """Return only the statuses whose ids are in the requested page.
+
+    Unlike :class:`_StatusClient`, this honours ``workflow_ids`` so keyset
+    pages queried by a single sweep are served independently, proving the
+    sweep advances past the first page.
+    """
+
+    def __init__(self, statuses: tuple[_Status, ...]) -> None:
+        self._by_id = {status.workflow_id: status for status in statuses}
+        self.requested_ids: list[tuple[str, ...]] = []
+
+    def list_workflows(
+        self, *, workflow_ids: list[str], **_kwargs: object
+    ) -> list[_Status]:
+        self.requested_ids.append(tuple(workflow_ids))
+        return [
+            self._by_id[workflow_id]
+            for workflow_id in workflow_ids
+            if workflow_id in self._by_id
+        ]
+
+
 def test_sweep_projects_only_cancelled_or_abandoned_admitted_attempts(
     pg_engine: Engine,
 ) -> None:
@@ -597,3 +620,87 @@ def test_sweep_projects_only_cancelled_or_abandoned_admitted_attempts(
         clock=_utc_now,
     )
     assert second.admitted_total == 1
+
+
+def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    pipeline = _pipeline(
+        key="sweep-page-pipeline",
+        stage_logic=(("execute", lambda input_ref: f"output:{input_ref}"),),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    admitted_total = 5
+    _configure_controls(pg_engine, pipeline, capacity=admitted_total)
+    _submit_items(
+        pg_engine,
+        registry,
+        pipeline,
+        campaign_key="campaign-sweep-page",
+        run_key="run-sweep-page",
+        items=tuple(
+            WorkInput(
+                work_key=f"work-{index}",
+                input_ref=f"input:{index}",
+                labels={},
+            )
+            for index in range(admitted_total)
+        ),
+    )
+    admission_client = _RecordingClient()
+    admitted = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(admission_client),
+        registry=registry,
+        clock=_utc_now,
+    )
+    assert admitted.admitted_total == admitted_total
+
+    # Order the admitted workflow ids by stage_execution_id so the abandoned
+    # one sits strictly beyond the first keyset page.
+    with pg_engine.connect() as connection:
+        ordered_ids = [
+            row[0]
+            for row in connection.execute(
+                select(schema.stage_attempts.c.workflow_id)
+                .join(
+                    schema.stage_executions,
+                    schema.stage_attempts.c.stage_execution_id
+                    == schema.stage_executions.c.stage_execution_id,
+                )
+                .order_by(schema.stage_executions.c.stage_execution_id)
+            ).all()
+        ]
+    assert len(ordered_ids) == admitted_total
+    abandoned_id = ordered_ids[-1]
+    status_client = _PagingStatusClient(
+        (
+            _Status(
+                abandoned_id,
+                "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+                RuntimeError("recovery exhausted"),
+            ),
+        )
+    )
+
+    batch_size = 2
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        client=_as_dbos_client(status_client),
+        batch_size=batch_size,
+        clock=_utc_now,
+    )
+
+    # A single sweep must inspect every admitted attempt across pages and
+    # project the abandoned one that lives past the first page.
+    assert summary.inspected_count == admitted_total
+    assert summary.projected_count == 1
+    assert summary.projections[0].workflow_id == abandoned_id
+    assert summary.projections[0].state == StageExecutionState.FAILED
+    # More than one page was queried, reaching the abandoned id later.
+    assert len(status_client.requested_ids) > 1
+    assert any(
+        abandoned_id in page for page in status_client.requested_ids
+    )

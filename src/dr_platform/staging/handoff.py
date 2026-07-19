@@ -98,6 +98,39 @@ def _wrap_stage_workflow(
         pipeline_version=pipeline.version,
         stage_key=stage.key,
     )
+
+    def _complete_stage_transaction(  # noqa: PLR0913
+        *,
+        workflow_id: str,
+        pipeline_key: str,
+        pipeline_version: int,
+        stage_key: str,
+        stage_index: int,
+        succeeded: bool,
+        output_reference: str | None,
+        terminal_summary: Mapping[str, object],
+        terminal_reference: str | None,
+        next_stage_key: str | None,
+        next_stage_index: int | None,
+    ) -> None:
+        # ``clock()`` is non-deterministic, so it must be read inside the
+        # checkpointed transaction rather than in the replayable workflow body.
+        _complete_stage_in_transaction(
+            cast("Connection", DBOS.sql_session),
+            workflow_id=workflow_id,
+            pipeline_key=pipeline_key,
+            pipeline_version=pipeline_version,
+            stage_key=stage_key,
+            stage_index=stage_index,
+            succeeded=succeeded,
+            output_reference=output_reference,
+            terminal_summary=terminal_summary,
+            terminal_reference=terminal_reference,
+            next_stage_key=next_stage_key,
+            next_stage_index=next_stage_index,
+            completed_at=clock(),
+        )
+
     complete_stage = DBOS.transaction(
         name=f"{workflow_name}_complete"
     )(_complete_stage_transaction)
@@ -127,7 +160,6 @@ def _wrap_stage_workflow(
                 terminal_reference=error_type,
                 next_stage_key=None,
                 next_stage_index=None,
-                completed_at=clock(),
             )
             return None
 
@@ -147,43 +179,10 @@ def _wrap_stage_workflow(
             next_stage_index=(
                 None if next_stage is None else stage_index + 1
             ),
-            completed_at=clock(),
         )
         return output_reference
 
     return cast("WorkflowCallable", run_stage)
-
-
-def _complete_stage_transaction(  # noqa: PLR0913
-    *,
-    workflow_id: str,
-    pipeline_key: str,
-    pipeline_version: int,
-    stage_key: str,
-    stage_index: int,
-    succeeded: bool,
-    output_reference: str | None,
-    terminal_summary: Mapping[str, object],
-    terminal_reference: str | None,
-    next_stage_key: str | None,
-    next_stage_index: int | None,
-    completed_at: datetime,
-) -> None:
-    _complete_stage_in_transaction(
-        cast("Connection", DBOS.sql_session),
-        workflow_id=workflow_id,
-        pipeline_key=pipeline_key,
-        pipeline_version=pipeline_version,
-        stage_key=stage_key,
-        stage_index=stage_index,
-        succeeded=succeeded,
-        output_reference=output_reference,
-        terminal_summary=terminal_summary,
-        terminal_reference=terminal_reference,
-        next_stage_key=next_stage_key,
-        next_stage_index=next_stage_index,
-        completed_at=completed_at,
-    )
 
 
 def _complete_stage_in_transaction(  # noqa: PLR0913
