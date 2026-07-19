@@ -161,6 +161,7 @@ try:
     )
 
     requested = [f"work-{index}" for index in range(10)]
+    deadline = time.monotonic() + 60
     while True:
         statuses = bulk_work_statuses(
             "campaign-1", requested, engine=engine
@@ -170,6 +171,14 @@ try:
             for status in statuses
         ):
             break
+        if any(
+            status.state
+            in {StageExecutionState.FAILED, StageExecutionState.CANCELLED}
+            for status in statuses
+        ):
+            raise RuntimeError("work reached a terminal failure state")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("work did not finish before the deadline")
         time.sleep(0.25)
 
     campaign = inspect_campaign("campaign-1", engine=engine)
