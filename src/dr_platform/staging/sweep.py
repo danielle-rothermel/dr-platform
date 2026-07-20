@@ -37,6 +37,15 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _safe_error_message(error: object) -> str:
+    # ``str`` of a DBOS-reported error runs outside the projection savepoint;
+    # a broken __str__ must not abort the page it summarizes.
+    try:
+        return str(error)
+    except Exception:  # noqa: BLE001 -- defend against a broken __str__
+        return "<unprintable error message>"
+
+
 @dataclass(frozen=True, slots=True)
 class SweepProjection:
     workflow_id: str
@@ -127,7 +136,9 @@ def sweep_abandoned_stages(
                 "dbos_status": status.status,
             }
             if status.error is not None:
-                terminal_summary["message"] = str(status.error)
+                terminal_summary["message"] = _safe_error_message(
+                    status.error
+                )
             # Read the clock per projection: pages commit separately, so a
             # single up-front timestamp can fall behind a row bumped after the
             # sweep started and drive updated_at backwards.
