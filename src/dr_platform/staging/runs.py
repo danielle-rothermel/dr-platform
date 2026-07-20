@@ -81,7 +81,18 @@ def insert_pipeline_run(  # noqa: PLR0913 -- explicit persistence facts
             run_key=normalized_run_key,
             schema=selected_schema,
         )
-        assert existing is not None
+        if existing is None:
+            # ON CONFLICT DO NOTHING fired, so a row for this run key was
+            # committed by another transaction. The read-back requires
+            # READ COMMITTED to observe it; under REPEATABLE READ this
+            # branch can be legitimately reached from a snapshot taken
+            # before that commit, which is a caller/isolation error, not a
+            # missing row.
+            raise RuntimeError(
+                "pipeline run conflicted but no row was found on read-back "
+                f"(run_key={normalized_run_key.value!r}); this requires "
+                "READ COMMITTED isolation"
+            )
         if (
             existing.campaign_key != normalized_campaign_key
             or existing.pipeline_key != pipeline_key

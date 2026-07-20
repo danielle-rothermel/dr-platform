@@ -114,7 +114,19 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
             stage_key=normalized_stage_key,
             schema=selected_schema,
         )
-        assert existing is not None
+        if existing is None:
+            # ON CONFLICT DO NOTHING fired, so a row for this work item/stage
+            # was committed by another transaction. The read-back requires
+            # READ COMMITTED to observe it; under REPEATABLE READ this
+            # branch can be legitimately reached from a snapshot taken
+            # before that commit, which is a caller/isolation error, not a
+            # missing row.
+            raise RuntimeError(
+                "stage execution conflicted but no row was found on "
+                f"read-back (work_item_id={work_item_id!r}, "
+                f"stage_key={normalized_stage_key.value!r}); this requires "
+                "READ COMMITTED isolation"
+            )
         if existing.stage_index != stage_index or existing.rank != rank:
             raise StageExecutionConflictError(
                 "work item stage is already bound to different immutable "

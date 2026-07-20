@@ -131,7 +131,19 @@ def insert_work_item_with_result(  # noqa: PLR0913
             work_key=identity.work_key,
             schema=selected_schema,
         )
-        assert existing is not None
+        if existing is None:
+            # ON CONFLICT DO NOTHING fired, so a row for this campaign/work
+            # identity was committed by another transaction. The read-back
+            # requires READ COMMITTED to observe it; under REPEATABLE READ
+            # this branch can be legitimately reached from a snapshot taken
+            # before that commit, which is a caller/isolation error, not a
+            # missing row.
+            raise RuntimeError(
+                "work item conflicted but no row was found on read-back "
+                f"(campaign_key={identity.campaign_key.value!r}, "
+                f"work_key={identity.work_key.value!r}); this requires "
+                "READ COMMITTED isolation"
+            )
         # The origin run is first-writer provenance. Later runs in the same
         # campaign converge on that work item when its application facts match.
         if (
