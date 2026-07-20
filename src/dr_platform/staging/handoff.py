@@ -43,8 +43,24 @@ if TYPE_CHECKING:
     from dr_platform.staging.identities import PipelineKey, StageKey
 
 
+_WRAPPED_STAGE_MARKER = "_dr_platform_wrapped_stage"
+
+
 class StageHandoffMismatchError(RuntimeError):
     """The running workflow does not match its persisted stage attempt."""
+
+
+def is_pipeline_wrapped(pipeline: PipelineDefinition) -> bool:
+    """Report whether every stage callable is a package-owned wrapper.
+
+    Admission enqueues the registered ``workflow`` callables directly, so only
+    a fully wrapped definition runs the completion transaction; the execution
+    wiring uses this to reject definitions that would sit ADMITTED forever.
+    """
+    return all(
+        getattr(stage.workflow, _WRAPPED_STAGE_MARKER, False)
+        for stage in pipeline.stages
+    )
 
 
 def _utc_now() -> datetime:
@@ -196,6 +212,9 @@ def _wrap_stage_workflow(
         )
         return output_reference
 
+    # Mark the callable so the execution wiring can reject a raw declaration
+    # registered in place of this wrapper's return value.
+    setattr(run_stage, _WRAPPED_STAGE_MARKER, True)
     return cast("WorkflowCallable", run_stage)
 
 
@@ -313,6 +332,10 @@ def _lock_handoff_source(
     workflow_id: str,
     schema: StagingSchema,
 ) -> RowMapping:
+    # Lock the execution row before the attempt row so this path shares the
+    # execution-then-attempt order the sweep projection uses; a single joined
+    # FOR UPDATE would lock the workflow_id-driven attempt row first and can
+    # deadlock against concurrent sweep projection of the same attempt.
     executions = schema.stage_executions
     attempts = schema.stage_attempts
     work_items = schema.work_items
@@ -346,7 +369,7 @@ def _lock_handoff_source(
                 )
             )
             .where(attempts.c.workflow_id == workflow_id)
-            .with_for_update(of=(attempts, executions))
+            .with_for_update(of=executions)
         )
         .mappings()
         .one_or_none()
@@ -355,6 +378,16 @@ def _lock_handoff_source(
         raise LookupError(
             f"stage attempt workflow does not exist: {workflow_id}"
         )
+    # Lock the attempt row second; its identity is fully resolved above, so
+    # record_stage_attempt_terminal re-locks the same row without inverting.
+    connection.execute(
+        select(attempts.c.stage_attempt_id)
+        .where(
+            attempts.c.stage_execution_id == row["stage_execution_id"],
+            attempts.c.attempt_number == row["attempt_number"],
+        )
+        .with_for_update(of=attempts)
+    ).one()
     return row
 
 

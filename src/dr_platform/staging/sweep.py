@@ -37,6 +37,15 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _safe_error_message(error: object) -> str:
+    # ``str`` of a DBOS-reported error runs outside the projection savepoint;
+    # a broken __str__ must not abort the page it summarizes.
+    try:
+        return str(error)
+    except Exception:  # noqa: BLE001 -- defend against a broken __str__
+        return "<unprintable error message>"
+
+
 @dataclass(frozen=True, slots=True)
 class SweepProjection:
     workflow_id: str
@@ -79,11 +88,14 @@ def sweep_abandoned_stages(
 
     ``batch_size`` is a keyset page size, not a cap: a single sweep paginates
     through every ADMITTED attempt so long-running healthy attempts with low
-    ids cannot starve abandoned ones out of inspection.  An out-of-band DBOS
-    resume races benignly with projection -- platform state is authoritative,
-    so a workflow that resumes and completes after projection fails the
-    handoff identity guard (:class:`StageHandoffMismatchError`) rather than
-    corrupting state.
+    ids cannot starve abandoned ones out of inspection.  The admitted set is
+    bounded by total stage capacity, so a full pass per call is cheap; there
+    is deliberately no external cursor, because a caller-carried keyset would
+    permanently skip rows that become ADMITTED behind it.  An out-of-band
+    DBOS resume races benignly with projection -- platform state is
+    authoritative, so a workflow that resumes and completes after projection
+    fails the handoff identity guard (:class:`StageHandoffMismatchError`)
+    rather than corrupting state.
     """
     validate_positive_integer(batch_size, label="sweep batch size")
     selected_schema = schema or StagingSchema()
@@ -124,7 +136,9 @@ def sweep_abandoned_stages(
                 "dbos_status": status.status,
             }
             if status.error is not None:
-                terminal_summary["message"] = str(status.error)
+                terminal_summary["message"] = _safe_error_message(
+                    status.error
+                )
             # Read the clock per projection: pages commit separately, so a
             # single up-front timestamp can fall behind a row bumped after the
             # sweep started and drive updated_at backwards.
@@ -218,8 +232,7 @@ def _project_terminal_status(  # noqa: PLR0913 -- explicit projection facts
                 executions.c.current_attempt,
             )
             .where(
-                executions.c.stage_execution_id
-                == attempt.stage_execution_id
+                executions.c.stage_execution_id == attempt.stage_execution_id
             )
             .with_for_update()
         )

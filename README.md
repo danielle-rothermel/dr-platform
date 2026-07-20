@@ -30,9 +30,12 @@ create the next READY stage atomically. Register and submit the wrapped
 definition, not the original declaration.
 
 Application stage callables return a non-empty immutable output reference.
-They may execute again during DBOS crash recovery. Put non-idempotent effects
-inside DBOS steps, or design the callable around immutable output references
-so replay is safe.
+Stage execution is at-least-once, not exactly-once: if DBOS recovers a
+workflow that crashed before its completion transaction checkpointed, the
+whole stage body runs again, even effects the application considers already
+done. The platform's completion transaction itself commits exactly once.
+Put non-idempotent effects inside DBOS steps, or design the callable around
+immutable output references so re-execution is safe.
 
 Application exceptions become an in-band platform `FAILED` stage and the
 wrapper returns normally. This is intentional: DBOS can report `SUCCESS` for
@@ -89,7 +92,7 @@ def score(input_ref: str) -> str:
     return f"scored:{input_ref}"
 
 
-config = build_platform_dbos_config(database_url=None)
+config = build_platform_dbos_config(database_url=None)  # resolves DATABASE_URL
 engine = create_engine(config.database_url)
 upgrade_platform_schema(config.database_url)
 initialize_dbos_runtime(config, app_name="staged-work-example")
@@ -218,12 +221,18 @@ one for every declared stage is part of pipeline setup.
 
 `set_selector_capacity` adds an exact-label gate. `pause` and `resume` modify
 an existing control without changing its capacity or interrupting running
-work. They require the control row for that exact selector to exist; pausing a
-missing selector raises `LookupError`.
+work; they never create one. Pausing a label subset requires that exact
+selector control to already exist, created with `set_selector_capacity`.
+`pause` or `resume` on a selector that was never configured raises
+`LookupError`.
 
 Applications register one scheduled dispatcher per process configuration with
 `register_scheduled_dispatcher`. The dispatcher owns its DBOS client and runs
 bounded admission passes. Close its registration during shutdown.
+`register_scheduled_dispatcher` requires every pipeline in the registry to be
+the return value of `wrap_pipeline_workflows`; registering an unwrapped
+declaration raises `UnwrappedPipelineError`, since a raw declaration would
+admit work whose completion transaction never runs.
 
 ## Failure, sweep, retry, and cancellation
 
@@ -232,18 +241,31 @@ recovery-exhausted workflows that remain platform-ADMITTED into terminal
 platform state. The sweep does not retry or wait. Use `retry_stage` explicitly
 for FAILED stages.
 
+Nothing releases ADMITTED capacity for an abandoned workflow automatically.
+Pass `sweep_cron` to `register_scheduled_dispatcher` to schedule
+`sweep_abandoned_stages` alongside admission, or call it manually on your own
+schedule; without one or the other, abandoned slots stay ADMITTED forever and
+starve real work of capacity. Set `sweep_cron` in production-like runs.
+
+An application obtains a `WorkflowCanceller` by constructing a `DBOSClient`
+against `PlatformDbosConfig.system_database_url`, the colocated system
+database URL.
+
 `cancel_work` makes platform state terminal before delegating cancellation of
-the exact admitted DBOS workflow. READY work has no workflow to delegate;
-already-terminal cancellation is an idempotent no-op. Cancellation is
-non-recursive and has several important consequences:
+the exact admitted DBOS workflow. READY work has no workflow to delegate.
+FAILED work is cancellable too: the attempt is already terminal, so nothing is
+delegated, but the CANCELLED stage fences the item against a later
+`retry_stage`. Cancellation is non-recursive and has several important
+consequences:
 
 - CANCELLED work is permanently terminal within its campaign. Submit a new
   work key to recover it.
-- If DBOS cancellation delegation fails after the platform commit, the package
-  does not re-drive that external call.
-- A cancellation racing with successful handoff can find that the next stage
-  was created after the first call selected its target. Call `cancel_work`
-  again to cancel that newly current stage.
+- A cancellation racing with a successful handoff targets whatever stage is
+  current once it holds the row lock, so it cancels the freshly created next
+  stage rather than misreporting already-terminal work.
+- If DBOS cancellation delegation fails after the platform commit, calling
+  `cancel_work` again re-issues the idempotent delegation for the recorded
+  attempt; repeated calls self-heal a lost delegation.
 
 ## Inspection and operations
 
@@ -257,6 +279,13 @@ chunked `bulk_work_statuses` reader.
 These readers derive outcomes from platform tables. DBOS workflow status is
 execution evidence, not the source of truth for logical success or failure.
 
+Across the public API, a well-formed identity that does not exist raises
+`LookupError` (an unknown campaign, run, work item, or control selector);
+malformed input raises `ValueError`. `campaign_state_counts` and
+`run_state_counts` follow this too: an unknown campaign or run raises rather
+than returning an empty tuple, so a typo'd key is distinguishable from a
+drained one.
+
 ## Operational preconditions
 
 The platform tables and the DBOS system schema must share one PostgreSQL
@@ -264,6 +293,11 @@ database. `PlatformDbosConfig`, runtime bootstrap, and dispatcher registration
 validate colocation and fail fast when the URLs identify different databases.
 The staging tables use the same `upgrade_platform_schema` Alembic chain as the
 rest of the package.
+
+**Migration lineage.** The Alembic history was reset to a single fresh
+baseline (`0001_staging_baseline`); there is deliberately no upgrade bridge
+from earlier schemas. A database created from a pre-cutover rebuild branch,
+or from the old kernel, must be recreated rather than upgraded in place.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher
 before `DBOS.launch()`. Keep the returned dispatcher registration alive while

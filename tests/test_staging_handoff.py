@@ -263,30 +263,38 @@ def test_three_stage_pipeline_streams_end_to_end_through_wrapped_workflows(
             )
             assert summary.admitted_total == 2
             _wait_for(
-                lambda stage_index=stage_index: _stage_state_count(
-                    pg_engine,
-                    schema,
-                    stage_index=stage_index,
-                    state=StageExecutionState.SUCCEEDED,
+                lambda stage_index=stage_index: (
+                    _stage_state_count(
+                        pg_engine,
+                        schema,
+                        stage_index=stage_index,
+                        state=StageExecutionState.SUCCEEDED,
+                    )
+                    == 2
                 )
-                == 2
             )
 
         with pg_engine.connect() as connection:
-            rows = connection.execute(
-                select(
-                    schema.stage_executions.c.stage_index,
-                    schema.stage_executions.c.stage_key,
-                    schema.stage_executions.c.state,
-                    schema.stage_executions.c.output_reference,
-                ).order_by(
-                    schema.stage_executions.c.work_item_id,
-                    schema.stage_executions.c.stage_index,
+            rows = (
+                connection.execute(
+                    select(
+                        schema.stage_executions.c.stage_index,
+                        schema.stage_executions.c.stage_key,
+                        schema.stage_executions.c.state,
+                        schema.stage_executions.c.output_reference,
+                    ).order_by(
+                        schema.stage_executions.c.work_item_id,
+                        schema.stage_executions.c.stage_index,
+                    )
                 )
-            ).tuples().all()
-            workflow_ids = connection.execute(
-                select(schema.stage_attempts.c.workflow_id)
-            ).scalars().all()
+                .tuples()
+                .all()
+            )
+            workflow_ids = (
+                connection.execute(select(schema.stage_attempts.c.workflow_id))
+                .scalars()
+                .all()
+            )
 
         assert len(rows) == 6
         assert {row[0] for row in rows} == {0, 1, 2}
@@ -363,13 +371,17 @@ def test_completion_and_next_ready_insert_roll_back_together(
         )
 
     with pg_engine.connect() as connection:
-        execution_rows = connection.execute(
-            select(
-                schema.stage_executions.c.stage_key,
-                schema.stage_executions.c.state,
-                schema.stage_executions.c.output_reference,
+        execution_rows = (
+            connection.execute(
+                select(
+                    schema.stage_executions.c.stage_key,
+                    schema.stage_executions.c.state,
+                    schema.stage_executions.c.output_reference,
+                )
             )
-        ).tuples().all()
+            .tuples()
+            .all()
+        )
         terminal_at = connection.execute(
             select(schema.stage_attempts.c.terminal_at)
         ).scalar_one()
@@ -439,13 +451,15 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
         )
         assert first.admitted_total == 1
         _wait_for(
-            lambda: _stage_state_count(
-                pg_engine,
-                schema,
-                stage_index=0,
-                state=StageExecutionState.FAILED,
+            lambda: (
+                _stage_state_count(
+                    pg_engine,
+                    schema,
+                    stage_index=0,
+                    state=StageExecutionState.FAILED,
+                )
+                == 1
             )
-            == 1
         )
 
         with pg_engine.connect() as connection:
@@ -475,13 +489,15 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
         )
         assert second.admitted_total == 1
         _wait_for(
-            lambda: _stage_state_count(
-                pg_engine,
-                schema,
-                stage_index=0,
-                state=StageExecutionState.SUCCEEDED,
+            lambda: (
+                _stage_state_count(
+                    pg_engine,
+                    schema,
+                    stage_index=0,
+                    state=StageExecutionState.SUCCEEDED,
+                )
+                == 1
             )
-            == 1
         )
     finally:
         if client is not None:
@@ -534,13 +550,15 @@ def test_application_failure_with_unprintable_error_lands_failed(
         )
         assert admitted.admitted_total == 1
         _wait_for(
-            lambda: _stage_state_count(
-                pg_engine,
-                schema,
-                stage_index=0,
-                state=StageExecutionState.FAILED,
+            lambda: (
+                _stage_state_count(
+                    pg_engine,
+                    schema,
+                    stage_index=0,
+                    state=StageExecutionState.FAILED,
+                )
+                == 1
             )
-            == 1
         )
 
         with pg_engine.connect() as connection:
@@ -703,6 +721,61 @@ def test_sweep_projects_only_cancelled_or_abandoned_admitted_attempts(
     assert second.admitted_total == 1
 
 
+def test_sweep_projects_an_abandoned_attempt_with_an_unprintable_error(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    pipeline = _pipeline(
+        key="sweep-unprintable",
+        stage_logic=(("execute", lambda input_ref: f"output:{input_ref}"),),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    _configure_controls(pg_engine, pipeline, capacity=1)
+    _submit_items(
+        pg_engine,
+        registry,
+        pipeline,
+        campaign_key="campaign-sweep-unprintable",
+        run_key="run-sweep-unprintable",
+        items=(WorkInput(work_key="work", input_ref="input", labels={}),),
+    )
+    admission_client = _RecordingClient()
+    admitted = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(admission_client),
+        registry=registry,
+        clock=_utc_now,
+    )
+    assert admitted.admitted_total == 1
+    workflow_id = _recorded_workflow_id(admission_client.enqueued[0][0])
+    status_client = _StatusClient(
+        (
+            _Status(
+                workflow_id,
+                "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+                _UnprintableError(),
+            ),
+        )
+    )
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        client=_as_dbos_client(status_client),
+        clock=_utc_now,
+    )
+
+    with pg_engine.connect() as connection:
+        terminal_summary = connection.execute(
+            select(schema.stage_attempts.c.terminal_summary).where(
+                schema.stage_attempts.c.terminal_at.is_not(None)
+            )
+        ).scalar_one()
+
+    assert summary.projected_count == 1
+    assert terminal_summary["message"] == "<unprintable error message>"
+
+
 def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
     pg_engine: Engine,
 ) -> None:
@@ -782,6 +855,4 @@ def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
     assert summary.projections[0].state == StageExecutionState.FAILED
     # More than one page was queried, reaching the abandoned id later.
     assert len(status_client.requested_ids) > 1
-    assert any(
-        abandoned_id in page for page in status_client.requested_ids
-    )
+    assert any(abandoned_id in page for page in status_client.requested_ids)

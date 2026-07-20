@@ -41,3 +41,7 @@ class PipelineRegistry:
 
     def get(self, *, key: PipelineKey, version: int) -> PipelineDefinition:
         return self._pipelines[key, version]
+
+    def pipelines(self) -> tuple[PipelineDefinition, ...]:
+        """Return every registered definition for wiring-time validation."""
+        return tuple(self._pipelines.values())

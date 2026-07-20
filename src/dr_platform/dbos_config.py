@@ -1,10 +1,8 @@
-"""DBOS config/bootstrap helpers and pinned DBOS-private shims.
+"""DBOS config/bootstrap helpers and pinned DBOS-private telemetry shims.
 
-DBOS does not expose public exception classes for workflow start
-races; the private import is deliberately isolated here so every
-caller shares one compatibility point if DBOS renames them. DBOS also
-does not expose its tracer configuration boundary, which is isolated here so
-optional exporter failure cannot swallow unrelated runtime startup failures.
+DBOS does not expose its tracer configuration boundary, which is isolated
+here so optional exporter failure cannot swallow unrelated runtime startup
+failures.
 """
 
 from __future__ import annotations
@@ -17,11 +15,6 @@ from dbos import DBOS, DBOSConfig
 from dbos._dbos_config import (
     process_config,
     translate_dbos_config_to_config_file,
-)
-from dbos._error import (
-    DBOSConflictingWorkflowError,
-    DBOSQueueDeduplicatedError,
-    DBOSWorkflowConflictIDError,
 )
 from dbos._tracer import dbos_tracer
 from pydantic import (
@@ -46,13 +39,6 @@ DBOS_SYSTEM_DATABASE_URL_ENV = "DBOS_SYSTEM_DATABASE_URL"
 POSTGRESQL_URL_PREFIX = "postgresql://"
 POSTGRESQL_PSYCOPG_URL_PREFIX = "postgresql+psycopg://"
 
-WORKFLOW_START_RACE_ERRORS: tuple[type[BaseException], ...] = (
-    DBOSWorkflowConflictIDError,
-    DBOSQueueDeduplicatedError,
-    DBOSConflictingWorkflowError,
-)
-
-
 class DbosWorkflowStatus(StrEnum):
     PENDING = "PENDING"
     SUCCESS = "SUCCESS"
@@ -61,28 +47,6 @@ class DbosWorkflowStatus(StrEnum):
     CANCELLED = "CANCELLED"
     ENQUEUED = "ENQUEUED"
     DELAYED = "DELAYED"
-
-
-DBOS_ACTIVE_WORKFLOW_STATUSES = (
-    DbosWorkflowStatus.ENQUEUED.value,
-    DbosWorkflowStatus.PENDING.value,
-    DbosWorkflowStatus.DELAYED.value,
-)
-DBOS_FAILED_WORKFLOW_STATUSES = (
-    DbosWorkflowStatus.ERROR.value,
-    DbosWorkflowStatus.CANCELLED.value,
-    DbosWorkflowStatus.MAX_RECOVERY_ATTEMPTS_EXCEEDED.value,
-)
-MISSING_DBOS_WORKFLOW_STATUS = "MISSING"
-
-
-def workflow_start_raced(*, workflow_id: str, error: BaseException) -> bool:
-    """Return True when a concurrent start/enqueue won (idempotent caller)."""
-    if isinstance(error, WORKFLOW_START_RACE_ERRORS):
-        return True
-    return isinstance(error, Exception) and (
-        DBOS.get_workflow_status(workflow_id) is not None
-    )
 
 
 def normalize_postgresql_driver_url(database_url: str) -> str:
@@ -151,10 +115,17 @@ def _database_identity(
         "host",
         "port",
         "dbname",
+        # libpq resolves these independently of the URL's host/port/dbname
+        # components (hostaddr overrides address resolution outright;
+        # service pulls an entire connection profile from pg_service.conf),
+        # so colocation identity derived from the URL alone cannot be
+        # trusted while either is present.
+        "hostaddr",
+        "service",
     }.intersection(url.query):
         raise ValueError(
-            "PostgreSQL database URLs must not use host, port, or dbname "
-            "query parameters"
+            "PostgreSQL database URLs must not use host, port, dbname, "
+            "hostaddr, or service query parameters"
         )
     if is_postgres and url.database is None:
         raise ValueError(
@@ -283,7 +254,3 @@ def _initialize_dbos_telemetry(config: DBOSConfig) -> None:
         data=translate_dbos_config_to_config_file(config), silent=True
     )
     dbos_tracer.config(processed)
-
-
-def destroy_dbos_runtime() -> None:
-    DBOS.destroy()

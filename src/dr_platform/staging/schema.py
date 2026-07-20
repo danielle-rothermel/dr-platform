@@ -24,12 +24,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
+from dr_platform.prefix import DEFAULT_PREFIX
 from dr_platform.staging.states import StageExecutionState
 
 if TYPE_CHECKING:
     from enum import StrEnum
 
-DEFAULT_PREFIX = "platform"
 PREFIX_PATTERN = re.compile(r"[a-z_][a-z0-9_]*")
 MAX_PREFIX_BYTES = 21
 
@@ -40,7 +40,7 @@ def _enum_check(column_name: str, enum_type: type[StrEnum]) -> str:
 
 
 class StagingSchema:
-    """The five replacement tables, isolated from the legacy kernel."""
+    """The five staged-work tables."""
 
     def __init__(self, prefix: str = DEFAULT_PREFIX) -> None:
         if PREFIX_PATTERN.fullmatch(prefix) is None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from alembic import context
 from sqlalchemy import create_engine
 
-from dr_platform.db.schema import DEFAULT_PREFIX
+from dr_platform.prefix import DEFAULT_PREFIX
 
 
 def _prefix() -> str:
