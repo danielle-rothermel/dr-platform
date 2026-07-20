@@ -30,6 +30,10 @@ class StageAttemptSequenceError(RuntimeError):
     """An attempt number did not append to the current sequence."""
 
 
+class StageAttemptTerminalError(RuntimeError):
+    """An attempt was missing or had already reached a terminal outcome."""
+
+
 def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
     connection: Connection,
     *,
@@ -164,6 +168,59 @@ def list_stage_attempts(
         _decode_stage_attempt(row)
         for row in connection.execute(statement).mappings()
     )
+
+
+def record_stage_attempt_terminal(  # noqa: PLR0913 -- explicit outcome facts
+    connection: Connection,
+    *,
+    stage_execution_id: int,
+    attempt_number: int,
+    terminal_at: datetime,
+    terminal_summary: Mapping[str, object],
+    terminal_reference: str | None = None,
+    schema: StagingSchema | None = None,
+) -> StageAttemptRecord:
+    """Record one terminal attempt outcome exactly once."""
+    selected_schema = schema or StagingSchema()
+    table = selected_schema.stage_attempts
+    row = (
+        connection.execute(
+            table.select()
+            .where(
+                table.c.stage_execution_id == stage_execution_id,
+                table.c.attempt_number == attempt_number,
+            )
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        raise LookupError(
+            "stage attempt does not exist: "
+            f"execution {stage_execution_id}, attempt {attempt_number}"
+        )
+    if row["terminal_at"] is not None:
+        raise StageAttemptTerminalError(
+            "stage attempt is already terminal: "
+            f"execution {stage_execution_id}, attempt {attempt_number}"
+        )
+
+    updated_row = (
+        connection.execute(
+            update(table)
+            .where(table.c.stage_attempt_id == row["stage_attempt_id"])
+            .values(
+                terminal_at=terminal_at,
+                terminal_summary=dict(terminal_summary),
+                terminal_reference=terminal_reference,
+            )
+            .returning(*table.c)
+        )
+        .mappings()
+        .one()
+    )
+    return _decode_stage_attempt(updated_row)
 
 
 def _decode_stage_attempt(row: RowMapping) -> StageAttemptRecord:

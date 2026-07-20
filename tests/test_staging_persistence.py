@@ -386,6 +386,85 @@ def test_stage_attempt_terminal_summary_is_recursively_immutable(
         cast("dict[str, object]", event)["outcome"] = "changed"
 
 
+def test_output_reference_is_required_only_for_success_and_preserved(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    schema = StagingSchema()
+    with pg_engine.begin() as connection:
+        insert_pipeline_run(
+            connection,
+            run_key="run-output-semantics",
+            campaign_key="campaign-1",
+            pipeline_key="pipeline",
+            pipeline_version=1,
+            execution_config_reference="config:1",
+            created_at=NOW,
+        )
+        work_item = insert_work_item(
+            connection,
+            campaign_key="campaign-1",
+            work_key="work-output-semantics",
+            origin_run_key="run-output-semantics",
+            input_reference="input:1",
+            labels={},
+        )
+        execution = insert_stage_execution(
+            connection,
+            work_item_id=work_item.work_item_id,
+            stage_key="execute",
+            stage_index=0,
+            created_at=NOW,
+        )
+        connection.execute(
+            schema.stage_executions.update()
+            .where(
+                schema.stage_executions.c.stage_execution_id
+                == execution.stage_execution_id
+            )
+            .values(output_reference="output:preserved")
+        )
+
+        with pytest.raises(ValueError, match="SUCCEEDED transition requires"):
+            transition_stage_execution(
+                connection,
+                stage_execution_id=execution.stage_execution_id,
+                new_state=StageExecutionState.SUCCEEDED,
+                updated_at=NOW + timedelta(seconds=1),
+            )
+        with pytest.raises(ValueError, match="only valid for a SUCCEEDED"):
+            transition_stage_execution(
+                connection,
+                stage_execution_id=execution.stage_execution_id,
+                new_state=StageExecutionState.ADMITTED,
+                updated_at=NOW + timedelta(seconds=1),
+                output_reference="output:not-allowed",
+            )
+
+        admitted = transition_stage_execution(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+            new_state=StageExecutionState.ADMITTED,
+            updated_at=NOW + timedelta(seconds=1),
+        )
+        failed = transition_stage_execution(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+            new_state=StageExecutionState.FAILED,
+            updated_at=NOW + timedelta(seconds=2),
+        )
+        ready = transition_stage_execution(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+            new_state=StageExecutionState.READY,
+            updated_at=NOW + timedelta(seconds=3),
+        )
+
+    assert admitted.output_reference == "output:preserved"
+    assert failed.output_reference == "output:preserved"
+    assert ready.output_reference == "output:preserved"
+
+
 def test_partial_ready_admission_index_exists(pg_engine: Engine) -> None:
     _migrate(pg_engine)
     with pg_engine.connect() as connection:
