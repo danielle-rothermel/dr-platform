@@ -151,6 +151,51 @@ def get_stage_attempt(
     return None if row is None else _decode_stage_attempt(row)
 
 
+def mark_stage_attempt_admitted(
+    connection: Connection,
+    *,
+    stage_execution_id: int,
+    attempt_number: int,
+    admitted_at: datetime,
+    schema: StagingSchema | None = None,
+) -> StageAttemptRecord:
+    """Mark one prepared attempt admitted exactly once."""
+    selected_schema = schema or StagingSchema()
+    table = selected_schema.stage_attempts
+    row = (
+        connection.execute(
+            table.select()
+            .where(
+                table.c.stage_execution_id == stage_execution_id,
+                table.c.attempt_number == attempt_number,
+            )
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        raise LookupError(
+            "stage attempt does not exist: "
+            f"execution {stage_execution_id}, attempt {attempt_number}"
+        )
+    if row["admitted_at"] is not None or row["terminal_at"] is not None:
+        raise StageAttemptSequenceError(
+            "only a pending stage attempt can be admitted"
+        )
+    updated_row = (
+        connection.execute(
+            update(table)
+            .where(table.c.stage_attempt_id == row["stage_attempt_id"])
+            .values(admitted_at=admitted_at)
+            .returning(*table.c)
+        )
+        .mappings()
+        .one()
+    )
+    return _decode_stage_attempt(updated_row)
+
+
 def list_stage_attempts(
     connection: Connection,
     *,

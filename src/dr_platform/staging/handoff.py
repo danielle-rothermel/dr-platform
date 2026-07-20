@@ -241,6 +241,14 @@ def _complete_stage_in_transaction(  # noqa: PLR0913
             f"found {actual!r}"
         )
     if (
+        source["state"] == StageExecutionState.CANCELLED.value
+        and source["current_attempt"] == source["attempt_number"]
+    ):
+        # Operator cancellation wins this row-lock race.  The application
+        # workflow may already have returned, but its late completion must
+        # neither rewrite terminal state nor create the next linear stage.
+        return
+    if (
         source["state"] != StageExecutionState.ADMITTED.value
         or source["current_attempt"] != source["attempt_number"]
     ):
