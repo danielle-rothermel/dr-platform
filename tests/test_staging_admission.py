@@ -1209,6 +1209,147 @@ def test_args_for_failure_isolates_to_its_stage(
     )
 
 
+def test_poison_candidate_does_not_starve_same_stage_higher_rank_row(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    campaign_key = "campaign-1"
+    # The lower-ranked (locked-first) row is the poison one; its same-stage
+    # sibling ranked behind it must still admit in this pass.
+    ranked = sorted(
+        ("work-0", "work-1"),
+        key=lambda work_key: stable_random_rank(
+            work_identity=CampaignWorkIdentity(
+                CampaignKey(campaign_key), WorkKey(work_key)
+            )
+        ),
+    )
+    poison_input = f"input:{ranked[0].removeprefix('work-')}"
+
+    def args_for(payload: AdmissionPayload) -> tuple[object, ...]:
+        if payload.input_ref == poison_input:
+            raise ValueError("deterministic poison")
+        return (payload.input_ref,)
+
+    registry = PipelineRegistry()
+    registry.register(
+        PipelineDefinition(
+            key=PipelineKey("evaluation"),
+            version=1,
+            stages=(
+                StageDefinition(
+                    key=StageKey("execute"),
+                    queue_name="execute-queue",
+                    workflow=_workflow,
+                    args_for=args_for,
+                ),
+            ),
+        )
+    )
+    _submit(pg_engine, registry, ({}, {}))
+    _control(pg_engine, selector=None, capacity=5)
+    client = _RecordingClient()
+
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+
+    # The poison row stays READY (retried next pass); its higher-rank sibling
+    # in the same stage still admits this pass.
+    assert summary.admitted_total == 1
+    admitted = [
+        state
+        for _, state, _ in _execution_states(pg_engine, schema)
+        if state == StageExecutionState.ADMITTED.value
+    ]
+    ready = [
+        state
+        for _, state, _ in _execution_states(pg_engine, schema)
+        if state == StageExecutionState.READY.value
+    ]
+    assert len(admitted) == 1
+    assert len(ready) == 1
+    assert summary.failed_stages == (
+        StageAdmissionFailure(
+            pipeline_key="evaluation",
+            pipeline_version=1,
+            stage_key=StageKey("execute"),
+            error_type="ValueError",
+            message="deterministic poison",
+        ),
+    )
+    assert summary.mismatched_stages == ()
+
+
+def test_pipeline_stage_mismatch_is_reported_and_other_stages_admit(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    # Submit under a well-formed registry, then run admission under one whose
+    # pipeline-b stage key drifted from the persisted position: registry/data
+    # drift, not an application boundary failure.
+    submit_registry = _starvation_registry()
+    _submit_two_stage_backlog(pg_engine, submit_registry)
+    _pipeline_control(pg_engine, suffix="a", capacity=5, paused=False)
+    _pipeline_control(pg_engine, suffix="b", capacity=5, paused=False)
+
+    drifted_registry = PipelineRegistry()
+    drifted_registry.register(
+        PipelineDefinition(
+            key=PipelineKey("pipeline-a"),
+            version=1,
+            stages=(
+                StageDefinition(
+                    key=StageKey("stage-a"),
+                    queue_name="queue-a",
+                    workflow=_workflow,
+                    args_for=_args_for,
+                ),
+            ),
+        )
+    )
+    drifted_registry.register(
+        PipelineDefinition(
+            key=PipelineKey("pipeline-b"),
+            version=1,
+            stages=(
+                StageDefinition(
+                    key=StageKey("drifted-stage-b"),
+                    queue_name="queue-b",
+                    workflow=_workflow,
+                    args_for=_args_for,
+                ),
+            ),
+        )
+    )
+    client = _RecordingClient()
+
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=drifted_registry,
+        clock=lambda: NOW,
+    )
+
+    assert summary.admitted_total == 1
+    assert [options["queue_name"] for options, _ in client.enqueued] == [
+        "queue-a"
+    ]
+    assert _states_by_pipeline(pg_engine, schema) == {
+        "pipeline-a": StageExecutionState.ADMITTED.value,
+        "pipeline-b": StageExecutionState.READY.value,
+    }
+    assert summary.failed_stages == ()
+    assert len(summary.mismatched_stages) == 1
+    mismatch = summary.mismatched_stages[0]
+    assert mismatch.pipeline_key == "pipeline-b"
+    assert mismatch.stage_key == StageKey("stage-b")
+    assert "disagrees" in mismatch.message
+
+
 def test_unconfigured_backlog_cannot_exhaust_considered_budget(
     pg_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
