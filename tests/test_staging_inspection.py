@@ -321,8 +321,26 @@ def test_inspect_campaign_rejects_an_unknown_campaign(
 ) -> None:
     _migrate(pg_engine)
 
-    with pytest.raises(ValueError, match="campaign is unknown: absent"):
+    with pytest.raises(LookupError, match="campaign is unknown: absent"):
         inspect_campaign("absent", engine=pg_engine)
+
+
+def test_campaign_state_counts_rejects_an_unknown_campaign(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(LookupError, match="campaign is unknown: absent"):
+        campaign_state_counts("absent", engine=pg_engine)
+
+
+def test_run_state_counts_rejects_an_unknown_run(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(LookupError, match="run is unknown: absent"):
+        run_state_counts("absent", engine=pg_engine)
 
 
 def test_six_seed_top_up_uses_bulk_statuses_for_one_campaign(
@@ -548,3 +566,4 @@ def test_bulk_reader_chunks_and_reports_absent_keys(
         cast("dict[WorkKey, object]", result.statuses)[
             WorkKey(requested[0])
         ] = object()
+

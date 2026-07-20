@@ -122,7 +122,7 @@ def inspect_campaign(
             )
         ).mappings().one_or_none()
     if row is None:
-        raise ValueError(f"campaign is unknown: {normalized_campaign.value}")
+        raise LookupError(f"campaign is unknown: {normalized_campaign.value}")
     return _decode_campaign_summary(row)
 
 
@@ -344,7 +344,11 @@ def campaign_state_counts(
     engine: Engine,
     schema: StagingSchema | None = None,
 ) -> tuple[StateCount, ...]:
-    """Derive current logical item counts directly from platform rows."""
+    """Derive current logical item counts directly from platform rows.
+
+    Raises ``LookupError`` for an unknown campaign rather than returning an
+    empty tuple, so a typo'd key is distinguishable from a drained one.
+    """
     return _state_counts(
         engine=engine,
         campaign_key=_campaign_key(campaign_key),
@@ -359,7 +363,11 @@ def run_state_counts(
     engine: Engine,
     schema: StagingSchema | None = None,
 ) -> tuple[StateCount, ...]:
-    """Derive current counts for items whose provenance is one run."""
+    """Derive current counts for items whose provenance is one run.
+
+    Raises ``LookupError`` for an unknown run rather than returning an empty
+    tuple, so a typo'd key is distinguishable from a drained one.
+    """
     return _state_counts(
         engine=engine,
         campaign_key=None,
@@ -460,6 +468,19 @@ def _state_counts(
             items.c.origin_run_key == run_key.value
         )
     with engine.connect() as connection:
+        if campaign_key is not None:
+            _require_campaign(
+                connection,
+                campaign_key=campaign_key,
+                schema=selected_schema,
+            )
+        else:
+            assert run_key is not None
+            _require_run(
+                connection,
+                run_key=run_key,
+                schema=selected_schema,
+            )
         return tuple(
             StateCount(
                 state=StageExecutionState(row["state"]),
@@ -620,7 +641,22 @@ def _require_campaign(
         )
     ).first()
     if exists is None:
-        raise ValueError(f"campaign is unknown: {campaign_key.value}")
+        raise LookupError(f"campaign is unknown: {campaign_key.value}")
+
+
+def _require_run(
+    connection: Connection,
+    *,
+    run_key: RunKey,
+    schema: StagingSchema,
+) -> None:
+    exists = connection.execute(
+        select(schema.pipeline_runs.c.run_key).where(
+            schema.pipeline_runs.c.run_key == run_key.value
+        )
+    ).first()
+    if exists is None:
+        raise LookupError(f"run is unknown: {run_key.value}")
 
 
 def _validate_work_item_cursor(
