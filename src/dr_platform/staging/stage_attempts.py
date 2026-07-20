@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import null, select, update
 
 from dr_platform.staging.identities import (
     CampaignKey,
@@ -90,7 +90,7 @@ def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
         stage_key=StageKey(source["stage_key"]),
         attempt_number=attempt_number,
     )
-    summary = None if terminal_summary is None else dict(terminal_summary)
+    summary = null() if terminal_summary is None else dict(terminal_summary)
     attempts = selected_schema.stage_attempts
     row = (
         connection.execute(
