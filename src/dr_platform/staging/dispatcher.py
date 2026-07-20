@@ -5,9 +5,11 @@ validated colocated system database URL.  Its returned registration handle
 keeps that client alive and provides explicit cleanup.  The scheduled
 workflow is deliberately only an adapter around ``run_admission_pass``.
 A pass never aborts for one unhealthy stage: stages lacking an empty-selector
-capacity control, and stages whose ``args_for`` or enqueue raises, are skipped
-and reported on the returned :class:`AdmissionSummary`.  This adapter logs
-those signals so operators can act, while healthy admission still commits.
+capacity control, and candidates whose ``args_for`` or enqueue raises, are
+skipped and reported on the returned :class:`AdmissionSummary`.  This adapter
+logs those signals as warnings so operators can act, and logs persisted-
+position mismatches (registry/data drift) at ERROR, while healthy admission
+still commits.
 """
 
 from __future__ import annotations
@@ -103,6 +105,19 @@ def register_scheduled_dispatcher(
                         f"{stage.stage_key.value!r}: "
                         f"{stage.error_type}: {stage.message}"
                         for stage in summary.failed_stages
+                    ),
+                )
+            if summary.mismatched_stages:
+                # A persisted position disagreeing with the registry is
+                # registry/data drift -- a deployment bug, not an application
+                # boundary failure -- so it is surfaced at ERROR.
+                logger.error(
+                    "admission found registry/data drift for stages: %s",
+                    ", ".join(
+                        f"{stage.pipeline_key!r} version "
+                        f"{stage.pipeline_version} stage "
+                        f"{stage.stage_key.value!r}: {stage.message}"
+                        for stage in summary.mismatched_stages
                     ),
                 )
 

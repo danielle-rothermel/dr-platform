@@ -8,8 +8,8 @@ from datetime import UTC, datetime
 from sqlalchemy import create_engine
 
 from dr_platform.dbos_config import PlatformDbosConfig
-from dr_platform.staging import PipelineRegistry, dispatcher
-from dr_platform.staging.admission import AdmissionSummary
+from dr_platform.staging import PipelineRegistry, StageKey, dispatcher
+from dr_platform.staging.admission import AdmissionSummary, StageMismatch
 
 
 class _FakeClient:
@@ -60,6 +60,7 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
             skipped_for_pause=0,
             unconfigured_stages=(),
             failed_stages=(),
+            mismatched_stages=(),
         )
 
     monkeypatch.setattr(dispatcher, "run_admission_pass", fake_pass)
@@ -96,3 +97,66 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
         ),
     )
     assert client.destroyed
+
+
+def test_mismatched_stages_are_logged_as_registry_drift_at_error(
+    monkeypatch,
+    caplog,
+) -> None:
+    client = _FakeClient(
+        system_database_url="postgresql+psycopg://user:secret@db/platform"
+    )
+    monkeypatch.setattr(
+        dispatcher, "DBOSClient", lambda *, system_database_url: client
+    )
+    monkeypatch.setattr(
+        dispatcher.DBOS, "scheduled", lambda cron: lambda function: function
+    )
+    monkeypatch.setattr(
+        dispatcher.DBOS, "workflow", lambda *, name: lambda function: function
+    )
+
+    def fake_pass(engine: object, **kwargs: object) -> AdmissionSummary:
+        return AdmissionSummary(
+            admitted_counts=(),
+            skipped_for_capacity=0,
+            skipped_for_pause=0,
+            unconfigured_stages=(),
+            failed_stages=(),
+            mismatched_stages=(
+                StageMismatch(
+                    pipeline_key="evaluation",
+                    pipeline_version=1,
+                    stage_key=StageKey("execute"),
+                    message="persisted stage index is outside the pipeline",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(dispatcher, "run_admission_pass", fake_pass)
+    config = PlatformDbosConfig(
+        database_url="postgresql+psycopg://user:secret@db/platform",
+        system_database_url="postgresql+psycopg://user:secret@db/platform",
+    )
+    engine = create_engine(config.database_url)
+    registration = dispatcher.register_scheduled_dispatcher(
+        config=config,
+        engine=engine,
+        registry=PipelineRegistry(),
+    )
+
+    with caplog.at_level("ERROR", logger=dispatcher.logger.name):
+        registration.workflow(
+            datetime(2026, 7, 17, tzinfo=UTC),
+            datetime(2026, 7, 17, tzinfo=UTC),
+        )
+    registration.close()
+    engine.dispose()
+
+    drift = [
+        record
+        for record in caplog.records
+        if record.levelname == "ERROR" and "registry/data drift" in record.msg
+    ]
+    assert len(drift) == 1
+    assert "evaluation" in drift[0].getMessage()
