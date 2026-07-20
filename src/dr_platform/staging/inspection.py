@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
     from datetime import datetime
 
-    from sqlalchemy import Connection, Engine
+    from sqlalchemy import Connection, Engine, Select
     from sqlalchemy.engine import RowMapping
 
 DEFAULT_INSPECTION_LIMIT = 100
@@ -233,7 +233,10 @@ def list_work_items(  # noqa: PLR0913 -- explicit reader filters
     normalized_campaign = _campaign_key(campaign_key)
     items = selected_schema.work_items
     executions = selected_schema.stage_executions
-    current = _current_stage_indexes(selected_schema)
+    campaign_item_ids = select(items.c.work_item_id).where(
+        items.c.campaign_key == normalized_campaign.value
+    )
+    current = _current_stage_indexes(selected_schema, campaign_item_ids)
     statement = (
         select(
             items.c.work_item_id,
@@ -440,7 +443,16 @@ def _state_counts(
     selected_schema = schema or StagingSchema()
     items = selected_schema.work_items
     executions = selected_schema.stage_executions
-    current = _current_stage_indexes(selected_schema)
+    if campaign_key is not None:
+        scoped_item_ids = select(items.c.work_item_id).where(
+            items.c.campaign_key == campaign_key.value
+        )
+    else:
+        assert run_key is not None
+        scoped_item_ids = select(items.c.work_item_id).where(
+            items.c.origin_run_key == run_key.value
+        )
+    current = _current_stage_indexes(selected_schema, scoped_item_ids)
     statement = (
         select(executions.c.state, func.count().label("count"))
         .select_from(
@@ -498,7 +510,11 @@ def _bulk_status_statement(
 ):
     items = schema.work_items
     executions = schema.stage_executions
-    current = _current_stage_indexes(schema)
+    requested_item_ids = select(items.c.work_item_id).where(
+        items.c.campaign_key == campaign_key.value,
+        items.c.work_key.in_([key.value for key in work_keys]),
+    )
+    current = _current_stage_indexes(schema, requested_item_ids)
     return (
         select(
             items.c.work_key,
@@ -527,12 +543,26 @@ def _bulk_status_statement(
     )
 
 
-def _current_stage_indexes(schema: StagingSchema):
+def _current_stage_indexes(schema: StagingSchema, work_item_ids: Select):
+    """Group only the stage executions for one already-filtered work-item set.
+
+    ``work_item_ids`` carries the caller's campaign/run/work-key predicate.
+    Joining it in before the ``GROUP BY`` keeps this index-driven for large
+    campaigns; grouping the whole table first and filtering afterward would
+    force a full aggregate scan on every bulk status read.
+    """
     executions = schema.stage_executions
+    scoped_ids = work_item_ids.subquery()
     return (
         select(
             executions.c.work_item_id,
             func.max(executions.c.stage_index).label("stage_index"),
+        )
+        .select_from(
+            executions.join(
+                scoped_ids,
+                scoped_ids.c.work_item_id == executions.c.work_item_id,
+            )
         )
         .group_by(executions.c.work_item_id)
         .subquery()

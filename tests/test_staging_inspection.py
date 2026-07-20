@@ -22,6 +22,7 @@ from dr_platform.staging import (
 )
 from dr_platform.staging.admission import AdmissionPayload, run_admission_pass
 from dr_platform.staging.inspection import (
+    StateCount,
     bulk_work_statuses,
     campaign_state_counts,
     get_work_item_stages,
@@ -567,3 +568,87 @@ def test_bulk_reader_chunks_and_reports_absent_keys(
             WorkKey(requested[0])
         ] = object()
 
+
+def test_bulk_reader_scopes_current_stage_by_campaign_with_interleaved_ids(
+    pg_engine: Engine,
+) -> None:
+    """One campaign's bulk read must ignore another's interleaved rows.
+
+    Submitting alternately gives the two campaigns interleaved
+    ``work_item_id`` values, so a current-stage aggregation that forgot to
+    scope by campaign before grouping would leak the other campaign's rows
+    into this campaign's read.
+    """
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    _submit(
+        pg_engine,
+        registry,
+        campaign_key="campaign-x",
+        run_key="run-x1",
+        work_keys=("work-x1",),
+    )
+    _submit(
+        pg_engine,
+        registry,
+        campaign_key="campaign-y",
+        run_key="run-y1",
+        work_keys=("work-y1",),
+        clock=NOW + timedelta(seconds=1),
+    )
+    _submit(
+        pg_engine,
+        registry,
+        campaign_key="campaign-x",
+        run_key="run-x2",
+        work_keys=("work-x2",),
+        clock=NOW + timedelta(seconds=2),
+    )
+    _submit(
+        pg_engine,
+        registry,
+        campaign_key="campaign-y",
+        run_key="run-y2",
+        work_keys=("work-y2",),
+        clock=NOW + timedelta(seconds=3),
+    )
+    executions = _execution_by_work_key(pg_engine, schema)
+    terminalized_at = NOW + timedelta(seconds=10)
+    with pg_engine.begin() as connection:
+        _terminalize(
+            connection,
+            stage_execution_id=executions["work-y1"][1],
+            state=StageExecutionState.SUCCEEDED,
+            at=terminalized_at,
+        )
+        _terminalize(
+            connection,
+            stage_execution_id=executions["work-y2"][1],
+            state=StageExecutionState.FAILED,
+            at=terminalized_at,
+        )
+
+    x_statuses = bulk_work_statuses(
+        "campaign-x", ("work-x1", "work-x2"), engine=pg_engine
+    ).statuses
+    y_statuses = bulk_work_statuses(
+        "campaign-y", ("work-y1", "work-y2"), engine=pg_engine
+    ).statuses
+
+    assert x_statuses[WorkKey("work-x1")].state is StageExecutionState.READY
+    assert x_statuses[WorkKey("work-x2")].state is StageExecutionState.READY
+    assert y_statuses[WorkKey("work-y1")].state is (
+        StageExecutionState.SUCCEEDED
+    )
+    assert y_statuses[WorkKey("work-y2")].state is StageExecutionState.FAILED
+    assert campaign_state_counts("campaign-x", engine=pg_engine) == (
+        StateCount(state=StageExecutionState.READY, count=2),
+    )
+    y_counts = {
+        entry.state: entry.count
+        for entry in campaign_state_counts("campaign-y", engine=pg_engine)
+    }
+    assert y_counts == {
+        StageExecutionState.SUCCEEDED: 1,
+        StageExecutionState.FAILED: 1,
+    }
