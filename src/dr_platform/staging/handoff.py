@@ -43,8 +43,24 @@ if TYPE_CHECKING:
     from dr_platform.staging.identities import PipelineKey, StageKey
 
 
+_WRAPPED_STAGE_MARKER = "_dr_platform_wrapped_stage"
+
+
 class StageHandoffMismatchError(RuntimeError):
     """The running workflow does not match its persisted stage attempt."""
+
+
+def is_pipeline_wrapped(pipeline: PipelineDefinition) -> bool:
+    """Report whether every stage callable is a package-owned wrapper.
+
+    Admission enqueues the registered ``workflow`` callables directly, so only
+    a fully wrapped definition runs the completion transaction; the execution
+    wiring uses this to reject definitions that would sit ADMITTED forever.
+    """
+    return all(
+        getattr(stage.workflow, _WRAPPED_STAGE_MARKER, False)
+        for stage in pipeline.stages
+    )
 
 
 def _utc_now() -> datetime:
@@ -196,6 +212,9 @@ def _wrap_stage_workflow(
         )
         return output_reference
 
+    # Mark the callable so the execution wiring can reject a raw declaration
+    # registered in place of this wrapper's return value.
+    setattr(run_stage, _WRAPPED_STAGE_MARKER, True)
     return cast("WorkflowCallable", run_stage)
 
 
