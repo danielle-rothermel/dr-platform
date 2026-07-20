@@ -51,6 +51,7 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
         "workflow",
         lambda *, name: decorator("workflow", name),
     )
+
     def fake_pass(engine: object, **kwargs: object) -> AdmissionSummary:
         calls.append(("pass", (engine, kwargs)))
         return AdmissionSummary(
@@ -63,19 +64,17 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
 
     monkeypatch.setattr(dispatcher, "run_admission_pass", fake_pass)
     config = PlatformDbosConfig(
-        database_url=(
-            "postgresql+psycopg://user:secret@db/platform"
-        ),
-        system_database_url=(
-            "postgresql+psycopg://user:secret@db/platform"
-        ),
+        database_url=("postgresql+psycopg://user:secret@db/platform"),
+        system_database_url=("postgresql+psycopg://user:secret@db/platform"),
     )
     engine = create_engine(config.database_url)
 
+    registry = PipelineRegistry()
     registration = dispatcher.register_scheduled_dispatcher(
         config=config,
         engine=engine,
-        registry=PipelineRegistry(),
+        registry=registry,
+        batch_size=17,
     )
     registration.workflow(
         datetime(2026, 7, 17, tzinfo=UTC),
@@ -87,5 +86,13 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
     assert calls[0] == ("client", config.system_database_url)
     assert ("cron", dispatcher.DEFAULT_DISPATCHER_CRON) in calls
     assert ("workflow", dispatcher.DISPATCHER_WORKFLOW_NAME) in calls
-    assert calls[-1][0] == "pass"
+    # The wrapper must forward the registration's own engine, client, and
+    # registry with the configured batch size -- not defaults or fresh objects.
+    assert calls[-1] == (
+        "pass",
+        (
+            engine,
+            {"client": client, "registry": registry, "batch_size": 17},
+        ),
+    )
     assert client.destroyed
