@@ -166,6 +166,51 @@ def test_interrupted_replay_fills_only_absent_keys(
     assert final_count == 4
 
 
+def test_completed_run_replay_does_not_restamp_completion(
+    pg_engine: Engine,
+) -> None:
+    """``mark_submission_completed``'s NULL guard is a real no-op replay.
+
+    Both calls here use distinct clocks so a re-stamp would move
+    ``submission_completed_at``; the constant clock used elsewhere in this
+    module can't distinguish a no-op from a rewrite.
+    """
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    later = datetime(2026, 7, 18, 12, tzinfo=UTC)
+
+    first = submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        config_ref="config:1",
+        items=(_item(0),),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    replay = submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        config_ref="config:1",
+        items=(_item(0),),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: later,
+    )
+
+    with pg_engine.connect() as connection:
+        run_after_replay = get_pipeline_run(connection, run_key="run-1")
+
+    assert run_after_replay is not None
+    assert run_after_replay.submission_completed_at == NOW
+    assert run_after_replay.submission_completed_at != later
+    assert (first.inserted_count, first.already_existing_count) == (1, 0)
+    assert (replay.inserted_count, replay.already_existing_count) == (0, 1)
+
+
 def test_config_mismatched_resume_is_rejected(pg_engine: Engine) -> None:
     _migrate(pg_engine)
     registry, pipeline = _registry()
