@@ -313,6 +313,10 @@ def _lock_handoff_source(
     workflow_id: str,
     schema: StagingSchema,
 ) -> RowMapping:
+    # Lock the execution row before the attempt row so this path shares the
+    # execution-then-attempt order the sweep projection uses; a single joined
+    # FOR UPDATE would lock the workflow_id-driven attempt row first and can
+    # deadlock against concurrent sweep projection of the same attempt.
     executions = schema.stage_executions
     attempts = schema.stage_attempts
     work_items = schema.work_items
@@ -346,7 +350,7 @@ def _lock_handoff_source(
                 )
             )
             .where(attempts.c.workflow_id == workflow_id)
-            .with_for_update(of=(attempts, executions))
+            .with_for_update(of=executions)
         )
         .mappings()
         .one_or_none()
@@ -355,6 +359,16 @@ def _lock_handoff_source(
         raise LookupError(
             f"stage attempt workflow does not exist: {workflow_id}"
         )
+    # Lock the attempt row second; its identity is fully resolved above, so
+    # record_stage_attempt_terminal re-locks the same row without inverting.
+    connection.execute(
+        select(attempts.c.stage_attempt_id)
+        .where(
+            attempts.c.stage_execution_id == row["stage_execution_id"],
+            attempts.c.attempt_number == row["attempt_number"],
+        )
+        .with_for_update(of=attempts)
+    ).one()
     return row
 
 
