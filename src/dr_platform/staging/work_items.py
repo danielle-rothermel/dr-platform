@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -33,6 +34,14 @@ class WorkItemConflictError(RuntimeError):
     """A campaign/work identity was reused with different immutable facts."""
 
 
+@dataclass(frozen=True, slots=True)
+class WorkItemInsertResult:
+    """The stored item and whether this call inserted it."""
+
+    work_item: WorkItemRecord
+    inserted: bool
+
+
 def insert_work_item(  # noqa: PLR0913 -- explicit persistence facts
     connection: Connection,
     *,
@@ -44,6 +53,28 @@ def insert_work_item(  # noqa: PLR0913 -- explicit persistence facts
     schema: StagingSchema | None = None,
 ) -> WorkItemRecord:
     """Insert one work item, or resolve an identical idempotent replay."""
+    return insert_work_item_with_result(
+        connection,
+        campaign_key=campaign_key,
+        work_key=work_key,
+        origin_run_key=origin_run_key,
+        input_reference=input_reference,
+        labels=labels,
+        schema=schema,
+    ).work_item
+
+
+def insert_work_item_with_result(  # noqa: PLR0913
+    connection: Connection,
+    *,
+    campaign_key: CampaignKey | str,
+    work_key: WorkKey | str,
+    origin_run_key: RunKey | str,
+    input_reference: str,
+    labels: Mapping[str, str],
+    schema: StagingSchema | None = None,
+) -> WorkItemInsertResult:
+    """Insert one item and report its campaign-idempotency disposition."""
     selected_schema = schema or StagingSchema()
     identity = CampaignWorkIdentity(
         campaign_key
@@ -101,9 +132,10 @@ def insert_work_item(  # noqa: PLR0913 -- explicit persistence facts
             schema=selected_schema,
         )
         assert existing is not None
+        # The origin run is first-writer provenance. Later runs in the same
+        # campaign converge on that work item when its application facts match.
         if (
-            existing.origin_run_key != normalized_run_key
-            or existing.input_reference != reference
+            existing.input_reference != reference
             or dict(existing.labels) != normalized_labels
             or existing.rank != rank
         ):
@@ -111,8 +143,11 @@ def insert_work_item(  # noqa: PLR0913 -- explicit persistence facts
                 "campaign/work identity is already bound to different "
                 "immutable facts"
             )
-        return existing
-    return _decode_work_item(row)
+        return WorkItemInsertResult(work_item=existing, inserted=False)
+    return WorkItemInsertResult(
+        work_item=_decode_work_item(row),
+        inserted=True,
+    )
 
 
 def get_work_item(

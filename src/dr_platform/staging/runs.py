@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert
 
 from dr_platform.staging._validation import validate_non_empty_string
@@ -116,6 +117,45 @@ def get_pipeline_run(
         .one_or_none()
     )
     return None if row is None else _decode_pipeline_run(row)
+
+
+def mark_submission_completed(
+    connection: Connection,
+    *,
+    run_key: RunKey | str,
+    completed_at: datetime,
+    schema: StagingSchema | None = None,
+) -> PipelineRunRecord:
+    """Record the first normal completion of a run's item source."""
+    selected_schema = schema or StagingSchema()
+    normalized_run_key = (
+        run_key if isinstance(run_key, RunKey) else RunKey(run_key)
+    )
+    table = selected_schema.pipeline_runs
+    row = (
+        connection.execute(
+            update(table)
+            .where(
+                table.c.run_key == normalized_run_key.value,
+                table.c.submission_completed_at.is_(None),
+            )
+            .values(submission_completed_at=completed_at)
+            .returning(*table.c)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is not None:
+        return _decode_pipeline_run(row)
+
+    existing = get_pipeline_run(
+        connection,
+        run_key=normalized_run_key,
+        schema=selected_schema,
+    )
+    if existing is None:
+        raise LookupError(f"pipeline run does not exist: {normalized_run_key}")
+    return existing
 
 
 def _decode_pipeline_run(row: RowMapping) -> PipelineRunRecord:
