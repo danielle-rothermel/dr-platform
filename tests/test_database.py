@@ -8,20 +8,17 @@ from uuid import uuid4
 from psycopg import sql
 from sqlalchemy import Connection, Engine, create_engine, text
 
-from dr_platform import (
-    FailureClass,
-    PlatformSchema,
-    list_operations,
-    upgrade_platform_schema,
-)
 from dr_platform.backoff import (
     list_throttle_states,
     record_throttle_failure,
 )
+from dr_platform.db import PlatformSchema, upgrade_platform_schema
 from dr_platform.db.migrate import (
     PLATFORM_BASELINE_REVISION,
     PLATFORM_HEAD_REVISION,
 )
+from dr_platform.inspection import list_operations
+from dr_platform.status import FailureClass
 from tests.conftest import engine_dsn
 
 

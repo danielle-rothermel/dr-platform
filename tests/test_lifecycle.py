@@ -13,31 +13,15 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import Engine, func, insert, select, update
 from sqlalchemy.exc import DBAPIError
 
-from dr_platform import (
+from dr_platform.cancellation import (
     CancellationConflictError,
     CancellationInspection,
     CancellationInspectionDisposition,
     CancellationRequest,
-    EligibilityReference,
-    FailureClass,
-    FailureSnapshot,
-    NextAttemptDisposition,
-    NextAttemptReason,
-    NextAttemptRequest,
-    PlatformSchema,
-    ServiceClass,
-    SubmitResult,
-    TargetRegistry,
     cancel_operation,
-    inspect_operation,
-    list_attempts,
-    list_items,
-    reconcile,
-    request_next_attempt,
-    submit,
-    upgrade_platform_schema,
 )
 from dr_platform.claims import ClaimPageOptions, claim_pending_attempts
+from dr_platform.db import PlatformSchema, upgrade_platform_schema
 from dr_platform.dbos_config import DbosWorkflowStatus
 from dr_platform.enqueue_runtime import (
     PhysicalEnqueueDisposition,
@@ -45,29 +29,47 @@ from dr_platform.enqueue_runtime import (
     PreparedEnqueueCall,
     QueueConfigurationError,
 )
+from dr_platform.inspection import (
+    inspect_operation,
+    list_attempts,
+    list_items,
+)
 from dr_platform.items import item_id, shuffle_rank
 from dr_platform.manifests import ExecutionRecipeEnvelope
-from dr_platform.reconciliation import ReconciliationConflictError
+from dr_platform.reconciliation import (
+    NextAttemptRequest,
+    ReconciliationConflictError,
+    request_next_attempt,
+)
 from dr_platform.reconciliation_runtime import (
     DbosStepObservation,
     ReconcileOptions,
     ReconciliationObservation,
     ReconciliationObservationDisposition,
+    reconcile,
 )
+from dr_platform.records import EligibilityReference, FailureSnapshot
 from dr_platform.status import (
     AttemptEnqueueState,
     AttemptExecutionState,
     AttemptRetryReason,
     CancellationDisposition,
+    FailureClass,
+    NextAttemptDisposition,
+    NextAttemptReason,
     RetryDisposition,
+    ServiceClass,
 )
 from dr_platform.submission import (
     RegistrationConflictError,
     SubmitOptions,
+    SubmitResult,
+    submit,
 )
 from dr_platform.targets import (
     ExecutionIdentity,
     ExecutionTarget,
+    TargetRegistry,
 )
 from tests.conftest import engine_dsn
 
