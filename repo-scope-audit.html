@@ -367,7 +367,7 @@
       The removed <code>test_dbos_226_contract.py</code> imported five private DBOS modules and pinned exact
       schema/signature shapes. Production still imports private DBOS
       modules in <a href="src/dr_platform/dbos_config.py">dbos_config.py:17–26</a> and
-      <a href="src/dr_platform/reconciliation_runtime.py">reconciliation_runtime.py:10</a>.
+      <code>reconciliation_runtime.py:10</code>.
     </div>
     <p class="remove"><strong>Removal boundary:</strong> retain only tests for behavior the package itself wraps and promises.
       Delete dependency self-tests and exact private-shape assertions.</p>
@@ -490,8 +490,8 @@
       and compensation shape—are repeated across all layers and then tested again directly.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/records.py">records.py:304–488, 553–729</a> validates attempt, claim, cancellation, and
-      compensation shapes; <a href="src/dr_platform/db/alembic/versions/0001_platform_baseline.py">0001_platform_baseline.py:233–452, 521–850</a>
+      <code>records.py:304–488, 553–729</code> validates attempt, claim, cancellation, and
+      compensation shapes; <code>0001_platform_baseline.py:233–452, 521–850</code>
       repeats them as checks and immutable-row triggers; service modules re-check state before every mutation.
     </div>
     <p class="remove"><strong>Resolved ownership:</strong> public inputs and external adapter results validate at their
@@ -517,8 +517,8 @@
     </p>
     <div class="evidence">
       The baseline inventory recorded those removed paths. In the current tree,
-      <a href="src/dr_platform/jsonl.py">jsonl.py</a> reads and validates the source once, while
-      <a href="src/dr_platform/submission.py">submission.py</a> validates the committed prefix only when resumable
+      <code>jsonl.py</code> reads and validates the source once, while
+      <code>submission.py</code> validates the committed prefix only when resumable
       registration continues. Neither module retains filesystem fingerprints, a manifest digest tree, or a second source read.
     </div>
     <p class="remove"><strong>Resolved contract:</strong> submission owns one authoritative read, validates caller input at that
@@ -543,8 +543,8 @@
       conflicting copies. Recipes still repeat workflow/version/topology concepts whose compatibility value remains undecided.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/targets.py">targets.py</a> owns the private digest projection and derived
-      <code>ExecutionTarget.ref</code>; <a href="src/dr_platform/manifests.py">manifests.py:29–60</a> still defines the repeated
+      <code>targets.py</code> owns the private digest projection and derived
+      <code>ExecutionTarget.ref</code>; <code>manifests.py:29–60</code> still defines the repeated
       recipe envelope; target tests prove that persisted no-hook references resolve with the unchanged digest.
     </div>
     <p class="remove"><strong>Simplification direction:</strong> derive references, declarations, and digests from one target
@@ -567,8 +567,8 @@
       remain because they protect resumable registration.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/submission.py">submission.py</a> now inserts prepared pages without invoking caller code;
-      <a href="src/dr_platform/db/alembic/versions/0004_package_owned_registration.py">0004_package_owned_registration.py</a>
+      <code>submission.py</code> now inserts prepared pages without invoking caller code;
+      <code>0004_package_owned_registration.py</code>
       folds historical classifications into the inserted total before dropping the hook-owned columns and checks.
     </div>
     <p class="remove"><strong>Resolved contract:</strong> core submission keeps resumable multi-page registration, but no
@@ -590,9 +590,9 @@
       successor hazards if a workflow appears late. This is rigorous, but it is a large contract for a rare uncertainty window.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/claims.py">claims.py</a> is 1,784 lines;
-      <a href="src/dr_platform/enqueue_runtime.py">enqueue_runtime.py:355–591</a> implements call-start/outcome recovery;
-      <a href="src/dr_platform/cancellation.py">cancellation.py</a> is 1,517 lines and repairs late compensation;
+      <code>claims.py</code> is 1,784 lines;
+      <code>enqueue_runtime.py:355–591</code> implements call-start/outcome recovery;
+      <code>cancellation.py</code> is 1,517 lines and repairs late compensation;
       schema tables include <code>enqueue_claims</code>, <code>enqueue_compensations</code>, and
       <code>enqueue_compensation_hazards</code>.
     </div>
@@ -616,9 +616,9 @@
       distinguishes local/foreign cancellation, and requires explicit operator confirmation for some successor attempts.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/reconciliation.py">reconciliation.py</a> is 1,451 lines;
-      <a href="src/dr_platform/cancellation.py">cancellation.py:61–211</a> defines expected-cut and inspection vocabulary;
-      <a href="src/dr_platform/cut.py">cut.py:20–100</a> adds externally pinned cut comparison;
+      <code>reconciliation.py</code> is 1,451 lines;
+      <code>cancellation.py:61–211</code> defines expected-cut and inspection vocabulary;
+      <code>cut.py:20–100</code> adds externally pinned cut comparison;
       the schema persists <code>missing_reobservations</code> and <code>next_attempt_requests</code>.
     </div>
     <p class="remove"><strong>Resolution:</strong> Resolved 2026-07-17 by the staged-work rebuild
@@ -641,7 +641,7 @@
       domain values without proving that an arbitrary payload was secret-free.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/enqueue_runtime.py">enqueue_runtime.py</a> now validates only that DBOS arguments serialize;
+      <code>enqueue_runtime.py</code> now validates only that DBOS arguments serialize;
       <a href="src/dr_platform/telemetry.py">telemetry.py</a> owns fail-open initialization without accepting arbitrary payload
       attributes; <a href="README.md">README.md</a> assigns workflow-argument secret policy to the application and guarantees
       that the kernel does not persist, log, or emit those arguments.
@@ -713,9 +713,9 @@
       durable-execution package.
     </p>
     <div class="evidence">
-      <a href="src/dr_platform/status.py">status.py:86–100</a> fixes classes and priorities;
-      <a href="src/dr_platform/items.py">items.py:20–30</a> requires <code>service_class</code> on every item;
-      <a href="src/dr_platform/enqueue_runtime.py">enqueue_runtime.py:281–299</a> rejects non-priority queues;
+      <code>status.py:86–100</code> fixes classes and priorities;
+      <code>items.py:20–30</code> requires <code>service_class</code> on every item;
+      <code>enqueue_runtime.py:281–299</code> rejects non-priority queues;
       migration checks pin the same values and numbers.
     </div>
     <p class="remove"><strong>Resolution:</strong> Resolved 2026-07-17 by the staged-work rebuild
