@@ -63,3 +63,11 @@ def test_registry_rejects_a_conflicting_definition() -> None:
         registry.register(_pipeline(queue_name="other-queue"))
 
     assert caught.value.identity == (PipelineKey("evaluation"), 1)
+
+
+def test_registry_exposes_registered_pipelines_for_wiring_checks() -> None:
+    pipeline = _pipeline()
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+
+    assert registry.pipelines() == (pipeline,)
