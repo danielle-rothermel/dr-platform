@@ -17,6 +17,7 @@ from dr_platform.staging.definitions import (
 )
 from dr_platform.staging.dispatcher import (
     DispatcherRegistration,
+    UnwrappedPipelineError,
     register_scheduled_dispatcher,
 )
 from dr_platform.staging.handoff import (
@@ -113,6 +114,7 @@ __all__ = [
     "SweepProjection",
     "SweepSummary",
     "TelemetryInitializationResult",
+    "UnwrappedPipelineError",
     "WorkCancellationResult",
     "WorkInput",
     "WorkItemConflictError",
