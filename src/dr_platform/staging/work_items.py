@@ -19,7 +19,11 @@ from dr_platform.staging.identities import (
     WorkKey,
 )
 from dr_platform.staging.recipes import stable_random_rank
-from dr_platform.staging.records import WorkItemRecord, immutable_mapping
+from dr_platform.staging.records import (
+    PipelineRunRecord,
+    WorkItemRecord,
+    immutable_mapping,
+)
 from dr_platform.staging.runs import get_pipeline_run
 from dr_platform.staging.schema import StagingSchema
 
@@ -73,8 +77,15 @@ def insert_work_item_with_result(  # noqa: PLR0913
     input_reference: str,
     labels: Mapping[str, str],
     schema: StagingSchema | None = None,
+    pipeline_run: PipelineRunRecord | None = None,
 ) -> WorkItemInsertResult:
-    """Insert one item and report its campaign-idempotency disposition."""
+    """Insert one item and report its campaign-idempotency disposition.
+
+    ``pipeline_run`` lets a caller that already resolved the origin run
+    (e.g. once per chunk in a streaming submit loop) skip the per-item
+    ``get_pipeline_run`` SELECT. Direct callers that omit it still get the
+    lookup performed here, keyed by ``origin_run_key``.
+    """
     selected_schema = schema or StagingSchema()
     identity = CampaignWorkIdentity(
         campaign_key
@@ -91,13 +102,22 @@ def insert_work_item_with_result(  # noqa: PLR0913
         input_reference, label="input reference"
     )
     normalized_labels = validate_labels(labels, label="work item labels")
-    run = get_pipeline_run(
-        connection,
-        run_key=normalized_run_key,
-        schema=selected_schema,
-    )
-    if run is None:
-        raise LookupError(f"pipeline run does not exist: {normalized_run_key}")
+    if pipeline_run is not None:
+        if pipeline_run.run_key != normalized_run_key:
+            raise WorkItemConflictError(
+                "supplied pipeline run does not match origin_run_key"
+            )
+        run = pipeline_run
+    else:
+        run = get_pipeline_run(
+            connection,
+            run_key=normalized_run_key,
+            schema=selected_schema,
+        )
+        if run is None:
+            raise LookupError(
+                f"pipeline run does not exist: {normalized_run_key}"
+            )
     if run.campaign_key != identity.campaign_key:
         raise WorkItemConflictError(
             "work item campaign does not match its origin run"

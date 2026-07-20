@@ -22,6 +22,7 @@ from dr_platform.staging.identities import (
 )
 from dr_platform.staging.records import immutable_mapping
 from dr_platform.staging.runs import (
+    get_pipeline_run,
     insert_pipeline_run,
     mark_submission_completed,
 )
@@ -190,6 +191,14 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
     already_existing_count = 0
     with engine.begin() as connection:
         created_at = clock()
+        # Resolved once per chunk rather than once per item: at 10^4-10^5
+        # items/chunk_size chunks, a per-item get_pipeline_run SELECT here
+        # would triple this loop's statement count for no new information,
+        # since the run is immutable for the lifetime of this chunk's
+        # transaction.
+        run = get_pipeline_run(connection, run_key=run_key, schema=schema)
+        if run is None:
+            raise LookupError(f"pipeline run does not exist: {run_key}")
         for item in chunk:
             result = insert_work_item_with_result(
                 connection,
@@ -199,6 +208,7 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
                 input_reference=item.input_ref,
                 labels=item.labels,
                 schema=schema,
+                pipeline_run=run,
             )
             if not result.inserted:
                 already_existing_count += 1
