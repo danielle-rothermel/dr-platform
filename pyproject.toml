@@ -19,7 +19,7 @@ classifiers = [
 ]
 dependencies = [
     "alembic>=1.16.2",
-    "dbos[otel]==2.26.0",
+    "dbos[otel]==2.27.0",
     "dr-serialize>=0.1.0",
     "pydantic>=2.13.4",
     "sqlalchemy>=2.0.0",
@@ -37,7 +37,6 @@ build-backend = "hatchling.build"
 dev = [
     "pre-commit>=4.6.0",
     "psycopg[binary]>=3.3.4",
-    "pyright>=1.1.411",
     "pytest>=9.1.1",
     "ruff>=0.15.18",
     "ty>=0.0.51",
@@ -53,10 +52,6 @@ only-include = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[tool.pyright]
-venvPath = "."
-venv = ".venv"
 
 [tool.ruff]
 include = ["scripts/**/*.py", "src/**/*.py", "tests/**/*.py"]

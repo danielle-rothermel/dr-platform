@@ -132,7 +132,7 @@ wheels = [
 
 [[package]]
 name = "dbos"
-version = "2.26.0"
+version = "2.27.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "psycopg", extra = ["binary"] },
@@ -142,9 +142,9 @@ dependencies = [
     { name = "typer-slim" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/68/aa/d5119d8772ff01e1d133bfca513d86723cdf9fc87391d4dfa9afbfcf2e5d/dbos-2.26.0.tar.gz", hash = "sha256:1be900963e7c00fdd9734a8defbc9e90acd32241d7ebea71e0a9af6c5b6090ea", size = 541758, upload-time = "2026-06-30T15:35:34.469Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/92/ff/27660211e9e531cc65a8d4a1f644788ce5c0a711572c7bee02f249c4b2b1/dbos-2.27.0.tar.gz", hash = "sha256:d31269094a8a1530980a3856065af7f0681f32c6ba72fb9f679d7400f6431614", size = 574037, upload-time = "2026-07-14T21:35:36.164Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ca/32/6a8c03e39e733b0483cf949232576800fff730a232fa5af4b62f7d3c3660/dbos-2.26.0-py3-none-any.whl", hash = "sha256:f60e57078d2f67e3938c0f9fc455a399654689d78645dd915214a442bd9474f4", size = 218086, upload-time = "2026-06-30T15:35:32.631Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/7d/dcf3cb997c001c9818dd63eb3adedd0b114d606f49d3657ae8ceb3073abf/dbos-2.27.0-py3-none-any.whl", hash = "sha256:93daed3831ea4f9266c6bf93b3f904baf836ac065c20eb9efbfc8931c9ee280d", size = 230214, upload-time = "2026-07-14T21:35:34.699Z" },
 ]
 
 [package.optional-dependencies]
@@ -179,7 +179,6 @@ dependencies = [
 dev = [
     { name = "pre-commit" },
     { name = "psycopg", extra = ["binary"] },
-    { name = "pyright" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
@@ -188,7 +187,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.16.2" },
-    { name = "dbos", extras = ["otel"], specifier = "==2.26.0" },
+    { name = "dbos", extras = ["otel"], specifier = "==2.27.0" },
     { name = "dr-serialize", git = "https://github.com/danielle-rothermel/dr-serialize?branch=main" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
@@ -198,7 +197,6 @@ requires-dist = [
 dev = [
     { name = "pre-commit", specifier = ">=4.6.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
-    { name = "pyright", specifier = ">=1.1.411" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.15.18" },
     { name = "ty", specifier = ">=0.0.51" },
@@ -726,19 +724,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c3/b2/bc9c9196916376152d655522fdcebac55e66de6603a76a02bca1b6414f6c/pygments-2.20.0.tar.gz", hash = "sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f", size = 4955991, upload-time = "2026-03-29T13:29:33.898Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176", size = 1231151, upload-time = "2026-03-29T13:29:30.038Z" },
-]
-
-[[package]]
-name = "pyright"
-version = "1.1.411"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "nodeenv" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/7e/ab/265f7dc69d28113ebba19092e57b075f41543b2ed048429c5f56e2b88eac/pyright-1.1.411.tar.gz", hash = "sha256:d885a0551f2e763b089a02702174e7f4ba77548cddabc972ab86d1f7f1b0f998", size = 4112861, upload-time = "2026-06-25T02:14:06.37Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0a/49/385be530a6a5b78d1cbcd5c2e38debc8959a2fc6bdb716f4e581002979fc/pyright-1.1.411-py3-none-any.whl", hash = "sha256:dc7c72a8e2700c55baa127554040e067041ea53ccfd50bf96308cc4291c7d5d9", size = 6181526, upload-time = "2026-06-25T02:14:04.691Z" },
 ]
 
 [[package]]

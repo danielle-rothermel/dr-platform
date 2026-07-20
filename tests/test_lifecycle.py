@@ -26,6 +26,7 @@ from dr_platform import (
     NextAttemptRequest,
     PlatformSchema,
     ServiceClass,
+    SubmitResult,
     TargetRegistry,
     cancel_operation,
     inspect_operation,
@@ -564,23 +565,28 @@ def test_submit_exact_replay_is_idempotent_and_conflicts_on_redefinition(
         pg_engine,
         operation_key="submit-replay",
     )
-    kwargs = {
-        "operation_key": "submit-replay",
-        "workflow_role": target.workflow_role,
-        "group_key": "lifecycle-group",
-        "target": target,
-        "source": source,
-        "engine": pg_engine,
-        "resolver": registry,
-        "schema": schema,
-        "queue_lookup": _QueueLookup(),
-        "enqueue_adapter": adapter,
-        "reconciliation_reader": _UncertainLifecycleReader(),
-    }
 
-    replay = submit(**kwargs)
+    def submit_replay(
+        *, metadata: dict[str, Any] | None = None
+    ) -> SubmitResult:
+        return submit(
+            operation_key="submit-replay",
+            workflow_role=target.workflow_role,
+            group_key="lifecycle-group",
+            target=target,
+            source=source,
+            engine=pg_engine,
+            resolver=registry,
+            metadata=metadata,
+            schema=schema,
+            queue_lookup=_QueueLookup(),
+            enqueue_adapter=adapter,
+            reconciliation_reader=_UncertainLifecycleReader(),
+        )
+
+    replay = submit_replay()
     with pytest.raises(RegistrationConflictError):
-        submit(**kwargs, metadata={"different": True})
+        submit_replay(metadata={"different": True})
 
     with pg_engine.connect() as connection:
         counts = (

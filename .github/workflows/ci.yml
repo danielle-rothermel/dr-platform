@@ -38,7 +38,7 @@ jobs:
           python-version: "3.12"
       - run: uv sync
       - run: uv run ruff check .
-      - run: uv run pyright src/dr_platform tests scripts
+      - run: uv run ty check
       # Fail fast with a clear message if the service database is
       # unreachable, instead of skipping the whole PostgreSQL suite.
       - name: Verify postgres connectivity
