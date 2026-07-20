@@ -721,6 +721,61 @@ def test_sweep_projects_only_cancelled_or_abandoned_admitted_attempts(
     assert second.admitted_total == 1
 
 
+def test_sweep_projects_an_abandoned_attempt_with_an_unprintable_error(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    pipeline = _pipeline(
+        key="sweep-unprintable",
+        stage_logic=(("execute", lambda input_ref: f"output:{input_ref}"),),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    _configure_controls(pg_engine, pipeline, capacity=1)
+    _submit_items(
+        pg_engine,
+        registry,
+        pipeline,
+        campaign_key="campaign-sweep-unprintable",
+        run_key="run-sweep-unprintable",
+        items=(WorkInput(work_key="work", input_ref="input", labels={}),),
+    )
+    admission_client = _RecordingClient()
+    admitted = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(admission_client),
+        registry=registry,
+        clock=_utc_now,
+    )
+    assert admitted.admitted_total == 1
+    workflow_id = _recorded_workflow_id(admission_client.enqueued[0][0])
+    status_client = _StatusClient(
+        (
+            _Status(
+                workflow_id,
+                "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+                _UnprintableError(),
+            ),
+        )
+    )
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        client=_as_dbos_client(status_client),
+        clock=_utc_now,
+    )
+
+    with pg_engine.connect() as connection:
+        terminal_summary = connection.execute(
+            select(schema.stage_attempts.c.terminal_summary).where(
+                schema.stage_attempts.c.terminal_at.is_not(None)
+            )
+        ).scalar_one()
+
+    assert summary.projected_count == 1
+    assert terminal_summary["message"] == "<unprintable error message>"
+
+
 def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
     pg_engine: Engine,
 ) -> None:
