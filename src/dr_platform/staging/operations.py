@@ -531,6 +531,11 @@ def _redelegable_workflow_id(
     already-CANCELLED current stage carries an admitted, non-superseded
     attempt, re-issuing its cancellation lets repeated ``cancel_work``
     self-heal.
+
+    Re-issuing is safe even when the workflow already finished only because
+    DBOS's ``cancel_workflows`` UPDATE is guarded with ``status NOT IN
+    (SUCCESS, ERROR)``; a DBOS upgrade that drops that guard would let this
+    path rewrite completed workflows' statuses.
     """
     if current.state is not StageExecutionState.CANCELLED:
         return None

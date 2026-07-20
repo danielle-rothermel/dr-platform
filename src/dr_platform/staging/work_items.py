@@ -104,7 +104,9 @@ def insert_work_item_with_result(  # noqa: PLR0913
     normalized_labels = validate_labels(labels, label="work item labels")
     if pipeline_run is not None:
         if pipeline_run.run_key != normalized_run_key:
-            raise WorkItemConflictError(
+            # A call-site bug, not a data conflict: the caller resolved one
+            # run and named another.
+            raise ValueError(
                 "supplied pipeline run does not match origin_run_key"
             )
         run = pipeline_run

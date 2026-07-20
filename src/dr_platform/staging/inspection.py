@@ -110,7 +110,10 @@ def inspect_campaign(
     engine: Engine,
     schema: StagingSchema | None = None,
 ) -> CampaignSummary:
-    """Return one campaign's stable identity and aggregate counts."""
+    """Return one campaign's stable identity and aggregate counts.
+
+    Raises ``LookupError`` when the campaign does not exist.
+    """
     selected_schema = schema or StagingSchema()
     normalized_campaign = _campaign_key(campaign_key)
     statement = _campaign_summary_statement(selected_schema)
@@ -163,7 +166,12 @@ def list_runs(
     limit: int = DEFAULT_INSPECTION_LIMIT,
     schema: StagingSchema | None = None,
 ) -> tuple[RunSummary, ...]:
-    """Return a keyset page of immutable runs in one campaign."""
+    """Return a keyset page of immutable runs in one campaign.
+
+    Raises ``LookupError`` when the campaign does not exist and
+    ``ValueError`` for a malformed limit or a cursor unknown in the
+    campaign.
+    """
     _validate_limit(limit)
     selected_schema = schema or StagingSchema()
     normalized_campaign = _campaign_key(campaign_key)

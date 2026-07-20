@@ -191,6 +191,7 @@ def _wait_until_blocked_on_lock(
                 text(
                     "SELECT count(*) FROM pg_stat_activity "
                     "WHERE wait_event_type = 'Lock' "
+                    "AND datname = current_database() "
                     "AND pid <> pg_backend_pid()"
                 )
             ).scalar_one()

@@ -212,6 +212,13 @@ def test_registration_rejects_a_registry_with_an_unwrapped_pipeline(
         system_database_url="postgresql+psycopg://user:secret@db/platform"
     )
     _patch_dbos_wiring(monkeypatch, client)
+    constructions: list[str] = []
+
+    def _recording_factory(*, system_database_url: str) -> _FakeClient:
+        constructions.append(system_database_url)
+        return client
+
+    monkeypatch.setattr(dispatcher, "DBOSClient", _recording_factory)
     config = PlatformDbosConfig(
         database_url="postgresql+psycopg://user:secret@db/platform",
         system_database_url="postgresql+psycopg://user:secret@db/platform",
@@ -230,8 +237,9 @@ def test_registration_rejects_a_registry_with_an_unwrapped_pipeline(
 
     assert caught.value.pipeline_key == "evaluation"
     assert caught.value.pipeline_version == 1
-    # The client must not be constructed when validation rejects the registry.
-    assert not client.destroyed
+    # The client must never be constructed when validation rejects the
+    # registry; recording factory invocations proves the ordering.
+    assert constructions == []
 
 
 def test_registration_accepts_a_registry_of_wrapped_pipelines(
