@@ -63,6 +63,19 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _failure_message(error: Exception) -> str:
+    # ``__str__``/``__repr__`` of an application exception are boundary
+    # code: they run outside the savepoint, so they must not raise out of
+    # the failure handler and abort the shared pass.
+    try:
+        return str(error)
+    except Exception:  # noqa: BLE001 -- boundary
+        try:
+            return repr(error)
+        except Exception:  # noqa: BLE001 -- boundary
+            return f"unprintable {type(error).__name__}"
+
+
 @dataclass(frozen=True, slots=True)
 class AdmissionPayload:
     """Minimal immutable context supplied to a stage's ``args_for``."""
@@ -193,7 +206,7 @@ class _PassTally:
                 pipeline_version=identity[1],
                 stage_key=StageKey(identity[2]),
                 error_type=type(error).__name__,
-                message=str(error),
+                message=_failure_message(error),
             ),
         )
 
@@ -311,8 +324,11 @@ def _admit_in_transaction(  # noqa: PLR0913 -- transaction dependencies
     Failures never abort the pass.  A stage lacking an empty-selector
     control is excluded and reported; an ``args_for`` or enqueue failure
     rolls back that candidate through a savepoint, excludes its stage from
-    the remainder of the pass, and is reported by stage identity.  All other
-    admissions commit with the surrounding transaction.
+    the remainder of the pass, and is reported by stage identity.  Excluded
+    stages' remaining READY rows are filtered from later pages so a large
+    unhealthy backlog cannot exhaust the considered budget and starve
+    healthy stages.  All other admissions commit with the surrounding
+    transaction.
     """
     tally = _PassTally()
     admitted_at = clock()
@@ -331,6 +347,7 @@ def _admit_in_transaction(  # noqa: PLR0913 -- transaction dependencies
             ),
             after=after,
             full_control_ids=full_control_ids,
+            excluded=tally.excluded,
         )
         if page is None:
             break
@@ -368,9 +385,7 @@ def _admit_in_transaction(  # noqa: PLR0913 -- transaction dependencies
                                 schema=schema,
                             )
                     except Exception as error:  # noqa: BLE001 -- boundary
-                        tally.record_failure(
-                            candidate.stage_identity, error
-                        )
+                        tally.record_failure(candidate.stage_identity, error)
                         continue
                     tally.record_admitted(candidate.stage_identity)
                     for control in matching:
@@ -386,13 +401,14 @@ def _admit_in_transaction(  # noqa: PLR0913 -- transaction dependencies
     return tally.to_summary()
 
 
-def _lock_page(
+def _lock_page(  # noqa: PLR0913 -- explicit paging predicates
     connection: Connection,
     *,
     schema: StagingSchema,
     limit: int,
     after: tuple[int, int] | None,
     full_control_ids: set[int],
+    excluded: set[_StageIdentity],
 ) -> _Page | None:
     candidates = _lock_candidates(
         connection,
@@ -400,6 +416,7 @@ def _lock_page(
         limit=limit,
         after=after,
         full_control_ids=full_control_ids,
+        excluded=excluded,
     )
     if not candidates:
         return None
@@ -452,9 +469,7 @@ def _evaluate_candidate(
     )
     if full:
         return _SkipFull(
-            full_control_ids=frozenset(
-                control.control_id for control in full
-            )
+            full_control_ids=frozenset(control.control_id for control in full)
         )
     return _Admit(matching=matching)
 
@@ -546,13 +561,14 @@ def _attempt_for_admission(
     )
 
 
-def _lock_candidates(
+def _lock_candidates(  # noqa: PLR0913 -- explicit paging predicates
     connection: Connection,
     *,
     schema: StagingSchema,
     limit: int,
     after: tuple[int, int] | None,
     full_control_ids: set[int],
+    excluded: set[_StageIdentity],
 ) -> tuple[_Candidate, ...]:
     executions = schema.stage_executions
     work_items = schema.work_items
@@ -623,6 +639,17 @@ def _lock_candidates(
             .correlate(executions, work_items, runs)
         )
         statement = statement.where(~at_capacity)
+    if excluded:
+        # Rows of excluded stages stay READY and ranks are stable, so
+        # without this predicate a large unhealthy backlog at the head of
+        # the rank order would consume the considered budget on every pass.
+        statement = statement.where(
+            tuple_(
+                runs.c.pipeline_key,
+                runs.c.pipeline_version,
+                executions.c.stage_key,
+            ).not_in(sorted(excluded))
+        )
     statement = statement.limit(limit).with_for_update(
         of=executions,
         skip_locked=True,
@@ -705,8 +732,7 @@ def _load_occupancy(
                     controls.c.pipeline_key == runs.c.pipeline_key,
                     controls.c.pipeline_version == runs.c.pipeline_version,
                     controls.c.stage_key == executions.c.stage_key,
-                    executions.c.state
-                    == StageExecutionState.ADMITTED.value,
+                    executions.c.state == StageExecutionState.ADMITTED.value,
                     work_items.c.labels.contains(controls.c.selector),
                 ),
             )

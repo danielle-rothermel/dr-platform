@@ -30,6 +30,7 @@ from dr_platform.staging import (
 )
 from dr_platform.staging.admission import (
     AdmissionPayload,
+    AdmissionSummary,
     StageAdmissionCount,
     StageAdmissionFailure,
     StageIdentityRecord,
@@ -261,9 +262,7 @@ class _RecordingClient:
         *args: object,
         **_kwargs: object,
     ) -> object:
-        self.enqueued.append(
-            (cast("EnqueueOptions", dict(options)), args)
-        )
+        self.enqueued.append((cast("EnqueueOptions", dict(options)), args))
         return object()
 
 
@@ -684,9 +683,12 @@ def test_enqueue_failure_rolls_back_platform_and_dbos_rows(
         assert len(admitted) == 1
         assert len(ready) == 1
         with pg_engine.connect() as connection:
-            assert connection.execute(
-                select(func.count()).select_from(schema.stage_attempts)
-            ).scalar_one() == 1
+            assert (
+                connection.execute(
+                    select(func.count()).select_from(schema.stage_attempts)
+                ).scalar_one()
+                == 1
+            )
         enqueued = client.list_workflows(
             workflow_ids=workflow_ids,
             load_input=False,
@@ -991,8 +993,9 @@ def test_evaluate_candidate_reports_only_the_full_matching_control() -> None:
     assert result == _SkipFull(full_control_ids=frozenset({2}))
 
 
-def test_evaluate_candidate_full_but_non_matching_control_does_not_block(
-) -> None:
+def test_evaluate_candidate_full_but_non_matching_control_does_not_block() -> (
+    None
+):
     candidate = _candidate(labels={"cohort": "red"})
     default = _make_control(control_id=1, selector={}, capacity=5)
     other = _make_control(
@@ -1204,3 +1207,204 @@ def test_args_for_failure_isolates_to_its_stage(
             message="args_for exploded",
         ),
     )
+
+
+def test_unconfigured_backlog_cannot_exhaust_considered_budget(
+    pg_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A realistic starving backlog needs batch_size + 10_000 rows; shrinking
+    # the skip allowance exercises the same budget exhaustion with five.
+    monkeypatch.setattr(
+        "dr_platform.staging.admission.MAX_CAPACITY_SKIPS_PER_PASS", 2
+    )
+    schema = _migrate(pg_engine)
+    registry = _starvation_registry()
+    _submit_starvation_backlog(pg_engine, registry)
+    _pipeline_control(pg_engine, suffix="b", capacity=1, paused=False)
+    client = _RecordingClient()
+
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        batch_size=1,
+        clock=lambda: NOW,
+    )
+
+    assert summary.admitted_total == 1
+    assert client.enqueued[0][0]["queue_name"] == "queue-b"
+    assert summary.unconfigured_stages == (
+        StageIdentityRecord(
+            pipeline_key="pipeline-a",
+            pipeline_version=1,
+            stage_key=StageKey("stage-a"),
+        ),
+    )
+    assert _pipeline_states(pg_engine, schema) == (
+        [("pipeline-a", StageExecutionState.READY.value)] * 5
+        + [("pipeline-b", StageExecutionState.ADMITTED.value)]
+    )
+
+
+def test_unprintable_failure_message_does_not_abort_the_pass(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+
+    class _UnprintableError(RuntimeError):
+        def __str__(self) -> str:
+            raise RuntimeError("no message for you")
+
+    def failing_args_for(_payload: AdmissionPayload) -> tuple[object, ...]:
+        raise _UnprintableError("boom")
+
+    registry = PipelineRegistry()
+    registry.register(
+        PipelineDefinition(
+            key=PipelineKey("pipeline-a"),
+            version=1,
+            stages=(
+                StageDefinition(
+                    key=StageKey("stage-a"),
+                    queue_name="queue-a",
+                    workflow=_workflow,
+                    args_for=_args_for,
+                ),
+            ),
+        )
+    )
+    registry.register(
+        PipelineDefinition(
+            key=PipelineKey("pipeline-b"),
+            version=1,
+            stages=(
+                StageDefinition(
+                    key=StageKey("stage-b"),
+                    queue_name="queue-b",
+                    workflow=_workflow,
+                    args_for=failing_args_for,
+                ),
+            ),
+        )
+    )
+    _submit_two_stage_backlog(pg_engine, registry)
+    _pipeline_control(pg_engine, suffix="a", capacity=5, paused=False)
+    _pipeline_control(pg_engine, suffix="b", capacity=5, paused=False)
+    client = _RecordingClient()
+
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+
+    assert summary.admitted_total == 1
+    assert _states_by_pipeline(pg_engine, schema) == {
+        "pipeline-a": StageExecutionState.ADMITTED.value,
+        "pipeline-b": StageExecutionState.READY.value,
+    }
+    assert summary.failed_stages == (
+        StageAdmissionFailure(
+            pipeline_key="pipeline-b",
+            pipeline_version=1,
+            stage_key=StageKey("stage-b"),
+            error_type="_UnprintableError",
+            message=repr(_UnprintableError("boom")),
+        ),
+    )
+
+
+def test_paused_selector_only_stage_is_invisible_until_resume(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    _submit(pg_engine, registry, ({"cohort": "blue"},))
+    _control(
+        pg_engine,
+        selector={"cohort": "blue"},
+        capacity=1,
+        paused=True,
+    )
+    client = _RecordingClient()
+
+    paused = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+
+    # While paused, the SQL pause exclusion filters the stage's rows before
+    # unconfigured-stage detection runs, so a stage with only a paused
+    # selector control and no empty-selector default appears nowhere.
+    assert paused.admitted_total == 0
+    assert paused.skipped_for_pause == 0
+    assert paused.unconfigured_stages == ()
+    assert paused.failed_stages == ()
+
+    _control(
+        pg_engine,
+        selector={"cohort": "blue"},
+        capacity=1,
+        paused=False,
+    )
+    resumed = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+
+    assert resumed.admitted_total == 0
+    assert resumed.unconfigured_stages == (
+        StageIdentityRecord(
+            pipeline_key="evaluation",
+            pipeline_version=1,
+            stage_key=StageKey("execute"),
+        ),
+    )
+    assert _execution_states(pg_engine, schema)[0][1] == (
+        StageExecutionState.READY.value
+    )
+
+
+def test_two_passes_cannot_exceed_control_capacity(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    _submit(pg_engine, registry, ({}, {}))
+    _control(pg_engine, selector=None, capacity=1)
+    start = Barrier(2)
+
+    def admit() -> AdmissionSummary:
+        start.wait()
+        return run_admission_pass(
+            pg_engine,
+            client=_as_dbos_client(_RecordingClient()),
+            registry=registry,
+            clock=lambda: NOW,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        summaries = tuple(executor.map(lambda _index: admit(), range(2)))
+
+    with pg_engine.connect() as connection:
+        attempt_count = connection.execute(
+            select(func.count()).select_from(schema.stage_attempts)
+        ).scalar_one()
+
+    # Whichever pass acquires the control lock second must observe the
+    # winner's committed occupancy and skip as full.
+    assert sum(item.admitted_total for item in summaries) == 1
+    assert sum(item.skipped_for_capacity for item in summaries) == 1
+    assert attempt_count == 1
+    assert sorted(
+        state for _, state, _ in _execution_states(pg_engine, schema)
+    ) == [
+        StageExecutionState.ADMITTED.value,
+        StageExecutionState.READY.value,
+    ]
