@@ -115,10 +115,17 @@ def _database_identity(
         "host",
         "port",
         "dbname",
+        # libpq resolves these independently of the URL's host/port/dbname
+        # components (hostaddr overrides address resolution outright;
+        # service pulls an entire connection profile from pg_service.conf),
+        # so colocation identity derived from the URL alone cannot be
+        # trusted while either is present.
+        "hostaddr",
+        "service",
     }.intersection(url.query):
         raise ValueError(
-            "PostgreSQL database URLs must not use host, port, or dbname "
-            "query parameters"
+            "PostgreSQL database URLs must not use host, port, dbname, "
+            "hostaddr, or service query parameters"
         )
     if is_postgres and url.database is None:
         raise ValueError(

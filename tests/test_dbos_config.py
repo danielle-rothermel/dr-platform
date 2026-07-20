@@ -141,6 +141,8 @@ def test_build_platform_dbos_config_redacts_query_values() -> None:
         "port=6543",
         "host=primary.example&host=standby.example",
         "dbname=other",
+        "hostaddr=10.0.0.5",
+        "service=other-service",
     ],
 )
 def test_build_platform_dbos_config_rejects_query_routing(
@@ -149,8 +151,8 @@ def test_build_platform_dbos_config_rejects_query_routing(
     with pytest.raises(
         ValueError,
         match=(
-            "PostgreSQL database URLs must not use host, port, or dbname "
-            "query parameters"
+            "PostgreSQL database URLs must not use host, port, dbname, "
+            "hostaddr, or service query parameters"
         ),
     ):
         dbos_config.build_platform_dbos_config(
