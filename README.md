@@ -252,17 +252,20 @@ against `PlatformDbosConfig.system_database_url`, the colocated system
 database URL.
 
 `cancel_work` makes platform state terminal before delegating cancellation of
-the exact admitted DBOS workflow. READY work has no workflow to delegate;
-already-terminal cancellation is an idempotent no-op. Cancellation is
-non-recursive and has several important consequences:
+the exact admitted DBOS workflow. READY work has no workflow to delegate.
+FAILED work is cancellable too: the attempt is already terminal, so nothing is
+delegated, but the CANCELLED stage fences the item against a later
+`retry_stage`. Cancellation is non-recursive and has several important
+consequences:
 
 - CANCELLED work is permanently terminal within its campaign. Submit a new
   work key to recover it.
-- If DBOS cancellation delegation fails after the platform commit, the package
-  does not re-drive that external call.
-- A cancellation racing with successful handoff can find that the next stage
-  was created after the first call selected its target. Call `cancel_work`
-  again to cancel that newly current stage.
+- A cancellation racing with a successful handoff targets whatever stage is
+  current once it holds the row lock, so it cancels the freshly created next
+  stage rather than misreporting already-terminal work.
+- If DBOS cancellation delegation fails after the platform commit, calling
+  `cancel_work` again re-issues the idempotent delegation for the recorded
+  attempt; repeated calls self-heal a lost delegation.
 
 ## Inspection and operations
 

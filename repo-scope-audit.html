@@ -597,7 +597,7 @@
       <code>enqueue_compensation_hazards</code>.
     </div>
     <p class="remove"><strong>Resolution:</strong> Resolved 2026-07-17 by the staged-work rebuild
-      (<a href="platform-rebuild-implementation-guide.html">platform-rebuild-implementation-guide.html</a>), taking the simplify
+      (<span style="font-family:var(--font-mono)">platform-rebuild-implementation-guide.html</span>, retired after the rebuild completed), taking the simplify
       branch. Transactional enqueue through <code>DBOSClient.enqueue_in_transaction</code> removes the dual-write window, so
       exactly-once-ish enqueue recovery is not a core promise.</p>
     <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 9</div><ul class="checklist">
@@ -622,7 +622,7 @@
       the schema persists <code>missing_reobservations</code> and <code>next_attempt_requests</code>.
     </div>
     <p class="remove"><strong>Resolution:</strong> Resolved 2026-07-17 by the staged-work rebuild
-      (<a href="platform-rebuild-implementation-guide.html">platform-rebuild-implementation-guide.html</a>), taking the simplify
+      (<span style="font-family:var(--font-mono)">platform-rebuild-implementation-guide.html</span>, retired after the rebuild completed), taking the simplify
       branch. Cuts, missing-workflow hysteresis, and the throttle ledger are deleted; DBOS owns recovery, and the lazy sweep
       projects only what DBOS abandons.</p>
     <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 9</div><ul class="checklist">
@@ -719,7 +719,7 @@
       migration checks pin the same values and numbers.
     </div>
     <p class="remove"><strong>Resolution:</strong> Resolved 2026-07-17 by the staged-work rebuild
-      (<a href="platform-rebuild-implementation-guide.html">platform-rebuild-implementation-guide.html</a>), taking the simplify
+      (<span style="font-family:var(--font-mono)">platform-rebuild-implementation-guide.html</span>, retired after the rebuild completed), taking the simplify
       branch. Fixed service classes are deleted in favor of neutral stable random rank plus capacity and selector controls.</p>
     <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 9</div><ul class="checklist">
       <li class="done">Delete fixed service classes and priorities.</li><li class="done">Use stable rank with explicit capacity and selector controls.</li>
@@ -742,7 +742,7 @@
       manifests, submission, JSONL, schema, and inspection all make the collection model structural.
     </div>
     <p class="remove"><strong>Resolution:</strong> Resolved 2026-07-17 by the staged-work rebuild
-      (<a href="platform-rebuild-implementation-guide.html">platform-rebuild-implementation-guide.html</a>), taking the simplify
+      (<span style="font-family:var(--font-mono)">platform-rebuild-implementation-guide.html</span>, retired after the rebuild completed), taking the simplify
       branch. The package is collection-model-neutral: submission streams opaque keyed work, with no manifests, pages, or JSONL
       in core.</p>
     <div class="progress complete"><div class="progress-title">Implementation status · Complete in PR 9</div><ul class="checklist">
