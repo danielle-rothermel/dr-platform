@@ -50,7 +50,6 @@ class SweepProjection:
 class SweepSummary:
     projections: tuple[SweepProjection, ...]
     inspected_count: int
-    next_cursor: int | None
 
     @property
     def projected_count(self) -> int:
@@ -65,14 +64,13 @@ class _AdmittedAttempt:
     stage_key: StageKey
 
 
-def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit sweep dependencies
+def sweep_abandoned_stages(
     engine: Engine,
     *,
     client: DBOSClient,
     batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
     clock: Callable[[], datetime] = _utc_now,
     schema: StagingSchema | None = None,
-    after: int | None = None,
 ) -> SweepSummary:
     """Project terminal DBOS abandonment for currently ADMITTED stages.
 
@@ -80,21 +78,21 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit sweep dependencies
     retries, resumes, replaces, or waits for a workflow.
 
     ``batch_size`` is a keyset page size, not a cap: a single sweep paginates
-    through every ADMITTED attempt beyond ``after`` so long-running healthy
-    attempts with low ids cannot starve abandoned ones out of inspection.
-    ``after`` (default ``None``) starts the scan from the lowest
-    ``stage_execution_id``; because one call drains the backlog to its end,
-    ``SweepSummary.next_cursor`` is always ``None``.  An out-of-band DBOS
-    resume races benignly with projection -- platform state is authoritative,
-    so a workflow that resumes and completes after projection fails the
-    handoff identity guard (:class:`StageHandoffMismatchError`) rather than
-    corrupting state.
+    through every ADMITTED attempt so long-running healthy attempts with low
+    ids cannot starve abandoned ones out of inspection.  The admitted set is
+    bounded by total stage capacity, so a full pass per call is cheap; there
+    is deliberately no external cursor, because a caller-carried keyset would
+    permanently skip rows that become ADMITTED behind it.  An out-of-band
+    DBOS resume races benignly with projection -- platform state is
+    authoritative, so a workflow that resumes and completes after projection
+    fails the handoff identity guard (:class:`StageHandoffMismatchError`)
+    rather than corrupting state.
     """
     validate_positive_integer(batch_size, label="sweep batch size")
     selected_schema = schema or StagingSchema()
     projections: list[SweepProjection] = []
     inspected_count = 0
-    cursor: int | None = after
+    cursor: int | None = None
     while True:
         with engine.connect() as connection:
             admitted = _list_admitted_attempts(
@@ -158,7 +156,6 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit sweep dependencies
     return SweepSummary(
         projections=tuple(projections),
         inspected_count=inspected_count,
-        next_cursor=None,
     )
 
 
@@ -224,8 +221,7 @@ def _project_terminal_status(  # noqa: PLR0913 -- explicit projection facts
                 executions.c.current_attempt,
             )
             .where(
-                executions.c.stage_execution_id
-                == attempt.stage_execution_id
+                executions.c.stage_execution_id == attempt.stage_execution_id
             )
             .with_for_update()
         )
