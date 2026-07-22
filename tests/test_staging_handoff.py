@@ -390,6 +390,82 @@ def test_completion_and_next_ready_insert_roll_back_together(
     assert terminal_at is None
 
 
+# The exact encoded typed Object Reference whetstone binds for a terminal
+# Rollout Result: a declared schema plus a 64-char content_hash.  dr-platform
+# transports it in ``output_reference``/``terminal_reference`` without ever
+# interpreting the embedded scheme, query separators, or hash.
+_TERMINAL_OBJECT_REFERENCE = (
+    "objref://rollout-result/v3"
+    "?schema=whetstone.rollout_result"
+    "&schema_version=7"
+    "&content_hash="
+    "2c624232cdd221771294dfbb310aca000a0df6ac8b66b696d90ef06fdefb64a3"
+)
+
+
+def test_output_reference_is_transported_opaquely_without_parsing(
+    pg_engine: Engine,
+) -> None:
+    """A terminal Object Reference round-trips byte-for-byte, unparsed.
+
+    A succeeding stage's ``output_reference`` and its attempt
+    ``terminal_reference`` preserve the exact encoded string; dr-platform never
+    parses, resolves, or reconstructs the stored Rollout Result behind it.
+    """
+    schema = _migrate(pg_engine)
+    pipeline = _pipeline(
+        key="opaque-output",
+        stage_logic=(("execute", lambda input_ref: f"output:{input_ref}"),),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    _configure_controls(pg_engine, pipeline, capacity=1)
+    _submit_items(
+        pg_engine,
+        registry,
+        pipeline,
+        campaign_key="campaign-opaque-output",
+        run_key="run-opaque-output",
+        items=(WorkInput(work_key="work", input_ref="input", labels={}),),
+    )
+    admission_client = _RecordingClient()
+    run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(admission_client),
+        registry=registry,
+        clock=_utc_now,
+    )
+    workflow_id = _recorded_workflow_id(admission_client.enqueued[0][0])
+
+    with pg_engine.begin() as connection:
+        _complete_stage_in_transaction(
+            connection,
+            workflow_id=workflow_id,
+            pipeline_key=pipeline.key.value,
+            pipeline_version=pipeline.version,
+            stage_key="execute",
+            stage_index=0,
+            succeeded=True,
+            output_reference=_TERMINAL_OBJECT_REFERENCE,
+            terminal_summary={"outcome": "succeeded"},
+            terminal_reference=_TERMINAL_OBJECT_REFERENCE,
+            next_stage_key=None,
+            next_stage_index=None,
+            completed_at=_utc_now(),
+        )
+
+    with pg_engine.connect() as connection:
+        stored_output = connection.execute(
+            select(schema.stage_executions.c.output_reference)
+        ).scalar_one()
+        stored_terminal = connection.execute(
+            select(schema.stage_attempts.c.terminal_reference)
+        ).scalar_one()
+
+    assert stored_output == _TERMINAL_OBJECT_REFERENCE
+    assert stored_terminal == _TERMINAL_OBJECT_REFERENCE
+
+
 def test_application_failure_is_recorded_in_band_and_releases_capacity(
     clean_pg: str,
     pg_engine: Engine,

@@ -334,3 +334,80 @@ def test_cross_run_campaign_duplicates_converge(
     assert (first.inserted_count, first.already_existing_count) == (1, 0)
     assert (second.inserted_count, second.already_existing_count) == (0, 1)
     assert (work_count, stage_count, origin_run_key) == (1, 1, "run-1")
+
+
+# One structured, resolvable-looking typed Object Reference of the exact shape
+# whetstone/dr-store will carry: an encoded value embedding a declared schema
+# and a 64-char content_hash for one immutable Rollout Work Request.  The
+# embedded ``://`` and ``&`` are deliberate parse bait; dr-platform must never
+# interpret them.
+_TYPED_OBJECT_REFERENCE = (
+    "objref://rollout-work-request/v3"
+    "?schema=whetstone.rollout_work_request"
+    "&schema_version=7"
+    "&content_hash="
+    "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+)
+
+
+def test_input_ref_is_transported_opaquely_without_parsing(
+    pg_engine: Engine,
+) -> None:
+    """A typed Object Reference round-trips byte-for-byte, unparsed.
+
+    dr-platform validates ``input_ref`` only as a non-empty string and never
+    parses, resolves, normalizes, or decomposes its encoded schema or
+    ``content_hash``.  The exact submitted string must reappear verbatim in the
+    persisted ``work_items.input_reference`` column.
+    """
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+
+    submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        config_ref="config:1",
+        items=(
+            WorkInput(
+                work_key="work-opaque",
+                input_ref=_TYPED_OBJECT_REFERENCE,
+                labels={},
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    with pg_engine.connect() as connection:
+        stored = connection.execute(
+            select(schema.work_items.c.input_reference)
+        ).scalar_one()
+
+    # Byte-for-byte identity: the transport preserved every character,
+    # including the ``://``, query separators, and full content_hash, none of
+    # which dr-platform inspected.
+    assert stored == _TYPED_OBJECT_REFERENCE
+
+
+def test_work_input_never_validates_reference_structure() -> None:
+    """The submission boundary accepts any non-empty reference string.
+
+    Opacity means dr-platform imposes no schema, scheme, delimiter, hash
+    length, or well-formedness requirement on the transported reference; only
+    emptiness is rejected, and the accepted value is preserved unchanged.
+    """
+    for opaque in (
+        "x",
+        _TYPED_OBJECT_REFERENCE,
+        "not-a-reference-at-all",
+        "objref://missing-content-hash",
+        '{"looks":"like json","but":"is not parsed"}',
+    ):
+        assert WorkInput(
+            work_key="work", input_ref=opaque, labels={}
+        ).input_ref == opaque
+
+    with pytest.raises(ValueError, match="input reference"):
+        WorkInput(work_key="work", input_ref="", labels={})
