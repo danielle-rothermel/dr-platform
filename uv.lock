@@ -188,7 +188,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.16.2" },
     { name = "dbos", extras = ["otel"], specifier = "==2.27.0" },
-    { name = "dr-serialize", git = "https://github.com/danielle-rothermel/dr-serialize?branch=main" },
+    { name = "dr-serialize", editable = "../dr-serialize" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
 ]
@@ -205,9 +205,20 @@ dev = [
 [[package]]
 name = "dr-serialize"
 version = "0.1.0"
-source = { git = "https://github.com/danielle-rothermel/dr-serialize?branch=main#cfdf4496f1a5510d1788dba70f554300b39a3bca" }
+source = { editable = "../dr-serialize" }
 dependencies = [
     { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.13.4" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pre-commit", specifier = ">=4.6.0" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "ruff", specifier = ">=0.15.18" },
+    { name = "ty", specifier = ">=0.0.51" },
 ]
 
 [[package]]
