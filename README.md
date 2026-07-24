@@ -1,5 +1,8 @@
 # dr-platform
 
+[![CI](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/dr-platform.svg)](https://pypi.org/project/dr-platform/)
+
 `dr-platform` is an alpha staged-work funnel built on PostgreSQL and DBOS. It
 accepts application-owned work as a stream, moves each item through a linear
 pipeline, and exposes durable controls and inspection. The public API is under
@@ -19,6 +22,34 @@ The ownership boundary is deliberate:
 The package does not interpret application payloads or privilege a source
 transport. A database query, API iterator, generated sequence, or file reader
 can all yield the same `WorkInput` values.
+
+The [vocabulary sheet](https://danielle-rothermel.github.io/dr-platform/)
+(source: `.defs/vocab.html`) is the authoritative statement of the
+staged-work pipeline contract this repo implements: the terms, the
+guarantees, what is in and out of scope, and the mapping from each term to
+the exported names.
+
+## Installation
+
+```console
+pip install dr-platform
+```
+
+```console
+uv add dr-platform
+```
+
+`dr-platform` requires Python >= 3.12 and a PostgreSQL database. The library
+creates its schema in that database and colocates with the DBOS system schema;
+see [Operational preconditions](#operational-preconditions) for the colocation
+requirement and migration lineage.
+
+`dr-platform` pins its DBOS dependency to an exact version
+(`dbos[otel]==2.27.0`).
+The package couples to DBOS internals, and recovery and sweep behavior is
+validated against exactly this release, so each `dr-platform` release pins the
+DBOS version it was proven against. Consumers get the exact combination that
+was tested.
 
 ## Pipeline and execution model
 
@@ -77,19 +108,19 @@ from dr_platform import (
 
 
 def args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_ref,)
+    return (payload.input_reference,)
 
 
-def prepare(input_ref: str) -> str:
-    return f"prepared:{input_ref}"
+def prepare(input_reference: str) -> str:
+    return f"prepared:{input_reference}"
 
 
-def execute(input_ref: str) -> str:
-    return f"executed:{input_ref}"
+def execute(input_reference: str) -> str:
+    return f"executed:{input_reference}"
 
 
-def score(input_ref: str) -> str:
-    return f"scored:{input_ref}"
+def score(input_reference: str) -> str:
+    return f"scored:{input_reference}"
 
 
 config = build_platform_dbos_config(database_url=None)  # resolves DATABASE_URL
@@ -147,7 +178,7 @@ def work_inputs():
     for index in range(10):
         yield WorkInput(
             work_key=f"work-{index}",
-            input_ref=f"input:{index}",
+            input_reference=f"input:{index}",
             labels={"group": "example"},
         )
 
@@ -157,7 +188,7 @@ try:
         campaign_key="campaign-1",
         run_key="run-1",
         pipeline=pipeline.identity,
-        config_ref="config:1",
+        execution_config_reference="config:1",
         items=work_inputs(),
         registry=registry,
         engine=engine,
@@ -294,10 +325,10 @@ validate colocation and fail fast when the URLs identify different databases.
 The staging tables use the same `upgrade_platform_schema` Alembic chain as the
 rest of the package.
 
-**Migration lineage.** The Alembic history was reset to a single fresh
-baseline (`0001_staging_baseline`); there is deliberately no upgrade bridge
-from earlier schemas. A database created from a pre-cutover rebuild branch,
-or from the old kernel, must be recreated rather than upgraded in place.
+**Migration lineage.** `0001_staging_baseline` is the root of the supported
+Alembic chain. Apply the chain only to a database that has no platform schema.
+If a database already contains platform tables outside this lineage, archive
+it and initialize a replacement instead of attempting an in-place upgrade.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher
 before `DBOS.launch()`. Keep the returned dispatcher registration alive while
@@ -307,6 +338,22 @@ startup failures are not fail-open.
 
 ## Development
 
-Install the locked environment with `uv sync`. The repository checks are
-`uv run ruff check .`, `uv run ty check`, and
-`uv run pytest -q`.
+Clone the repository and install the locked environment:
+
+```console
+git clone https://github.com/danielle-rothermel/dr-platform
+cd dr-platform
+uv sync
+uv run pre-commit install
+```
+
+The test suite needs a PostgreSQL database. Create the default with
+`createdb dr_platform_test`, or set `DR_PLATFORM_TEST_DATABASE_URL` to any
+PostgreSQL database whose name ends in `_test`; the suite refuses other names
+and resets the database destructively between tests. Then run the checks:
+
+```console
+uv run ruff check .
+uv run ty check
+uv run pytest
+```

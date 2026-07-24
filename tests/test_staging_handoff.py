@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from threading import Barrier
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
-from dbos import DBOS, DBOSClient, DBOSConfig, EnqueueOptions, Queue
+from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 from sqlalchemy import Engine, func, select
 
-from dr_platform.db.migrate import upgrade_platform_schema
+import dr_platform.staging.operations as staging_operations
+import dr_platform.staging.sweep as staging_sweep
 from dr_platform.staging import (
     CampaignKey,
     CampaignWorkIdentity,
@@ -25,35 +28,44 @@ from dr_platform.staging import (
     WorkKey,
     stable_random_rank,
 )
-from dr_platform.staging.admission import AdmissionPayload, run_admission_pass
+from dr_platform.staging.admission import run_admission_pass
 from dr_platform.staging.controls import upsert_stage_control
 from dr_platform.staging.handoff import (
+    StageHandoffMismatchError,
     _complete_stage_in_transaction,
     wrap_pipeline_workflows,
 )
-from dr_platform.staging.schema import StagingSchema
+from dr_platform.staging.operations import (
+    CancellationDisposition,
+    WorkCancellationResult,
+    cancel_work,
+)
 from dr_platform.staging.submission import WorkInput, submit
 from dr_platform.staging.sweep import sweep_abandoned_stages
-from tests.conftest import engine_dsn
+from tests.conftest import (
+    _args_for,
+    _as_dbos_client,
+    _migrate,
+    _RecordingCanceller,
+    dbos_config,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from sqlalchemy import Connection
 
+    from dr_platform.staging.schema import StagingSchema
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_ref,)
-
-
 def _pipeline(
     *,
     key: str,
-    stage_logic: tuple[tuple[str, Callable[[str], str]], ...],
+    stage_logic: tuple[tuple[str, Callable[[str], object]], ...],
 ) -> PipelineDefinition:
     return PipelineDefinition(
         key=PipelineKey(key),
@@ -68,11 +80,6 @@ def _pipeline(
             for stage_key, logic in stage_logic
         ),
     )
-
-
-def _migrate(engine: Engine) -> StagingSchema:
-    upgrade_platform_schema(engine_dsn(engine))
-    return StagingSchema()
 
 
 def _configure_controls(
@@ -109,7 +116,7 @@ def _submit_items(  # noqa: PLR0913 -- explicit submission facts
         campaign_key=campaign_key,
         run_key=run_key,
         pipeline=pipeline.identity,
-        config_ref="config:smoke",
+        execution_config_reference="config:smoke",
         items=items,
         registry=registry,
         engine=engine,
@@ -118,16 +125,17 @@ def _submit_items(  # noqa: PLR0913 -- explicit submission facts
 
 
 def _launch_dbos(database_url: str, *, suffix: str) -> None:
-    config: DBOSConfig = {
-        "name": f"drp-handoff-{suffix}",
-        "system_database_url": database_url,
-        "application_database_url": database_url,
-        "application_version": f"handoff-{suffix}",
-        "run_admin_server": False,
-        "use_listen_notify": False,
-        "notification_listener_polling_interval_sec": 0.01,
-    }
-    DBOS(config=config)
+    # Launch and keep DBOS running; each caller tears it down in its own
+    # finally alongside the DBOSClient it opened.
+    DBOS(
+        config=dbos_config(
+            name=f"drp-handoff-{suffix}",
+            system_database_url=database_url,
+            application_database_url=database_url,
+            application_version=f"handoff-{suffix}",
+            notification_listener_polling_interval_sec=0.01,
+        )
+    )
     DBOS.launch()
 
 
@@ -183,6 +191,9 @@ def _stage_state_count(
         ).scalar_one()
 
 
+# This variant records the enqueue args alongside the options; the
+# options-only _RecordingClient in the operations/inspection suites is a
+# distinct shape.
 class _RecordingClient:
     def __init__(self) -> None:
         self.enqueued: list[tuple[EnqueueOptions, tuple[object, ...]]] = []
@@ -198,14 +209,90 @@ class _RecordingClient:
         return object()
 
 
-def _as_dbos_client(client: object) -> DBOSClient:
-    return cast("DBOSClient", client)
-
-
 def _recorded_workflow_id(options: EnqueueOptions) -> str:
     workflow_id = options.get("workflow_id")
     assert workflow_id is not None
     return workflow_id
+
+
+def _submit_and_admit_one(
+    engine: Engine,
+    schema: StagingSchema,
+    pipeline: PipelineDefinition,
+    *,
+    campaign_key: str,
+    run_key: str,
+) -> tuple[str, int, int]:
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    _configure_controls(engine, pipeline, capacity=1)
+    _submit_items(
+        engine,
+        registry,
+        pipeline,
+        campaign_key=campaign_key,
+        run_key=run_key,
+        items=(
+            WorkInput(
+                work_key="work",
+                input_reference="input",
+                labels={},
+            ),
+        ),
+    )
+    client = _RecordingClient()
+    admitted = run_admission_pass(
+        engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=_utc_now,
+    )
+    assert admitted.admitted_total == 1
+    workflow_id = _recorded_workflow_id(client.enqueued[0][0])
+    with engine.connect() as connection:
+        stage_execution_id, work_item_id = connection.execute(
+            select(
+                schema.stage_executions.c.stage_execution_id,
+                schema.stage_executions.c.work_item_id,
+            ).where(
+                schema.stage_executions.c.state
+                == StageExecutionState.ADMITTED.value
+            )
+        ).one()
+    return workflow_id, stage_execution_id, work_item_id
+
+
+def _handoff_snapshot(
+    engine: Engine,
+    schema: StagingSchema,
+) -> tuple[tuple[tuple[object, ...], ...], tuple[tuple[object, ...], ...]]:
+    with engine.connect() as connection:
+        executions = tuple(
+            connection.execute(
+                select(
+                    schema.stage_executions.c.stage_execution_id,
+                    schema.stage_executions.c.stage_key,
+                    schema.stage_executions.c.stage_index,
+                    schema.stage_executions.c.state,
+                    schema.stage_executions.c.current_attempt,
+                    schema.stage_executions.c.output_reference,
+                    schema.stage_executions.c.updated_at,
+                ).order_by(schema.stage_executions.c.stage_execution_id)
+            ).tuples()
+        )
+        attempts = tuple(
+            connection.execute(
+                select(
+                    schema.stage_attempts.c.stage_attempt_id,
+                    schema.stage_attempts.c.attempt_number,
+                    schema.stage_attempts.c.workflow_id,
+                    schema.stage_attempts.c.terminal_at,
+                    schema.stage_attempts.c.terminal_summary,
+                    schema.stage_attempts.c.terminal_reference,
+                ).order_by(schema.stage_attempts.c.stage_attempt_id)
+            ).tuples()
+        )
+    return executions, attempts
 
 
 def test_three_stage_pipeline_streams_end_to_end_through_wrapped_workflows(
@@ -215,14 +302,14 @@ def test_three_stage_pipeline_streams_end_to_end_through_wrapped_workflows(
     schema = _migrate(pg_engine)
     suffix = uuid4().hex[:10]
 
-    def prepare(input_ref: str) -> str:
-        return f"prepared:{input_ref}"
+    def prepare(input_reference: str) -> str:
+        return f"prepared:{input_reference}"
 
-    def execute(input_ref: str) -> str:
-        return f"executed:{input_ref}"
+    def execute(input_reference: str) -> str:
+        return f"executed:{input_reference}"
 
-    def score(input_ref: str) -> str:
-        return f"scored:{input_ref}"
+    def score(input_reference: str) -> str:
+        return f"scored:{input_reference}"
 
     declared = _pipeline(
         key=f"evaluation-{suffix}",
@@ -243,8 +330,8 @@ def test_three_stage_pipeline_streams_end_to_end_through_wrapped_workflows(
         campaign_key=f"campaign-{suffix}",
         run_key=f"run-{suffix}",
         items=(
-            WorkInput(work_key="work-a", input_ref="input:a", labels={}),
-            WorkInput(work_key="work-b", input_ref="input:b", labels={}),
+            WorkInput(work_key="work-a", input_reference="input:a", labels={}),
+            WorkInput(work_key="work-b", input_reference="input:b", labels={}),
         ),
     )
     for stage in pipeline.stages:
@@ -322,8 +409,8 @@ def test_completion_and_next_ready_insert_roll_back_together(
     pipeline = _pipeline(
         key="atomic-handoff",
         stage_logic=(
-            ("prepare", lambda input_ref: f"prepared:{input_ref}"),
-            ("execute", lambda input_ref: f"executed:{input_ref}"),
+            ("prepare", lambda input_reference: f"prepared:{input_reference}"),
+            ("execute", lambda input_reference: f"executed:{input_reference}"),
         ),
     )
     registry = PipelineRegistry()
@@ -335,7 +422,9 @@ def test_completion_and_next_ready_insert_roll_back_together(
         pipeline,
         campaign_key="campaign-atomic",
         run_key="run-atomic",
-        items=(WorkInput(work_key="work", input_ref="input", labels={}),),
+        items=(
+            WorkInput(work_key="work", input_reference="input", labels={}),
+        ),
     )
     admission_client = _RecordingClient()
     run_admission_pass(
@@ -390,6 +479,138 @@ def test_completion_and_next_ready_insert_roll_back_together(
     assert terminal_at is None
 
 
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "workflow_id",
+        "pipeline_version",
+        "stage_key",
+        "stage_index",
+    ],
+)
+def test_completion_identity_mismatch_does_not_mutate_state(
+    pg_engine: Engine,
+    mismatch: str,
+) -> None:
+    schema = _migrate(pg_engine)
+    pipeline = _pipeline(
+        key="identity-mismatch",
+        stage_logic=(
+            ("prepare", lambda input_reference: f"prepared:{input_reference}"),
+            ("execute", lambda input_reference: f"executed:{input_reference}"),
+        ),
+    )
+    workflow_id, _stage_execution_id, _work_item_id = _submit_and_admit_one(
+        pg_engine,
+        schema,
+        pipeline,
+        campaign_key="campaign-identity-mismatch",
+        run_key="run-identity-mismatch",
+    )
+    before = _handoff_snapshot(pg_engine, schema)
+    expected_error = (
+        LookupError if mismatch == "workflow_id" else StageHandoffMismatchError
+    )
+
+    with (
+        pytest.raises(expected_error),
+        pg_engine.begin() as connection,
+    ):
+        _complete_stage_in_transaction(
+            connection,
+            workflow_id=(
+                "missing-workflow"
+                if mismatch == "workflow_id"
+                else workflow_id
+            ),
+            pipeline_key=pipeline.key.value,
+            pipeline_version=(
+                pipeline.version + 1
+                if mismatch == "pipeline_version"
+                else pipeline.version
+            ),
+            stage_key=(
+                "wrong-stage" if mismatch == "stage_key" else "prepare"
+            ),
+            stage_index=1 if mismatch == "stage_index" else 0,
+            succeeded=True,
+            output_reference="output:prepare",
+            terminal_summary={"outcome": "succeeded"},
+            terminal_reference="output:prepare",
+            next_stage_key="execute",
+            next_stage_index=1,
+            completed_at=_utc_now(),
+        )
+
+    assert _handoff_snapshot(pg_engine, schema) == before
+
+
+# An oddly shaped opaque output reference: a scheme, path, query separators,
+# and a 64-char hex tail.  dr-platform transports it byte-for-byte in
+# ``output_reference``/``terminal_reference`` without ever parsing the scheme,
+# the query separators, or the trailing digest.
+_TERMINAL_OBJECT_REFERENCE = (
+    "objref://terminal-result/v3"
+    "?schema=terminal_result"
+    "&schema_version=7"
+    "&content_hash="
+    "2c624232cdd221771294dfbb310aca000a0df6ac8b66b696d90ef06fdefb64a3"
+)
+
+
+def test_output_reference_is_transported_opaquely_without_parsing(
+    pg_engine: Engine,
+) -> None:
+    """A terminal output reference round-trips byte-for-byte, unparsed.
+
+    A succeeding stage's ``output_reference`` and its attempt
+    ``terminal_reference`` preserve the exact encoded string; dr-platform never
+    parses, resolves, or reconstructs whatever the reference points at.
+    """
+    schema = _migrate(pg_engine)
+    pipeline = _pipeline(
+        key="opaque-output",
+        stage_logic=(
+            ("execute", lambda input_reference: f"output:{input_reference}"),
+        ),
+    )
+    workflow_id, _stage_execution_id, _work_item_id = _submit_and_admit_one(
+        pg_engine,
+        schema,
+        pipeline,
+        campaign_key="campaign-opaque-output",
+        run_key="run-opaque-output",
+    )
+
+    with pg_engine.begin() as connection:
+        _complete_stage_in_transaction(
+            connection,
+            workflow_id=workflow_id,
+            pipeline_key=pipeline.key.value,
+            pipeline_version=pipeline.version,
+            stage_key="execute",
+            stage_index=0,
+            succeeded=True,
+            output_reference=_TERMINAL_OBJECT_REFERENCE,
+            terminal_summary={"outcome": "succeeded"},
+            terminal_reference=_TERMINAL_OBJECT_REFERENCE,
+            next_stage_key=None,
+            next_stage_index=None,
+            completed_at=_utc_now(),
+        )
+
+    with pg_engine.connect() as connection:
+        stored_output = connection.execute(
+            select(schema.stage_executions.c.output_reference)
+        ).scalar_one()
+        stored_terminal = connection.execute(
+            select(schema.stage_attempts.c.terminal_reference)
+        ).scalar_one()
+
+    assert stored_output == _TERMINAL_OBJECT_REFERENCE
+    assert stored_terminal == _TERMINAL_OBJECT_REFERENCE
+
+
 def test_application_failure_is_recorded_in_band_and_releases_capacity(
     clean_pg: str,
     pg_engine: Engine,
@@ -407,10 +628,10 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
         ),
     )
 
-    def sometimes_fails(input_ref: str) -> str:
-        if input_ref == "input:fail":
+    def sometimes_fails(input_reference: str) -> str:
+        if input_reference == "input:fail":
             raise RuntimeError("application stage failed")
-        return f"output:{input_ref}"
+        return f"output:{input_reference}"
 
     declared = _pipeline(
         key=f"failure-{suffix}",
@@ -429,7 +650,7 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
         items=tuple(
             WorkInput(
                 work_key=work_key,
-                input_ref=(
+                input_reference=(
                     "input:fail" if work_key == first_work_key else "input:ok"
                 ),
                 labels={},
@@ -505,6 +726,115 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
         DBOS.destroy(destroy_registry=True)
 
 
+@pytest.mark.parametrize(
+    "invalid_output",
+    [
+        pytest.param("", id="empty-string"),
+        pytest.param(7, id="non-string"),
+    ],
+)
+def test_invalid_application_output_lands_failed_without_a_successor(
+    clean_pg: str,
+    pg_engine: Engine,
+    invalid_output: object,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+
+    def returns_invalid_output(_input_reference: str) -> object:
+        return invalid_output
+
+    declared = _pipeline(
+        key=f"invalid-output-{suffix}",
+        stage_logic=(
+            ("execute", returns_invalid_output),
+            ("score", lambda input_reference: f"score:{input_reference}"),
+        ),
+    )
+    pipeline = wrap_pipeline_workflows(declared, clock=_utc_now)
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    _configure_controls(pg_engine, pipeline, capacity=1)
+    _submit_items(
+        pg_engine,
+        registry,
+        pipeline,
+        campaign_key=f"campaign-invalid-output-{suffix}",
+        run_key=f"run-invalid-output-{suffix}",
+        items=(
+            WorkInput(work_key="work", input_reference="input", labels={}),
+        ),
+    )
+    Queue(pipeline.stages[0].queue_name, polling_interval_sec=0.02)
+
+    client: DBOSClient | None = None
+    try:
+        _launch_dbos(clean_pg, suffix=suffix)
+        client = DBOSClient(system_database_url=clean_pg)
+        admitted = run_admission_pass(
+            pg_engine,
+            client=client,
+            registry=registry,
+            clock=_utc_now,
+        )
+        assert admitted.admitted_total == 1
+        _wait_for(
+            lambda: (
+                _stage_state_count(
+                    pg_engine,
+                    schema,
+                    stage_index=0,
+                    state=StageExecutionState.FAILED,
+                )
+                == 1
+            )
+        )
+
+        with pg_engine.connect() as connection:
+            execution_rows = (
+                connection.execute(
+                    select(
+                        schema.stage_executions.c.stage_index,
+                        schema.stage_executions.c.stage_key,
+                        schema.stage_executions.c.state,
+                        schema.stage_executions.c.output_reference,
+                    ).order_by(schema.stage_executions.c.stage_index)
+                )
+                .tuples()
+                .all()
+            )
+            attempt = connection.execute(
+                select(
+                    schema.stage_attempts.c.workflow_id,
+                    schema.stage_attempts.c.terminal_at,
+                    schema.stage_attempts.c.terminal_summary,
+                    schema.stage_attempts.c.terminal_reference,
+                )
+            ).one()
+        _wait_for_workflow_statuses(
+            client,
+            [attempt.workflow_id],
+            expected_status="SUCCESS",
+        )
+    finally:
+        if client is not None:
+            client.destroy()
+        DBOS.destroy(destroy_registry=True)
+
+    assert execution_rows == [(0, "execute", "failed", None)]
+    assert attempt.terminal_at is not None
+    assert attempt.terminal_summary == {
+        "outcome": "failed",
+        "error_type": "builtins.ValueError",
+        "message": (
+            "stage application logic must return a non-empty "
+            "output-reference string"
+        ),
+    }
+    assert attempt.terminal_reference is None
+    assert attempt.terminal_summary["error_type"] == "builtins.ValueError"
+
+
 class _UnprintableError(RuntimeError):
     def __str__(self) -> str:
         raise ValueError("this error message cannot be rendered")
@@ -517,7 +847,7 @@ def test_application_failure_with_unprintable_error_lands_failed(
     schema = _migrate(pg_engine)
     suffix = uuid4().hex[:10]
 
-    def raises_unprintable(_input_ref: str) -> str:
+    def raises_unprintable(_input_reference: str) -> str:
         raise _UnprintableError
 
     declared = _pipeline(
@@ -534,7 +864,9 @@ def test_application_failure_with_unprintable_error_lands_failed(
         pipeline,
         campaign_key=f"campaign-unprintable-{suffix}",
         run_key=f"run-unprintable-{suffix}",
-        items=(WorkInput(work_key="work", input_ref="input", labels={}),),
+        items=(
+            WorkInput(work_key="work", input_reference="input", labels={}),
+        ),
     )
     Queue(pipeline.stages[0].queue_name, polling_interval_sec=0.02)
 
@@ -603,6 +935,16 @@ class _StatusClient:
         return list(self._statuses)
 
 
+class _BarrierStatusClient:
+    def __init__(self, status: _Status, barrier: Barrier) -> None:
+        self._status = status
+        self._barrier = barrier
+
+    def list_workflows(self, **_kwargs: object) -> list[_Status]:
+        self._barrier.wait(timeout=10)
+        return [self._status]
+
+
 class _PagingStatusClient:
     """Return only the statuses whose ids are in the requested page.
 
@@ -626,13 +968,305 @@ class _PagingStatusClient:
         ]
 
 
+def _commit_successful_handoff(
+    engine: Engine,
+    *,
+    workflow_id: str,
+    pipeline: PipelineDefinition,
+    completed_at: datetime,
+    before_next_stage: Callable[[], None] | None = None,
+) -> None:
+    with engine.begin() as connection:
+        _complete_stage_in_transaction(
+            connection,
+            workflow_id=workflow_id,
+            pipeline_key=pipeline.key.value,
+            pipeline_version=pipeline.version,
+            stage_key=pipeline.stages[0].key.value,
+            stage_index=0,
+            succeeded=True,
+            output_reference="output:prepare",
+            terminal_summary={"outcome": "succeeded"},
+            terminal_reference="output:prepare",
+            next_stage_key=pipeline.stages[1].key.value,
+            next_stage_index=1,
+            completed_at=completed_at,
+            before_next_stage=before_next_stage,
+        )
+
+
+def _release_after_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    barrier: Barrier,
+) -> None:
+    """Let the sweep project a terminal status, then release the barrier.
+
+    The competing handoff/cancellation waits on the same barrier, so this pins
+    the sweep as the first writer before the other path re-locks the attempt.
+    """
+    project = cast(
+        "Callable[..., bool]",
+        staging_sweep._project_terminal_status,
+    )
+
+    def project_then_release(*args: object, **kwargs: object) -> bool:
+        applied = project(*args, **kwargs)
+        assert applied
+        barrier.wait(timeout=10)
+        return applied
+
+    monkeypatch.setattr(
+        staging_sweep,
+        "_project_terminal_status",
+        project_then_release,
+    )
+
+
+@pytest.mark.parametrize("winner", ["handoff", "sweep"])
+def test_sweep_race_with_successful_handoff_has_one_terminal_outcome(
+    pg_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    winner: str,
+) -> None:
+    schema = _migrate(pg_engine)
+    pipeline = _pipeline(
+        key="sweep-handoff-race",
+        stage_logic=(
+            ("prepare", lambda input_reference: f"prepared:{input_reference}"),
+            ("execute", lambda input_reference: f"executed:{input_reference}"),
+        ),
+    )
+    workflow_id, _stage_execution_id, _work_item_id = _submit_and_admit_one(
+        pg_engine,
+        schema,
+        pipeline,
+        campaign_key="campaign-sweep-handoff-race",
+        run_key="run-sweep-handoff-race",
+    )
+    barrier = Barrier(2)
+    race_time = _utc_now() + timedelta(seconds=1)
+    abandoned = _Status(
+        workflow_id,
+        "ERROR",
+        RuntimeError("reported abandoned"),
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        if winner == "handoff":
+
+            def release_sweep_after_handoff() -> None:
+                barrier.wait(timeout=10)
+
+            handoff = executor.submit(
+                _commit_successful_handoff,
+                pg_engine,
+                workflow_id=workflow_id,
+                pipeline=pipeline,
+                completed_at=race_time,
+                before_next_stage=release_sweep_after_handoff,
+            )
+            summary = sweep_abandoned_stages(
+                pg_engine,
+                client=_as_dbos_client(
+                    _BarrierStatusClient(abandoned, barrier)
+                ),
+                clock=lambda: race_time + timedelta(seconds=1),
+            )
+            handoff.result()
+        else:
+            _release_after_projection(monkeypatch, barrier)
+
+            def handoff_after_projection() -> None:
+                barrier.wait(timeout=10)
+                _commit_successful_handoff(
+                    pg_engine,
+                    workflow_id=workflow_id,
+                    pipeline=pipeline,
+                    completed_at=race_time + timedelta(seconds=1),
+                )
+
+            handoff = executor.submit(handoff_after_projection)
+            summary = sweep_abandoned_stages(
+                pg_engine,
+                client=_as_dbos_client(_StatusClient((abandoned,))),
+                clock=lambda: race_time,
+            )
+            with pytest.raises(StageHandoffMismatchError):
+                handoff.result()
+
+    with pg_engine.connect() as connection:
+        execution_rows = (
+            connection.execute(
+                select(
+                    schema.stage_executions.c.stage_index,
+                    schema.stage_executions.c.state,
+                    schema.stage_executions.c.output_reference,
+                ).order_by(schema.stage_executions.c.stage_index)
+            )
+            .tuples()
+            .all()
+        )
+        attempts = connection.execute(
+            select(
+                schema.stage_attempts.c.terminal_at,
+                schema.stage_attempts.c.terminal_summary,
+            )
+        ).all()
+
+    assert len(attempts) == 1
+    assert attempts[0].terminal_at is not None
+    if winner == "handoff":
+        assert summary.projected_count == 0
+        assert execution_rows == [
+            (0, "succeeded", "output:prepare"),
+            (1, "ready", None),
+        ]
+        assert attempts[0].terminal_summary == {"outcome": "succeeded"}
+    else:
+        assert summary.projected_count == 1
+        assert execution_rows == [(0, "failed", None)]
+        assert attempts[0].terminal_summary == {
+            "outcome": "failed",
+            "dbos_status": "ERROR",
+            "message": "reported abandoned",
+        }
+
+
+@pytest.mark.parametrize("winner", ["cancellation", "sweep"])
+def test_sweep_race_with_operator_cancellation_has_one_terminal_outcome(
+    pg_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    winner: str,
+) -> None:
+    schema = _migrate(pg_engine)
+    pipeline = _pipeline(
+        key="sweep-cancellation-race",
+        stage_logic=(
+            ("prepare", lambda input_reference: f"prepared:{input_reference}"),
+            ("execute", lambda input_reference: f"executed:{input_reference}"),
+        ),
+    )
+    workflow_id, _stage_execution_id, work_item_id = _submit_and_admit_one(
+        pg_engine,
+        schema,
+        pipeline,
+        campaign_key="campaign-sweep-cancellation-race",
+        run_key="run-sweep-cancellation-race",
+    )
+    barrier = Barrier(2)
+    race_time = _utc_now() + timedelta(seconds=1)
+    abandoned = _Status(
+        workflow_id,
+        "ERROR",
+        RuntimeError("reported abandoned"),
+    )
+    canceller = _RecordingCanceller()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        if winner == "cancellation":
+            cancel_current = cast(
+                "Callable[..., WorkCancellationResult]",
+                staging_operations._cancel_current_stage,
+            )
+
+            def cancel_then_release(
+                *args: object,
+                **kwargs: object,
+            ) -> WorkCancellationResult:
+                result = cancel_current(*args, **kwargs)
+                barrier.wait(timeout=10)
+                return result
+
+            monkeypatch.setattr(
+                staging_operations,
+                "_cancel_current_stage",
+                cancel_then_release,
+            )
+            cancellation = executor.submit(
+                cancel_work,
+                engine=pg_engine,
+                client=canceller,
+                work_item_id=work_item_id,
+                clock=lambda: race_time,
+            )
+            summary = sweep_abandoned_stages(
+                pg_engine,
+                client=_as_dbos_client(
+                    _BarrierStatusClient(abandoned, barrier)
+                ),
+                clock=lambda: race_time + timedelta(seconds=1),
+            )
+            result = cancellation.result()
+        else:
+            _release_after_projection(monkeypatch, barrier)
+
+            def cancel_after_projection() -> WorkCancellationResult:
+                barrier.wait(timeout=10)
+                return cancel_work(
+                    engine=pg_engine,
+                    client=canceller,
+                    work_item_id=work_item_id,
+                    clock=lambda: race_time + timedelta(seconds=1),
+                )
+
+            cancellation = executor.submit(cancel_after_projection)
+            summary = sweep_abandoned_stages(
+                pg_engine,
+                client=_as_dbos_client(_StatusClient((abandoned,))),
+                clock=lambda: race_time,
+            )
+            result = cancellation.result()
+
+    with pg_engine.connect() as connection:
+        execution_rows = (
+            connection.execute(
+                select(
+                    schema.stage_executions.c.stage_index,
+                    schema.stage_executions.c.state,
+                    schema.stage_executions.c.output_reference,
+                ).order_by(schema.stage_executions.c.stage_index)
+            )
+            .tuples()
+            .all()
+        )
+        attempts = connection.execute(
+            select(
+                schema.stage_attempts.c.terminal_at,
+                schema.stage_attempts.c.terminal_summary,
+            )
+        ).all()
+
+    assert execution_rows == [(0, "cancelled", None)]
+    assert len(attempts) == 1
+    assert attempts[0].terminal_at is not None
+    if winner == "cancellation":
+        assert summary.projected_count == 0
+        assert result.disposition is CancellationDisposition.CANCELLED_ADMITTED
+        assert attempts[0].terminal_summary == {
+            "outcome": "cancelled",
+            "reason": "operator_requested",
+        }
+        assert canceller.cancelled == [(workflow_id, False)]
+    else:
+        assert summary.projected_count == 1
+        assert result.disposition is CancellationDisposition.CANCELLED_FAILED
+        assert attempts[0].terminal_summary == {
+            "outcome": "failed",
+            "dbos_status": "ERROR",
+            "message": "reported abandoned",
+        }
+        assert canceller.cancelled == []
+
+
 def test_sweep_projects_only_cancelled_or_abandoned_admitted_attempts(
     pg_engine: Engine,
 ) -> None:
     schema = _migrate(pg_engine)
     pipeline = _pipeline(
         key="sweep-pipeline",
-        stage_logic=(("execute", lambda input_ref: f"output:{input_ref}"),),
+        stage_logic=(
+            ("execute", lambda input_reference: f"output:{input_reference}"),
+        ),
     )
     registry = PipelineRegistry()
     registry.register(pipeline)
@@ -646,7 +1280,7 @@ def test_sweep_projects_only_cancelled_or_abandoned_admitted_attempts(
         items=tuple(
             WorkInput(
                 work_key=f"work-{index}",
-                input_ref=f"input:{index}",
+                input_reference=f"input:{index}",
                 labels={},
             )
             for index in range(4)
@@ -727,7 +1361,9 @@ def test_sweep_projects_an_abandoned_attempt_with_an_unprintable_error(
     schema = _migrate(pg_engine)
     pipeline = _pipeline(
         key="sweep-unprintable",
-        stage_logic=(("execute", lambda input_ref: f"output:{input_ref}"),),
+        stage_logic=(
+            ("execute", lambda input_reference: f"output:{input_reference}"),
+        ),
     )
     registry = PipelineRegistry()
     registry.register(pipeline)
@@ -738,7 +1374,9 @@ def test_sweep_projects_an_abandoned_attempt_with_an_unprintable_error(
         pipeline,
         campaign_key="campaign-sweep-unprintable",
         run_key="run-sweep-unprintable",
-        items=(WorkInput(work_key="work", input_ref="input", labels={}),),
+        items=(
+            WorkInput(work_key="work", input_reference="input", labels={}),
+        ),
     )
     admission_client = _RecordingClient()
     admitted = run_admission_pass(
@@ -782,7 +1420,9 @@ def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
     schema = _migrate(pg_engine)
     pipeline = _pipeline(
         key="sweep-page-pipeline",
-        stage_logic=(("execute", lambda input_ref: f"output:{input_ref}"),),
+        stage_logic=(
+            ("execute", lambda input_reference: f"output:{input_reference}"),
+        ),
     )
     registry = PipelineRegistry()
     registry.register(pipeline)
@@ -797,7 +1437,7 @@ def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
         items=tuple(
             WorkInput(
                 work_key=f"work-{index}",
-                input_ref=f"input:{index}",
+                input_reference=f"input:{index}",
                 labels={},
             )
             for index in range(admitted_total)

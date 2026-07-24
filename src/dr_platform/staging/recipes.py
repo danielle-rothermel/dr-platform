@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import UNIQUE, StrEnum, verify
 
-from dr_serialize import sha256_json_digest
+from dr_serialize import json_hash
 
 from dr_platform.staging.definitions import validate_positive_integer
 from dr_platform.staging.identities import (
@@ -53,7 +53,7 @@ def stage_workflow_id(
     if not isinstance(stage_key, StageKey):
         raise TypeError("stage_key must be a StageKey")
     validate_positive_integer(attempt_number, label="attempt number")
-    digest = sha256_json_digest(
+    digest = json_hash(
         {
             IdentityDigestField.CAMPAIGN_KEY: work_identity.campaign_key.value,
             IdentityDigestField.WORK_KEY: work_identity.work_key.value,
@@ -68,7 +68,7 @@ def stage_workflow_id(
 
 def stable_random_rank(*, work_identity: CampaignWorkIdentity) -> int:
     """Derive a stable positive signed-63-bit rank for campaign work."""
-    digest = sha256_json_digest(
+    digest = json_hash(
         {
             IdentityDigestField.CAMPAIGN_KEY: work_identity.campaign_key.value,
             IdentityDigestField.WORK_KEY: work_identity.work_key.value,

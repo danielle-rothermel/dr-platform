@@ -6,10 +6,7 @@ from dr_platform.dbos_config import (
     build_platform_dbos_config,
     initialize_dbos_runtime,
 )
-from dr_platform.staging.admission import (
-    AdmissionPayload,
-    PipelineStageMismatchError,
-)
+from dr_platform.staging.admission import AdmissionPayload
 from dr_platform.staging.definitions import (
     PipelineDefinition,
     PipelineIdentity,
@@ -61,12 +58,17 @@ from dr_platform.staging.operations import (
     set_selector_capacity,
     set_stage_capacity,
 )
-from dr_platform.staging.records import StageAttemptRecord
+from dr_platform.staging.records import (
+    StageAttemptRecord,
+    StageControlRecord,
+    StageExecutionRecord,
+)
 from dr_platform.staging.registry import (
     PipelineConflictError,
     PipelineRegistry,
 )
 from dr_platform.staging.runs import PipelineRunConflictError
+from dr_platform.staging.schema import StagingSchema
 from dr_platform.staging.states import StageExecutionState
 from dr_platform.staging.submission import (
     SubmissionReceipt,
@@ -98,17 +100,19 @@ __all__ = [
     "PipelineKey",
     "PipelineRegistry",
     "PipelineRunConflictError",
-    "PipelineStageMismatchError",
     "PlatformDbosConfig",
     "RunKey",
     "RunSummary",
     "StageAttemptRecord",
+    "StageControlRecord",
     "StageDefinition",
+    "StageExecutionRecord",
     "StageExecutionState",
     "StageExecutionSummary",
     "StageHandoffMismatchError",
     "StageKey",
     "StageRetryResult",
+    "StagingSchema",
     "StateCount",
     "SubmissionReceipt",
     "SweepProjection",

@@ -15,12 +15,11 @@ from dr_platform.staging.controls import (
 )
 from dr_platform.staging.definitions import (
     PipelineIdentity,
-    validate_positive_integer,
+    validate_pipeline_identity,
 )
 from dr_platform.staging.identities import (
     CampaignKey,
     CampaignWorkIdentity,
-    PipelineKey,
     StageKey,
     WorkKey,
 )
@@ -46,8 +45,6 @@ if TYPE_CHECKING:
         StageControlRecord,
         StageExecutionRecord,
     )
-
-PIPELINE_IDENTITY_PARTS = 2
 
 
 def _utc_now() -> datetime:
@@ -318,13 +315,13 @@ def _set_capacity(  # noqa: PLR0913 -- explicit operator dependencies
     clock: Callable[[], datetime],
     schema: StagingSchema | None,
 ) -> StageControlRecord:
-    pipeline_key, pipeline_version = _validate_pipeline(pipeline)
+    identity = validate_pipeline_identity(pipeline)
     selected_schema = schema or StagingSchema()
     with engine.begin() as connection:
         return set_stage_control_capacity(
             connection,
-            pipeline_key=pipeline_key.value,
-            pipeline_version=pipeline_version,
+            pipeline_key=identity.key.value,
+            pipeline_version=identity.version,
             stage_key=stage_key,
             selector=labels,
             capacity=capacity,
@@ -343,31 +340,19 @@ def _set_paused(  # noqa: PLR0913 -- explicit operator dependencies
     clock: Callable[[], datetime],
     schema: StagingSchema | None,
 ) -> StageControlRecord:
-    pipeline_key, pipeline_version = _validate_pipeline(pipeline)
+    identity = validate_pipeline_identity(pipeline)
     selected_schema = schema or StagingSchema()
     with engine.begin() as connection:
         return set_stage_control_paused(
             connection,
-            pipeline_key=pipeline_key.value,
-            pipeline_version=pipeline_version,
+            pipeline_key=identity.key.value,
+            pipeline_version=identity.version,
             stage_key=stage_key,
             selector=labels,
             paused=paused,
             updated_at=clock(),
             schema=selected_schema,
         )
-
-
-def _validate_pipeline(pipeline: PipelineIdentity) -> PipelineIdentity:
-    if (
-        not isinstance(pipeline, tuple)
-        or len(pipeline) != PIPELINE_IDENTITY_PARTS
-        or not isinstance(pipeline[0], PipelineKey)
-        or not isinstance(pipeline[1], int)
-    ):
-        raise TypeError("pipeline must be a (key, version) tuple")
-    validate_positive_integer(pipeline[1], label="pipeline version")
-    return pipeline
 
 
 def _resolve_work_item_id(
@@ -406,9 +391,7 @@ def _resolve_work_item_id(
             table.c.work_key == identity.work_key.value,
         )
     else:
-        raise ValueError(
-            "campaign_key and work_key must be supplied together"
-        )
+        raise ValueError("campaign_key and work_key must be supplied together")
     resolved = connection.execute(statement).scalar_one_or_none()
     if resolved is None:
         raise LookupError("work item does not exist")
@@ -484,9 +467,7 @@ def _cancel_current_stage(
             schema=schema,
         )
         if attempt is None or attempt.terminal_at is not None:
-            raise RuntimeError(
-                "ADMITTED stage has no active current attempt"
-            )
+            raise RuntimeError("ADMITTED stage has no active current attempt")
         workflow_id = attempt.workflow_id
         disposition = CancellationDisposition.CANCELLED_ADMITTED
 

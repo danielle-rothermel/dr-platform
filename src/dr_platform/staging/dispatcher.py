@@ -113,9 +113,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913 -- explicit wiring facts
     """
     validate_positive_integer(batch_size, label="admission batch size")
     if sweep_cron is not None:
-        validate_positive_integer(
-            sweep_batch_size, label="sweep batch size"
-        )
+        validate_positive_integer(sweep_batch_size, label="sweep batch size")
     validate_database_colocation(
         database_url=engine.url.render_as_string(hide_password=False),
         system_database_url=config.system_database_url,

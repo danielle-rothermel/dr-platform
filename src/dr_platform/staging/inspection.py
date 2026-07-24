@@ -11,11 +11,11 @@ from sqlalchemy import and_, func, or_, select
 from dr_platform.staging.controls import list_stage_controls
 from dr_platform.staging.definitions import (
     PipelineIdentity,
+    validate_pipeline_identity,
     validate_positive_integer,
 )
 from dr_platform.staging.identities import (
     CampaignKey,
-    PipelineKey,
     RunKey,
     StageKey,
     WorkKey,
@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 DEFAULT_INSPECTION_LIMIT = 100
 MAX_INSPECTION_LIMIT = 1_000
 DEFAULT_BULK_STATUS_CHUNK_SIZE = 500
-PIPELINE_IDENTITY_PARTS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,12 +117,16 @@ def inspect_campaign(
     normalized_campaign = _campaign_key(campaign_key)
     statement = _campaign_summary_statement(selected_schema)
     with engine.connect() as connection:
-        row = connection.execute(
-            statement.where(
-                statement.selected_columns.campaign_key
-                == normalized_campaign.value
+        row = (
+            connection.execute(
+                statement.where(
+                    statement.selected_columns.campaign_key
+                    == normalized_campaign.value
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
     if row is None:
         raise LookupError(f"campaign is unknown: {normalized_campaign.value}")
     return _decode_campaign_summary(row)
@@ -136,16 +139,20 @@ def list_campaigns(
     limit: int = DEFAULT_INSPECTION_LIMIT,
     schema: StagingSchema | None = None,
 ) -> tuple[CampaignSummary, ...]:
-    """Return a keyset page ordered by stable campaign identity."""
+    """Return a keyset page ordered by stable campaign identity.
+
+    Raises ``ValueError`` for a malformed limit or a cursor unknown among
+    campaigns.
+    """
     _validate_limit(limit)
     selected_schema = schema or StagingSchema()
     normalized_cursor = _campaign_key(cursor) if cursor is not None else None
     statement = _campaign_summary_statement(selected_schema).limit(limit)
     with engine.connect() as connection:
         if normalized_cursor is not None:
-            _require_campaign(
+            _validate_campaign_cursor(
                 connection,
-                campaign_key=normalized_cursor,
+                cursor=normalized_cursor,
                 schema=selected_schema,
             )
             statement = statement.where(
@@ -301,7 +308,7 @@ def get_work_item_stages(
     engine: Engine,
     schema: StagingSchema | None = None,
 ) -> tuple[StageExecutionSummary, ...]:
-    """Return every logical stage and its append-only attempts."""
+    """Return every logical stage and its ordered attempts."""
     _validate_work_item_id(work_item_id)
     selected_schema = schema or StagingSchema()
     table = selected_schema.stage_executions
@@ -336,13 +343,13 @@ def read_controls(
     schema: StagingSchema | None = None,
 ) -> tuple[StageControlRecord, ...]:
     """Read all controls, or only controls matching supplied work labels."""
-    pipeline_key, pipeline_version = _validate_pipeline(pipeline)
+    identity = validate_pipeline_identity(pipeline)
     selected_schema = schema or StagingSchema()
     with engine.connect() as connection:
         return list_stage_controls(
             connection,
-            pipeline_key=pipeline_key.value,
-            pipeline_version=pipeline_version,
+            pipeline_key=identity.key.value,
+            pipeline_version=identity.version,
             stage_key=stage_key,
             labels=labels,
             schema=selected_schema,
@@ -479,14 +486,10 @@ def _state_counts(
         .order_by(executions.c.state)
     )
     if campaign_key is not None:
-        statement = statement.where(
-            items.c.campaign_key == campaign_key.value
-        )
+        statement = statement.where(items.c.campaign_key == campaign_key.value)
     else:
         assert run_key is not None
-        statement = statement.where(
-            items.c.origin_run_key == run_key.value
-        )
+        statement = statement.where(items.c.origin_run_key == run_key.value)
     with engine.connect() as connection:
         if campaign_key is not None:
             _require_campaign(
@@ -697,6 +700,21 @@ def _require_run(
         raise LookupError(f"run is unknown: {run_key.value}")
 
 
+def _validate_campaign_cursor(
+    connection: Connection,
+    *,
+    cursor: CampaignKey,
+    schema: StagingSchema,
+) -> None:
+    exists = connection.execute(
+        select(schema.pipeline_runs.c.campaign_key).where(
+            schema.pipeline_runs.c.campaign_key == cursor.value
+        )
+    ).first()
+    if exists is None:
+        raise ValueError("campaign cursor is unknown among campaigns")
+
+
 def _validate_work_item_cursor(
     connection: Connection,
     *,
@@ -730,18 +748,6 @@ def _validate_work_item_id(work_item_id: int) -> None:
         or work_item_id <= 0
     ):
         raise ValueError("work item id must be a positive integer")
-
-
-def _validate_pipeline(pipeline: PipelineIdentity) -> PipelineIdentity:
-    if (
-        not isinstance(pipeline, tuple)
-        or len(pipeline) != PIPELINE_IDENTITY_PARTS
-        or not isinstance(pipeline[0], PipelineKey)
-        or not isinstance(pipeline[1], int)
-    ):
-        raise TypeError("pipeline must be a (key, version) tuple")
-    validate_positive_integer(pipeline[1], label="pipeline version")
-    return pipeline
 
 
 def _campaign_key(value: CampaignKey | str) -> CampaignKey:

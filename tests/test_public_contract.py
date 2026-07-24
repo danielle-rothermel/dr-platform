@@ -6,7 +6,7 @@ import time
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from dbos import DBOS, DBOSConfig, Queue
+from dbos import DBOS, Queue
 from sqlalchemy import Engine
 
 from dr_platform import (
@@ -27,6 +27,7 @@ from dr_platform import (
     upgrade_platform_schema,
     wrap_pipeline_workflows,
 )
+from tests.conftest import dbos_config
 
 
 def _utc_now() -> datetime:
@@ -74,16 +75,16 @@ def test_root_contract_defines_submits_executes_and_inspects(
     work_keys = ("work-a", "work-b")
 
     def args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-        return (payload.input_ref,)
+        return (payload.input_reference,)
 
-    def prepare(input_ref: str) -> str:
-        return f"prepared:{input_ref}"
+    def prepare(input_reference: str) -> str:
+        return f"prepared:{input_reference}"
 
-    def execute(input_ref: str) -> str:
-        return f"executed:{input_ref}"
+    def execute(input_reference: str) -> str:
+        return f"executed:{input_reference}"
 
-    def score(input_ref: str) -> str:
-        return f"scored:{input_ref}"
+    def score(input_reference: str) -> str:
+        return f"scored:{input_reference}"
 
     declared = PipelineDefinition(
         key=PipelineKey(f"public-contract-{suffix}"),
@@ -128,7 +129,7 @@ def test_root_contract_defines_submits_executes_and_inspects(
             yielded.append(work_key)
             yield WorkInput(
                 work_key=work_key,
-                input_ref=f"input:{work_key}",
+                input_reference=f"input:{work_key}",
                 labels={"kind": "neutral"},
             )
 
@@ -136,7 +137,7 @@ def test_root_contract_defines_submits_executes_and_inspects(
         campaign_key=campaign_key,
         run_key=f"run-{suffix}",
         pipeline=pipeline.identity,
-        config_ref="config:public-contract",
+        execution_config_reference="config:public-contract",
         items=items(),
         registry=registry,
         engine=pg_engine,
@@ -145,15 +146,13 @@ def test_root_contract_defines_submits_executes_and_inspects(
     assert yielded == list(work_keys)
     assert receipt.inserted_count == 2
 
-    runtime_config: DBOSConfig = {
-        "name": f"drp-public-{suffix}",
-        "system_database_url": clean_pg,
-        "application_database_url": clean_pg,
-        "application_version": f"public-{suffix}",
-        "run_admin_server": False,
-        "use_listen_notify": False,
-        "notification_listener_polling_interval_sec": 0.01,
-    }
+    runtime_config = dbos_config(
+        name=f"drp-public-{suffix}",
+        system_database_url=clean_pg,
+        application_database_url=clean_pg,
+        application_version=f"public-{suffix}",
+        notification_listener_polling_interval_sec=0.01,
+    )
     platform_config = PlatformDbosConfig(
         database_url=clean_pg,
         system_database_url=clean_pg,

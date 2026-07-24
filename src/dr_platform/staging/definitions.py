@@ -13,7 +13,6 @@ from dr_platform.staging.identities import (
 
 WorkflowCallable = Callable[..., object]
 ArgumentsCallable = Callable[..., tuple[object, ...]]
-PipelineIdentity = tuple[PipelineKey, int]
 
 
 def validate_positive_integer(value: int, *, label: str) -> None:
@@ -21,6 +20,25 @@ def validate_positive_integer(value: int, *, label: str) -> None:
         raise TypeError(f"{label} must be an integer")
     if value <= 0:
         raise ValueError(f"{label} must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineIdentity:
+    """The key and version pair identifying one immutable pipeline."""
+
+    key: PipelineKey
+    version: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.key, PipelineKey):
+            raise TypeError("pipeline key must be a PipelineKey")
+        validate_positive_integer(self.version, label="pipeline version")
+
+
+def validate_pipeline_identity(value: object) -> PipelineIdentity:
+    if not isinstance(value, PipelineIdentity):
+        raise TypeError("pipeline must be a PipelineIdentity")
+    return value
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -69,4 +87,4 @@ class PipelineDefinition:
 
     @property
     def identity(self) -> PipelineIdentity:
-        return self.key, self.version
+        return PipelineIdentity(self.key, self.version)

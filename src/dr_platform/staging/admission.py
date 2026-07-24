@@ -83,7 +83,7 @@ class AdmissionPayload:
     campaign_key: CampaignKey
     work_key: WorkKey
     run_key: RunKey
-    input_ref: str
+    input_reference: str
     labels: Mapping[str, str]
     pipeline_key: str
     pipeline_version: int
@@ -155,7 +155,7 @@ class _Candidate:
     campaign_key: str
     work_key: str
     run_key: str
-    input_ref: str
+    input_reference: str
     labels: Mapping[str, str]
     pipeline_key: str
     pipeline_version: int
@@ -555,7 +555,7 @@ def _admit_candidate(  # noqa: PLR0913 -- explicit admission facts
         campaign_key=CampaignKey(candidate.campaign_key),
         work_key=WorkKey(candidate.work_key),
         run_key=RunKey(candidate.run_key),
-        input_ref=candidate.input_ref,
+        input_reference=candidate.input_reference,
         labels=candidate.labels,
         pipeline_key=candidate.pipeline_key,
         pipeline_version=candidate.pipeline_version,
@@ -854,7 +854,7 @@ def _decode_candidate(row: RowMapping) -> _Candidate:
         campaign_key=row["campaign_key"],
         work_key=row["work_key"],
         run_key=row["run_key"],
-        input_ref=row["input_reference"],
+        input_reference=row["input_reference"],
         labels=MappingProxyType(dict(row["labels"])),
         pipeline_key=row["pipeline_key"],
         pipeline_version=row["pipeline_version"],

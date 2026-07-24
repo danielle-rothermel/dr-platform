@@ -11,9 +11,7 @@ def validate_non_empty_string(value: object, *, label: str) -> str:
     return value
 
 
-def validate_labels(
-    value: Mapping[str, str], *, label: str
-) -> dict[str, str]:
+def validate_labels(value: Mapping[str, str], *, label: str) -> dict[str, str]:
     if not isinstance(value, Mapping) or any(
         not isinstance(key, str) or not isinstance(item, str)
         for key, item in value.items()

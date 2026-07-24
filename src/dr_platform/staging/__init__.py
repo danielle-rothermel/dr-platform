@@ -3,6 +3,7 @@
 from dr_platform.staging.definitions import (
     ArgumentsCallable,
     PipelineDefinition,
+    PipelineIdentity,
     StageDefinition,
     WorkflowCallable,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "CampaignWorkIdentity",
     "PipelineConflictError",
     "PipelineDefinition",
+    "PipelineIdentity",
     "PipelineKey",
     "PipelineRegistry",
     "RunKey",

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from dr_platform.staging.definitions import PipelineIdentity
+
 if TYPE_CHECKING:
-    from dr_platform.staging.definitions import (
-        PipelineDefinition,
-        PipelineIdentity,
-    )
+    from dr_platform.staging.definitions import PipelineDefinition
     from dr_platform.staging.identities import PipelineKey
 
 
@@ -20,7 +19,7 @@ class PipelineConflictError(RuntimeError):
         super().__init__(
             "pipeline key and version are already registered with a "
             "different definition: "
-            f"{identity[0]!r} version {identity[1]}"
+            f"{identity.key.value!r} version {identity.version}"
         )
 
 
@@ -40,7 +39,7 @@ class PipelineRegistry:
         return existing
 
     def get(self, *, key: PipelineKey, version: int) -> PipelineDefinition:
-        return self._pipelines[key, version]
+        return self._pipelines[PipelineIdentity(key, version)]
 
     def pipelines(self) -> tuple[PipelineDefinition, ...]:
         """Return every registered definition for wiring-time validation."""

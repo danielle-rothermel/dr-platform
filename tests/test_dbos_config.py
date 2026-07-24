@@ -1,8 +1,26 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
+from dbos import DBOSConfig
 
 from dr_platform import dbos_config
+
+if TYPE_CHECKING:
+    from dr_platform.dbos_config import PlatformDbosConfig
+
+
+def _config(
+    *,
+    enable_otlp: bool = True,
+    otlp_traces_endpoints: tuple[str, ...] = (),
+) -> PlatformDbosConfig:
+    return dbos_config.build_platform_dbos_config(
+        database_url="postgresql+psycopg://app/platform",
+        enable_otlp=enable_otlp,
+        otlp_traces_endpoints=otlp_traces_endpoints,
+    )
 
 
 def test_resolve_database_url_prefers_explicit_arg(
@@ -78,8 +96,7 @@ def test_build_platform_dbos_config_system_url_fallbacks(
         database_url="postgresql://app-user@app/db",
     )
     assert (
-        from_app.system_database_url
-        == "postgresql+psycopg://app-user@app/db"
+        from_app.system_database_url == "postgresql+psycopg://app-user@app/db"
     )
 
 
@@ -205,6 +222,126 @@ def test_build_platform_dbos_config_accepts_colocated_urls() -> None:
     assert config.system_database_url == (
         "postgresql+psycopg://system-user@db.example:5432/platform"
     )
+
+
+def test_initialize_dbos_runtime_forwards_bootstrap_config() -> None:
+    config = dbos_config.build_platform_dbos_config(
+        database_url="postgresql://app-user@db.example/platform",
+        system_database_url=(
+            "postgresql://system-user@db.example:5432/platform"
+        ),
+        enable_otlp=True,
+        otlp_traces_endpoints=(
+            "https://collector-a.example/v1/traces",
+            "https://collector-b.example/v1/traces",
+        ),
+    )
+    runtime_configs: list[DBOSConfig] = []
+    telemetry_configs: list[DBOSConfig] = []
+
+    result = dbos_config.initialize_dbos_runtime(
+        config,
+        app_name="stage-worker",
+        runtime_initializer=runtime_configs.append,
+        telemetry_initializer=telemetry_configs.append,
+    )
+
+    assert len(runtime_configs) == 1
+    runtime_config = runtime_configs[0]
+    assert runtime_config["name"] == "stage-worker"
+    assert runtime_config["system_database_url"] == (
+        "postgresql+psycopg://system-user@db.example:5432/platform"
+    )
+    assert runtime_config["enable_otlp"] is False
+    assert runtime_config["otlp_traces_endpoints"] == [
+        "https://collector-a.example/v1/traces",
+        "https://collector-b.example/v1/traces",
+    ]
+
+    assert len(telemetry_configs) == 1
+    telemetry_config = telemetry_configs[0]
+    assert telemetry_config["name"] == "stage-worker"
+    assert telemetry_config["system_database_url"] == (
+        "postgresql+psycopg://system-user@db.example:5432/platform"
+    )
+    assert telemetry_config["enable_otlp"] is True
+    assert telemetry_config["otlp_traces_endpoints"] == [
+        "https://collector-a.example/v1/traces",
+        "https://collector-b.example/v1/traces",
+    ]
+    assert result.enabled
+    assert result.healthy
+
+
+def test_initialize_dbos_runtime_skips_disabled_telemetry() -> None:
+    config = dbos_config.build_platform_dbos_config(
+        database_url="postgresql://app-user@db.example/platform",
+        enable_otlp=False,
+    )
+    runtime_configs: list[DBOSConfig] = []
+    telemetry_configs: list[DBOSConfig] = []
+
+    result = dbos_config.initialize_dbos_runtime(
+        config,
+        app_name="stage-worker",
+        runtime_initializer=runtime_configs.append,
+        telemetry_initializer=telemetry_configs.append,
+    )
+
+    assert len(runtime_configs) == 1
+    assert runtime_configs[0]["enable_otlp"] is False
+    assert telemetry_configs == []
+    assert not result.enabled
+    assert result.healthy
+
+
+def test_dbos_runtime_resets_telemetry_best_effort_after_failure() -> None:
+    runtime_configs: list[DBOSConfig] = []
+    telemetry_configs: list[DBOSConfig] = []
+
+    def initialize_telemetry(config: DBOSConfig) -> None:
+        telemetry_configs.append(config)
+        raise RuntimeError("sensitive tracer failure")
+
+    result = dbos_config.initialize_dbos_runtime(
+        _config(
+            otlp_traces_endpoints=("https://collector.example/v1/traces",)
+        ),
+        app_name="app",
+        runtime_initializer=runtime_configs.append,
+        telemetry_initializer=initialize_telemetry,
+    )
+
+    assert len(runtime_configs) == 1
+    assert runtime_configs[0]["enable_otlp"] is False
+    assert [config["enable_otlp"] for config in telemetry_configs] == [
+        True,
+        False,
+    ]
+    assert all(
+        config["otlp_traces_endpoints"]
+        == ["https://collector.example/v1/traces"]
+        for config in telemetry_configs
+    )
+    assert result.enabled
+    assert not result.healthy
+    assert result.error_type == "RuntimeError"
+    assert result.message == "OTLP initialization failed"
+
+
+def test_dbos_runtime_initialization_failure_is_not_treated_as_telemetry() -> (
+    None
+):
+    def initialize_runtime(_config: DBOSConfig) -> None:
+        raise ConnectionError("database unavailable")
+
+    with pytest.raises(ConnectionError, match="database unavailable"):
+        dbos_config.initialize_dbos_runtime(
+            _config(),
+            app_name="app",
+            runtime_initializer=initialize_runtime,
+            telemetry_initializer=lambda _config: None,
+        )
 
 
 def test_resolve_database_url_leaves_non_postgresql_urls_unchanged() -> None:

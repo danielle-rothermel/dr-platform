@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from dbos import DBOSClient, EnqueueOptions
+from dbos import EnqueueOptions
 from sqlalchemy import Engine, event, func, select
 
-from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
     PipelineDefinition,
+    PipelineIdentity,
     PipelineKey,
     PipelineRegistry,
     StageDefinition,
@@ -20,7 +20,7 @@ from dr_platform.staging import (
     StageKey,
     WorkKey,
 )
-from dr_platform.staging.admission import AdmissionPayload, run_admission_pass
+from dr_platform.staging.admission import run_admission_pass
 from dr_platform.staging.inspection import (
     StateCount,
     bulk_work_statuses,
@@ -33,52 +33,64 @@ from dr_platform.staging.inspection import (
     read_controls,
     run_state_counts,
 )
-from dr_platform.staging.operations import retry_stage, set_stage_capacity
-from dr_platform.staging.schema import StagingSchema
+from dr_platform.staging.operations import (
+    retry_stage,
+    set_selector_capacity,
+    set_stage_capacity,
+)
 from dr_platform.staging.stage_attempts import (
     append_stage_attempt,
     record_stage_attempt_terminal,
 )
-from dr_platform.staging.stage_executions import transition_stage_execution
+from dr_platform.staging.stage_executions import (
+    insert_stage_execution,
+    transition_stage_execution,
+)
 from dr_platform.staging.submission import WorkInput, submit
-from tests.conftest import engine_dsn
+from tests.conftest import (
+    NOW,
+    _args_for,
+    _as_dbos_client,
+    _migrate,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection
 
-NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
+    from dr_platform.staging.schema import StagingSchema
 
 
-def _workflow(input_ref: str) -> str:
-    return f"output:{input_ref}"
+def _workflow(input_reference: str) -> str:
+    return f"output:{input_reference}"
 
 
-def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_ref,)
-
-
-def _registry() -> PipelineRegistry:
+def _registry(*, two_stages: bool = False) -> PipelineRegistry:
+    stages = [
+        StageDefinition(
+            key=StageKey("execute"),
+            queue_name="execute-queue",
+            workflow=_workflow,
+            args_for=_args_for,
+        )
+    ]
+    if two_stages:
+        stages.append(
+            StageDefinition(
+                key=StageKey("score"),
+                queue_name="score-queue",
+                workflow=_workflow,
+                args_for=_args_for,
+            )
+        )
     registry = PipelineRegistry()
     registry.register(
         PipelineDefinition(
             key=PipelineKey("evaluation"),
             version=1,
-            stages=(
-                StageDefinition(
-                    key=StageKey("execute"),
-                    queue_name="execute-queue",
-                    workflow=_workflow,
-                    args_for=_args_for,
-                ),
-            ),
+            stages=tuple(stages),
         )
     )
     return registry
-
-
-def _migrate(engine: Engine) -> StagingSchema:
-    upgrade_platform_schema(engine_dsn(engine))
-    return StagingSchema()
 
 
 def _submit(  # noqa: PLR0913 -- explicit desired-state test facts
@@ -93,12 +105,12 @@ def _submit(  # noqa: PLR0913 -- explicit desired-state test facts
     submit(
         campaign_key=campaign_key,
         run_key=run_key,
-        pipeline=(PipelineKey("evaluation"), 1),
-        config_ref="config:1",
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
+        execution_config_reference="config:1",
         items=(
             WorkInput(
                 work_key=work_key,
-                input_ref=f"input:{work_key}",
+                input_reference=f"input:{work_key}",
                 labels={"kind": "sample"},
             )
             for work_key in work_keys
@@ -109,6 +121,35 @@ def _submit(  # noqa: PLR0913 -- explicit desired-state test facts
     )
 
 
+def _seed_reader_data(engine: Engine) -> None:
+    registry = _registry()
+    _submit(
+        engine,
+        registry,
+        campaign_key="campaign-a",
+        run_key="run-a1",
+        work_keys=("work-a", "work-b"),
+    )
+    _submit(
+        engine,
+        registry,
+        campaign_key="campaign-a",
+        run_key="run-a2",
+        work_keys=("work-c",),
+        clock=NOW + timedelta(seconds=1),
+    )
+    _submit(
+        engine,
+        registry,
+        campaign_key="campaign-b",
+        run_key="run-b1",
+        work_keys=("work-d",),
+        clock=NOW + timedelta(seconds=2),
+    )
+
+
+# This variant records only the enqueue options; the args-tracking
+# _RecordingClient in the admission/handoff suites is a distinct shape.
 class _RecordingClient:
     def __init__(self) -> None:
         self.enqueued: list[EnqueueOptions] = []
@@ -122,10 +163,6 @@ class _RecordingClient:
     ) -> object:
         self.enqueued.append(cast("EnqueueOptions", dict(options)))
         return object()
-
-
-def _as_dbos_client(client: object) -> DBOSClient:
-    return cast("DBOSClient", client)
 
 
 def _execution_by_work_key(
@@ -192,41 +229,11 @@ def _terminalize(
     )
 
 
-def test_inspection_readers_are_bounded_cursor_stable_and_frozen(
+def test_list_campaigns_paginates_by_stable_campaign_key(
     pg_engine: Engine,
 ) -> None:
     _migrate(pg_engine)
-    registry = _registry()
-    _submit(
-        pg_engine,
-        registry,
-        campaign_key="campaign-a",
-        run_key="run-a1",
-        work_keys=("work-a", "work-b"),
-    )
-    _submit(
-        pg_engine,
-        registry,
-        campaign_key="campaign-a",
-        run_key="run-a2",
-        work_keys=("work-c",),
-        clock=NOW + timedelta(seconds=1),
-    )
-    _submit(
-        pg_engine,
-        registry,
-        campaign_key="campaign-b",
-        run_key="run-b1",
-        work_keys=("work-d",),
-        clock=NOW + timedelta(seconds=2),
-    )
-    set_stage_capacity(
-        pipeline=(PipelineKey("evaluation"), 1),
-        stage_key="execute",
-        capacity=4,
-        engine=pg_engine,
-        clock=lambda: NOW,
-    )
+    _seed_reader_data(pg_engine)
 
     first_campaign = list_campaigns(engine=pg_engine, limit=1)
     second_campaign = list_campaigns(
@@ -234,6 +241,21 @@ def test_inspection_readers_are_bounded_cursor_stable_and_frozen(
         cursor=first_campaign[-1].campaign_key,
         limit=1,
     )
+
+    assert [str(item.campaign_key) for item in first_campaign] == [
+        "campaign-a"
+    ]
+    assert [str(item.campaign_key) for item in second_campaign] == [
+        "campaign-b"
+    ]
+
+
+def test_list_runs_paginates_by_stable_run_cursor(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    _seed_reader_data(pg_engine)
+
     runs = list_runs("campaign-a", engine=pg_engine, limit=1)
     later_runs = list_runs(
         "campaign-a",
@@ -241,6 +263,19 @@ def test_inspection_readers_are_bounded_cursor_stable_and_frozen(
         cursor=runs[-1].run_key,
         limit=1,
     )
+
+    assert [str(item.run_key) for item in runs + later_runs] == [
+        "run-a1",
+        "run-a2",
+    ]
+
+
+def test_list_work_items_paginates_current_state_by_stable_item_cursor(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    _seed_reader_data(pg_engine)
+
     first_item = list_work_items(
         "campaign-a",
         engine=pg_engine,
@@ -254,38 +289,125 @@ def test_inspection_readers_are_bounded_cursor_stable_and_frozen(
         cursor=first_item[-1].work_item_id,
         limit=2,
     )
+
+    assert [str(item.work_key) for item in first_item + later_items] == [
+        "work-a",
+        "work-b",
+        "work-c",
+    ]
+
+
+def test_get_work_item_stages_returns_stage_history(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    _seed_reader_data(pg_engine)
+    (item, *_) = list_work_items("campaign-a", engine=pg_engine)
+
     stages = get_work_item_stages(
-        first_item[0].work_item_id,
+        item.work_item_id,
         engine=pg_engine,
     )
+
+    assert len(stages) == 1
+    assert stages[0].attempts == ()
+
+
+def test_read_controls_returns_stage_capacity(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    set_stage_capacity(
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
+        stage_key="execute",
+        capacity=4,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
     controls = read_controls(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         engine=pg_engine,
     )
 
-    assert [str(item.campaign_key) for item in first_campaign] == [
-        "campaign-a"
-    ]
-    assert [str(item.campaign_key) for item in second_campaign] == [
-        "campaign-b"
-    ]
-    assert [str(item.run_key) for item in runs + later_runs] == [
-        "run-a1",
-        "run-a2",
-    ]
-    assert len(first_item + later_items) == 3
-    assert len(stages) == 1
-    assert stages[0].attempts == ()
     assert controls[0].capacity == 4
-    assert campaign_state_counts(
-        "campaign-a", engine=pg_engine
-    )[0].count == 3
+
+
+def test_read_controls_filters_selectors_by_work_item_labels(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    pipeline = PipelineIdentity(PipelineKey("evaluation"), 1)
+    set_stage_capacity(
+        pipeline=pipeline,
+        stage_key="execute",
+        capacity=8,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    set_selector_capacity(
+        pipeline=pipeline,
+        stage_key="execute",
+        labels={"kind": "sample"},
+        capacity=4,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    set_selector_capacity(
+        pipeline=pipeline,
+        stage_key="execute",
+        labels={"kind": "sample", "cohort": "blue"},
+        capacity=2,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    set_selector_capacity(
+        pipeline=pipeline,
+        stage_key="execute",
+        labels={"kind": "other"},
+        capacity=1,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    controls = read_controls(
+        pipeline=pipeline,
+        stage_key="execute",
+        labels={"kind": "sample", "cohort": "blue", "split": "validation"},
+        engine=pg_engine,
+    )
+
+    assert [
+        (dict(control.selector), control.capacity) for control in controls
+    ] == [
+        ({}, 8),
+        ({"kind": "sample"}, 4),
+        ({"kind": "sample", "cohort": "blue"}, 2),
+    ]
+
+
+def test_state_counts_report_current_items_for_campaign_and_run(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    _seed_reader_data(pg_engine)
+
+    assert campaign_state_counts("campaign-a", engine=pg_engine)[0].count == 3
     assert run_state_counts("run-a1", engine=pg_engine)[0].count == 2
+
+
+def test_work_item_summaries_are_deeply_immutable(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    _seed_reader_data(pg_engine)
+    item = list_work_items("campaign-a", engine=pg_engine, limit=1)[0]
+
     with pytest.raises(FrozenInstanceError):
-        first_item[0].state = StageExecutionState.FAILED  # ty: ignore[invalid-assignment]
+        item.state = StageExecutionState.FAILED  # ty: ignore[invalid-assignment]
     with pytest.raises(TypeError):
-        cast("dict[str, str]", first_item[0].labels)["new"] = "value"
+        cast("dict[str, str]", item.labels)["new"] = "value"
 
 
 def test_list_campaigns_counts_runs_and_items_independently(
@@ -315,6 +437,161 @@ def test_list_campaigns_counts_runs_and_items_independently(
     assert campaign.created_at == NOW
     assert campaign.run_count == 2
     assert campaign.work_item_count == 5
+
+
+def test_list_campaigns_rejects_an_unknown_cursor(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(
+        ValueError, match="campaign cursor is unknown among campaigns"
+    ):
+        list_campaigns(engine=pg_engine, cursor="absent")
+
+
+def test_list_runs_rejects_an_unknown_campaign(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(LookupError, match="campaign is unknown: absent"):
+        list_runs("absent", engine=pg_engine)
+
+
+@pytest.mark.parametrize("cursor", ["absent", "run-b1"])
+def test_list_runs_rejects_a_cursor_outside_the_campaign(
+    pg_engine: Engine,
+    cursor: str,
+) -> None:
+    _migrate(pg_engine)
+    _seed_reader_data(pg_engine)
+
+    with pytest.raises(
+        ValueError,
+        match="run cursor is unknown in this campaign",
+    ):
+        list_runs("campaign-a", engine=pg_engine, cursor=cursor)
+
+
+def test_list_work_items_rejects_an_unknown_campaign(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(LookupError, match="campaign is unknown: absent"):
+        list_work_items("absent", engine=pg_engine)
+
+
+def test_list_work_items_rejects_an_unknown_cursor(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    _seed_reader_data(pg_engine)
+    with pg_engine.connect() as connection:
+        unknown_cursor = (
+            connection.execute(
+                select(func.max(schema.work_items.c.work_item_id))
+            ).scalar_one()
+            + 1
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="work item cursor is unknown in this campaign",
+    ):
+        list_work_items(
+            "campaign-a",
+            engine=pg_engine,
+            cursor=unknown_cursor,
+        )
+
+
+def test_list_work_items_rejects_a_cross_campaign_cursor(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    _seed_reader_data(pg_engine)
+    (campaign_b_item,) = list_work_items(
+        "campaign-b",
+        engine=pg_engine,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="work item cursor is unknown in this campaign",
+    ):
+        list_work_items(
+            "campaign-a",
+            engine=pg_engine,
+            cursor=campaign_b_item.work_item_id,
+        )
+
+
+def _call_list_reader(reader: str, pg_engine: Engine, *, limit: int) -> None:
+    if reader == "campaigns":
+        list_campaigns(engine=pg_engine, limit=limit)
+    elif reader == "runs":
+        list_runs("campaign-a", engine=pg_engine, limit=limit)
+    else:
+        list_work_items("campaign-a", engine=pg_engine, limit=limit)
+
+
+@pytest.mark.parametrize("reader", ["campaigns", "runs", "work-items"])
+def test_inspection_list_readers_reject_a_non_integer_limit(
+    pg_engine: Engine,
+    reader: str,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(TypeError, match="inspection limit must be an integer"):
+        _call_list_reader(reader, pg_engine, limit=True)
+
+
+@pytest.mark.parametrize("reader", ["campaigns", "runs", "work-items"])
+@pytest.mark.parametrize("limit", [0, -1])
+def test_inspection_list_readers_reject_a_non_positive_limit(
+    pg_engine: Engine,
+    reader: str,
+    limit: int,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(ValueError, match="inspection limit must be positive"):
+        _call_list_reader(reader, pg_engine, limit=limit)
+
+
+@pytest.mark.parametrize("reader", ["campaigns", "runs", "work-items"])
+def test_inspection_list_readers_reject_a_limit_above_the_maximum(
+    pg_engine: Engine,
+    reader: str,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(ValueError, match="inspection limit must not exceed"):
+        _call_list_reader(reader, pg_engine, limit=1_001)
+
+
+def test_list_work_items_rejects_a_malformed_state(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(TypeError, match="state must be a StageExecutionState"):
+        list_work_items(
+            "campaign-a",
+            engine=pg_engine,
+            state=cast("StageExecutionState", "READY"),
+        )
+
+
+def test_get_work_item_stages_rejects_an_unknown_work_item(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(LookupError, match="work item does not exist: 42"):
+        get_work_item_stages(42, engine=pg_engine)
 
 
 def test_inspect_campaign_rejects_an_unknown_campaign(
@@ -422,12 +699,12 @@ def test_six_seed_top_up_uses_bulk_statuses_for_one_campaign(
     receipt = submit(
         campaign_key="estimate-v1",
         run_key="run-top-up",
-        pipeline=(PipelineKey("evaluation"), 1),
-        config_ref="config:1",
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
+        execution_config_reference="config:1",
         items=(
             WorkInput(
                 work_key=work_key,
-                input_ref=f"input:{work_key}",
+                input_reference=f"input:{work_key}",
                 labels={"kind": "sample"},
             )
             for work_key in absent
@@ -448,15 +725,21 @@ def test_six_seed_top_up_uses_bulk_statuses_for_one_campaign(
     assert refreshed[WorkKey(existing_keys[1])].state is (
         StageExecutionState.READY
     )
-    assert get_work_item_stages(
-        executions[existing_keys[1]][0], engine=pg_engine
-    )[0].execution.current_attempt == 2
+    assert (
+        get_work_item_stages(
+            executions[existing_keys[1]][0], engine=pg_engine
+        )[0].execution.current_attempt
+        == 2
+    )
     with pg_engine.connect() as connection:
-        assert connection.execute(
-            select(func.count())
-            .select_from(schema.work_items)
-            .where(schema.work_items.c.origin_run_key == "run-top-up")
-        ).scalar_one() == 3
+        assert (
+            connection.execute(
+                select(func.count())
+                .select_from(schema.work_items)
+                .where(schema.work_items.c.origin_run_key == "run-top-up")
+            ).scalar_one()
+            == 3
+        )
 
 
 def test_attempts_never_count_as_additional_samples(
@@ -485,7 +768,7 @@ def test_attempts_never_count_as_additional_samples(
         clock=lambda: NOW + timedelta(seconds=2),
     )
     set_stage_capacity(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=1,
         engine=pg_engine,
@@ -510,9 +793,116 @@ def test_attempts_never_count_as_additional_samples(
     assert status.present is True
     assert status.state is StageExecutionState.ADMITTED
     assert len(stages[0].attempts) == 2
-    assert campaign_state_counts(
-        "campaign-attempts", engine=pg_engine
-    )[0].count == 1
+    assert (
+        campaign_state_counts("campaign-attempts", engine=pg_engine)[0].count
+        == 1
+    )
+
+
+def test_bulk_statuses_accepts_empty_input(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    result = bulk_work_statuses("campaign-absent", (), engine=pg_engine)
+
+    assert str(result.campaign_key) == "campaign-absent"
+    assert tuple(result.statuses.items()) == ()
+    with pytest.raises(TypeError):
+        cast("dict[WorkKey, object]", result.statuses)[WorkKey("work")] = (
+            object()
+        )
+
+
+def test_bulk_statuses_rejects_a_non_integer_chunk_size(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(
+        TypeError,
+        match="bulk status chunk size must be an integer",
+    ):
+        bulk_work_statuses(
+            "campaign",
+            ("work",),
+            engine=pg_engine,
+            chunk_size=True,
+        )
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_bulk_statuses_rejects_a_non_positive_chunk_size(
+    pg_engine: Engine,
+    chunk_size: int,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(
+        ValueError,
+        match="bulk status chunk size must be positive",
+    ):
+        bulk_work_statuses(
+            "campaign",
+            ("work",),
+            engine=pg_engine,
+            chunk_size=chunk_size,
+        )
+
+
+def test_bulk_statuses_deduplicates_keys_in_stable_order(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry = _registry()
+    _submit(
+        pg_engine,
+        registry,
+        campaign_key="campaign-bulk",
+        run_key="run-bulk",
+        work_keys=("work-a", "work-b"),
+    )
+
+    result = bulk_work_statuses(
+        "campaign-bulk",
+        ("work-b", "work-a", "work-b"),
+        engine=pg_engine,
+    )
+
+    assert tuple(result.statuses) == (WorkKey("work-b"), WorkKey("work-a"))
+    assert len(result.statuses) == 2
+    assert all(status.present for status in result.statuses.values())
+    with pytest.raises(TypeError):
+        cast("dict[WorkKey, object]", result.statuses)[WorkKey("work-c")] = (
+            object()
+        )
+    with pytest.raises(FrozenInstanceError):
+        result.statuses[WorkKey("work-b")].state = (  # ty: ignore[invalid-assignment]
+            StageExecutionState.FAILED
+        )
+
+
+def test_bulk_statuses_reports_unknown_campaign_keys_as_absent(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    result = bulk_work_statuses(
+        "campaign-absent",
+        ("work-a", "work-b"),
+        engine=pg_engine,
+    )
+
+    assert str(result.campaign_key) == "campaign-absent"
+    assert tuple(result.statuses) == (WorkKey("work-a"), WorkKey("work-b"))
+    assert all(
+        not status.present
+        and status.work_item_id is None
+        and status.current_stage_key is None
+        and status.current_stage_index is None
+        and status.state is None
+        for status in result.statuses.values()
+    )
 
 
 def test_bulk_reader_chunks_and_reports_absent_keys(
@@ -567,6 +957,112 @@ def test_bulk_reader_chunks_and_reports_absent_keys(
         cast("dict[WorkKey, object]", result.statuses)[
             WorkKey(requested[0])
         ] = object()
+
+
+def test_current_state_readers_ignore_earlier_terminal_stages(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry(two_stages=True)
+    _submit(
+        pg_engine,
+        registry,
+        campaign_key="campaign-multistage",
+        run_key="run-ready",
+        work_keys=("work-ready",),
+    )
+    _submit(
+        pg_engine,
+        registry,
+        campaign_key="campaign-multistage",
+        run_key="run-failed",
+        work_keys=("work-failed",),
+        clock=NOW + timedelta(seconds=1),
+    )
+    first_stages = _execution_by_work_key(pg_engine, schema)
+    with pg_engine.begin() as connection:
+        for work_key in ("work-ready", "work-failed"):
+            work_item_id, stage_execution_id = first_stages[work_key]
+            _terminalize(
+                connection,
+                stage_execution_id=stage_execution_id,
+                state=StageExecutionState.SUCCEEDED,
+                at=NOW + timedelta(seconds=10),
+            )
+            second_stage = insert_stage_execution(
+                connection,
+                work_item_id=work_item_id,
+                stage_key="score",
+                stage_index=1,
+                created_at=NOW + timedelta(seconds=12),
+            )
+            if work_key == "work-failed":
+                _terminalize(
+                    connection,
+                    stage_execution_id=second_stage.stage_execution_id,
+                    state=StageExecutionState.FAILED,
+                    at=NOW + timedelta(seconds=13),
+                )
+
+    ready_items = list_work_items(
+        "campaign-multistage",
+        engine=pg_engine,
+        state=StageExecutionState.READY,
+    )
+    failed_items = list_work_items(
+        "campaign-multistage",
+        engine=pg_engine,
+        state=StageExecutionState.FAILED,
+    )
+    succeeded_items = list_work_items(
+        "campaign-multistage",
+        engine=pg_engine,
+        state=StageExecutionState.SUCCEEDED,
+    )
+    statuses = bulk_work_statuses(
+        "campaign-multistage",
+        ("work-ready", "work-failed"),
+        engine=pg_engine,
+    ).statuses
+
+    assert [str(item.work_key) for item in ready_items] == ["work-ready"]
+    assert [str(item.work_key) for item in failed_items] == ["work-failed"]
+    assert succeeded_items == ()
+    assert {
+        key: (
+            status.current_stage_key,
+            status.current_stage_index,
+            status.state,
+        )
+        for key, status in statuses.items()
+    } == {
+        WorkKey("work-ready"): (
+            StageKey("score"),
+            1,
+            StageExecutionState.READY,
+        ),
+        WorkKey("work-failed"): (
+            StageKey("score"),
+            1,
+            StageExecutionState.FAILED,
+        ),
+    }
+    assert {
+        count.state: count.count
+        for count in campaign_state_counts(
+            "campaign-multistage",
+            engine=pg_engine,
+        )
+    } == {
+        StageExecutionState.READY: 1,
+        StageExecutionState.FAILED: 1,
+    }
+    assert run_state_counts("run-ready", engine=pg_engine) == (
+        StateCount(state=StageExecutionState.READY, count=1),
+    )
+    assert run_state_counts("run-failed", engine=pg_engine) == (
+        StateCount(state=StageExecutionState.FAILED, count=1),
+    )
 
 
 def test_bulk_reader_scopes_current_stage_by_campaign_with_interleaved_ids(

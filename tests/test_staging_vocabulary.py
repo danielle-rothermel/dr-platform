@@ -6,19 +6,57 @@ from collections.abc import Callable
 
 import pytest
 
+from dr_platform import staging
 from dr_platform.staging import (
     CampaignKey,
     CampaignWorkIdentity,
     PipelineDefinition,
+    PipelineIdentity,
     PipelineKey,
+    PipelineRegistry,
     RunKey,
     StageDefinition,
     StageExecutionState,
     StageKey,
     WorkKey,
+    definitions,
+    identities,
+    recipes,
+    registry,
     stable_random_rank,
     stage_workflow_id,
+    states,
 )
+
+_STAGING_BINDINGS = {
+    "ArgumentsCallable": definitions.ArgumentsCallable,
+    "CampaignKey": identities.CampaignKey,
+    "CampaignWorkIdentity": identities.CampaignWorkIdentity,
+    "PipelineConflictError": registry.PipelineConflictError,
+    "PipelineDefinition": definitions.PipelineDefinition,
+    "PipelineIdentity": definitions.PipelineIdentity,
+    "PipelineKey": identities.PipelineKey,
+    "PipelineRegistry": registry.PipelineRegistry,
+    "RunKey": identities.RunKey,
+    "StageDefinition": definitions.StageDefinition,
+    "StageExecutionState": states.StageExecutionState,
+    "StageKey": identities.StageKey,
+    "WorkKey": identities.WorkKey,
+    "WorkflowCallable": definitions.WorkflowCallable,
+    "stable_random_rank": recipes.stable_random_rank,
+    "stage_workflow_id": recipes.stage_workflow_id,
+}
+
+
+def test_staging_exports_are_the_internal_contract() -> None:
+    assert len(staging.__all__) == len(_STAGING_BINDINGS)
+    assert set(staging.__all__) == set(_STAGING_BINDINGS)
+
+
+def test_staging_exports_are_bound_to_the_contract_objects() -> None:
+    for name, expected in _STAGING_BINDINGS.items():
+        assert getattr(staging, name) is expected
+
 
 KeyType = type[CampaignKey | RunKey | WorkKey | StageKey | PipelineKey]
 
@@ -83,9 +121,35 @@ def test_pipeline_preserves_declared_linear_stage_order() -> None:
         stages=(prepare, execute),
     )
 
-    assert pipeline.identity == (PipelineKey("evaluation"), 1)
+    assert pipeline.identity == PipelineIdentity(PipelineKey("evaluation"), 1)
     assert pipeline.stages == (prepare, execute)
     assert pipeline.stages[0].key == StageKey("prepare")
+
+
+def test_pipeline_identity_rejects_a_non_pipeline_key() -> None:
+    with pytest.raises(TypeError, match="pipeline key must be a PipelineKey"):
+        PipelineIdentity("evaluation", 1)  # ty: ignore[invalid-argument-type]
+
+
+def test_pipeline_identity_rejects_a_non_positive_version() -> None:
+    with pytest.raises(ValueError, match="pipeline version must be positive"):
+        PipelineIdentity(PipelineKey("evaluation"), 0)
+
+
+def test_pipeline_identity_round_trips_through_registry() -> None:
+    pipeline = PipelineDefinition(
+        key=PipelineKey("evaluation"),
+        version=1,
+        stages=(_stage("execute"),),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+
+    identity = pipeline.identity
+    twin = PipelineIdentity(PipelineKey("evaluation"), 1)
+    assert identity == twin
+    assert hash(identity) == hash(twin)
+    assert registry.get(key=identity.key, version=identity.version) is pipeline
 
 
 def test_pipeline_rejects_an_empty_stage_tuple() -> None:

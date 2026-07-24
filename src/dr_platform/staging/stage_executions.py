@@ -129,8 +129,7 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
             )
         if existing.stage_index != stage_index or existing.rank != rank:
             raise StageExecutionConflictError(
-                "work item stage is already bound to different immutable "
-                "facts"
+                "work item stage is already bound to different immutable facts"
             )
         return existing
     return _decode_stage_execution(row)

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="doc.css">
+<title>dr-platform · The staged-work pipeline contract</title>
+<style>
+  /* Page-local tokens. Purple (--anchor) = main-point accents (.key/.must);
+     blue (--accent) = term links (.term-ref), matching doc.css link hue. */
+  .term-name { font-weight: 600; }
+  dfn.term-name { font-style: normal; }
+  .must { color: var(--anchor); font-weight: 600; }
+  .term-ref { color: var(--accent); text-decoration: underline; text-decoration-style: dashed; text-underline-offset: 2px; }
+  td ul { margin: 0; padding-left: 18px; }
+  td li { margin-bottom: 4px; }
+  td li:last-child { margin-bottom: 0; }
+</style>
+</head>
+<body>
+<main class="wide">
+
+<h1>The dr-platform staged-work pipeline contract</h1>
+<p class="dek">A reference for the terms and guarantees that bind dr-platform.</p>
+<div class="byline">dr-platform · 2026-07-24</div>
+
+<p>This is the vocabulary of the staged-work pipeline dr-platform implements: the <span class="key">terms</span>, the <span class="key">guarantees</span> that bind this repo, what is in and out of <span class="key">scope</span>, and the <span class="key">mapping</span> from each term to the names actually exported by <a href="https://github.com/danielle-rothermel/dr-platform/blob/main/src/dr_platform/__init__.py"><code>dr_platform</code></a>.</p>
+
+<div class="section-head" id="terms"><h2>Terms</h2></div>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Term</th><th>Definition</th></tr></thead>
+  <tbody>
+    <tr><td><dfn class="term-name" id="term-work">Work</dfn></td><td>One application-owned unit of logical activity that the platform schedules and tracks; the platform never inspects what the work means.</td></tr>
+    <tr><td><dfn class="term-name" id="term-reference">Reference</dfn></td><td>An opaque immutable string the platform stores and passes through, and never interprets or resolves; the caller alone knows what it points at.</td></tr>
+    <tr><td><dfn class="term-name" id="term-queue">Queue</dfn></td><td>An application-owned DBOS queue that a stage names; the platform enqueues a stage's <a class="term-ref" href="#term-workflow">workflow</a> onto it but does not own or configure it.</td></tr>
+    <tr><td><dfn class="term-name" id="term-workflow">Workflow</dfn></td><td>A DBOS durable execution unit that runs a stage callable; after a crash DBOS may replay its body, so its side effects are expected to tolerate re-execution.</td></tr>
+    <tr><td><dfn class="term-name" id="term-attempt">Attempt</dfn></td><td>One row in an ordered sequence recording a single try at running a stage's <a class="term-ref" href="#term-workflow">workflow</a>. A new row is appended for each fresh try; its identity and provenance never change, admission and terminal fields are filled in place at most once, and a terminal row is immutable.</td></tr>
+    <tr><td><dfn class="term-name" id="term-control">Control</dfn></td><td>A persisted row governing admission for one stage, carrying a capacity bound and a paused flag; admission consults it before letting new <a class="term-ref" href="#term-work">work</a> in.</td></tr>
+    <tr><td><dfn class="term-name" id="term-selector">Selector</dfn></td><td>An exact-label match predicate on a <a class="term-ref" href="#term-control">control</a> that decides which <a class="term-ref" href="#term-work">work</a> items the control governs; a control matches work whose <a class="term-ref" href="#term-label">labels</a> contain every selector key/value pair exactly, the work may carry additional labels, and the empty selector still matches every item at its stage.</td></tr>
+    <tr><td><dfn class="term-name" id="term-capacity">Capacity</dfn></td><td>The desired count of concurrently admitted stage executions a <a class="term-ref" href="#term-control">control</a> allows; a target occupancy bound, not a worker count and not a request-rate or token limit.</td></tr>
+    <tr><td><dfn class="term-name" id="term-terminal">Terminal</dfn></td><td>A permanently settled state or record. Terminal <a class="term-ref" href="#term-attempt">attempt</a> rows, SUCCEEDED, and CANCELLED are never reopened or overwritten; a terminal FAILED stage stays FAILED unless an explicit operator <a class="term-ref" href="#term-retry">retry</a> or <a class="term-ref" href="#term-cancellation">cancellation</a> supersedes it — the platform never reopens a terminal state on its own.</td></tr>
+    <tr><td><dfn class="term-name" id="term-idempotent">Idempotent</dfn></td><td>A property of an operation that, when the same call is replayed, safely does nothing further or self-heals rather than duplicating its effect.</td></tr>
+    <tr><td><dfn class="term-name" id="term-durability">Durability</dfn></td><td>The property that an interrupted stage body resumes under one fixed <a class="term-ref" href="#term-attempt">attempt</a> identity after a crash, without creating a new attempt (DBOS replay).</td></tr>
+    <tr><td><dfn class="term-name" id="term-colocation">Colocation</dfn></td><td>The platform's tables and the DBOS system schema sharing one PostgreSQL database, so stage outcome and the next stage can commit in a single transaction.</td></tr>
+    <tr><td><dfn class="term-name" id="term-pipeline-definition">Pipeline Definition</dfn></td><td>One immutable, versioned, non-empty ordered sequence of <a class="term-ref" href="#term-pipeline-stage">pipeline stages</a> declaring a linear pipeline, identified by a pipeline key plus a positive integer version and validated to have unique stage keys.</td></tr>
+    <tr><td><dfn class="term-name" id="term-pipeline-stage">Pipeline Stage</dfn></td><td>One ordered scheduling-and-durability step in a linear pipeline, naming an application-owned <a class="term-ref" href="#term-queue">queue</a>, a stage callable, and an <code>args_for</code> adapter that turns immutable submission facts into <a class="term-ref" href="#term-workflow">workflow</a> arguments; it is never a graph node.</td></tr>
+    <tr><td><dfn class="term-name" id="term-pipeline-identity">Pipeline Identity</dfn></td><td>The pipeline key and version pair that identifies one immutable <a class="term-ref" href="#term-pipeline-definition">pipeline definition</a> across the registry; a small frozen value carrying the key and version, not a <a class="term-ref" href="#term-reference">reference</a> or hash.</td></tr>
+    <tr><td><dfn class="term-name" id="term-pipeline-registry">Pipeline Registry</dfn></td><td>An in-memory registry, populated from authoritative startup declarations, that maps each <a class="term-ref" href="#term-pipeline-identity">pipeline identity</a> to exactly one <a class="term-ref" href="#term-pipeline-definition">pipeline definition</a>; re-registering a differing definition for the same identity conflicts.</td></tr>
+    <tr><td><dfn class="term-name" id="term-campaign">Campaign</dfn></td><td>An application namespace grouping related logical <a class="term-ref" href="#term-work">work</a>, keyed by a validated campaign key; the platform's top-level scope for submission and inspection.</td></tr>
+    <tr><td><dfn class="term-name" id="term-submission-run">Submission Run</dfn></td><td>One immutable submission invocation of a pipeline into a <a class="term-ref" href="#term-campaign">campaign</a>, identified by a run key and carrying an immutable pipeline version and a configuration <a class="term-ref" href="#term-reference">reference</a>; replaying the same run key with the same immutable facts resumes safely, while conflicting facts raise a run conflict.</td></tr>
+    <tr><td><dfn class="term-name" id="term-input-reference">Input Reference</dfn></td><td>The opaque transport <a class="term-ref" href="#term-reference">reference</a> that identifies the caller's work request; the platform stores it and passes it through admission but never interprets or resolves it.</td></tr>
+    <tr><td><dfn class="term-name" id="term-output-reference">Output Reference</dfn></td><td>A non-empty immutable <a class="term-ref" href="#term-reference">reference</a> returned by a successful stage callable and recorded on the <a class="term-ref" href="#term-stage-execution">stage execution</a>; the platform stores it as evidence but never interprets or resolves it, and a failed stage may not store one.</td></tr>
+    <tr><td><dfn class="term-name" id="term-label">Label</dfn></td><td>An application-supplied string key and value carried on one unit of <a class="term-ref" href="#term-work">work</a>, used only for exact-match <a class="term-ref" href="#term-selector">selector</a> control; the platform never interprets what a label means.</td></tr>
+    <tr><td><dfn class="term-name" id="term-work-input">Work Input</dfn></td><td>One validated, immutable item at the submission boundary carrying a work key, a non-empty <a class="term-ref" href="#term-input-reference">input reference</a> string, and a <a class="term-ref" href="#term-label">label</a> mapping; the same values can arrive from any source transport.</td></tr>
+    <tr><td><dfn class="term-name" id="term-work-item">Work Item</dfn></td><td>One unit of platform-scheduled logical <a class="term-ref" href="#term-work">work</a>, unique within a <a class="term-ref" href="#term-campaign">campaign</a> by campaign key and work key; the first matching item fixes its immutable <a class="term-ref" href="#term-input-reference">input reference</a> and <a class="term-ref" href="#term-label">labels</a>, and later matching submissions count it as already existing.</td></tr>
+    <tr><td><dfn class="term-name" id="term-stage-execution">Stage Execution</dfn></td><td>One logical execution of one <a class="term-ref" href="#term-pipeline-stage">pipeline stage</a> for one <a class="term-ref" href="#term-work-item">work item</a> across <a class="term-ref" href="#term-attempt">attempts</a>, carrying its state, current attempt, stable admission-ordering position, and optional <a class="term-ref" href="#term-output-reference">output reference</a>; it succeeds only when its completion transaction commits and fails when the application stage callable raises, and also fails or is cancelled when the <a class="term-ref" href="#term-sweep">sweep</a> projects DBOS abandonment onto it.</td></tr>
+    <tr><td><dfn class="term-name" id="term-stage-attempt">Stage Attempt</dfn></td><td>One <a class="term-ref" href="#term-attempt">attempt</a> row in a <a class="term-ref" href="#term-stage-execution">stage execution</a>'s ordered sequence, carrying an attempt number and a DBOS workflow id; admission and terminal fields are filled in place as the attempt advances, terminal fields are written at most once, and the application stage body inside one attempt may be replayed by DBOS.</td></tr>
+    <tr><td><dfn class="term-name" id="term-stage-execution-state">Stage Execution State</dfn></td><td>The logical state of a <a class="term-ref" href="#term-stage-execution">stage execution</a>: one of READY, ADMITTED, SUCCEEDED, FAILED, or CANCELLED, with no RUNNING member. Platform state, not DBOS <a class="term-ref" href="#term-workflow">workflow</a> status, is authoritative for it.</td></tr>
+    <tr><td><dfn class="term-name" id="term-admission">Admission</dfn></td><td>The transactional stage-entry pass in which READY <a class="term-ref" href="#term-work">work</a>, in stable randomized order, is admitted under matching <a class="term-ref" href="#term-control">controls</a> and paused state, with each admitted <a class="term-ref" href="#term-attempt">attempt</a>'s <a class="term-ref" href="#term-workflow">workflow</a> enqueued on the stage's DBOS queue; one bounded pass commits as one transaction, isolating a single unhealthy stage or repeatedly-failing work item from the rest of the pass.</td></tr>
+    <tr><td><dfn class="term-name" id="term-admission-payload">Admission Payload</dfn></td><td>The package-owned, frozen record supplied to a <a class="term-ref" href="#term-pipeline-stage">stage</a>'s <code>args_for</code> at <a class="term-ref" href="#term-admission">admission</a>, containing only routing identity and immutable submission facts — campaign, work, and run keys, the <a class="term-ref" href="#term-input-reference">input reference</a>, labels, pipeline key and version, stage key, and attempt number; the platform never interprets the arguments <code>args_for</code> derives from it.</td></tr>
+    <tr><td><dfn class="term-name" id="term-stage-control">Stage Control</dfn></td><td>A persisted per-stage <a class="term-ref" href="#term-control">control</a> keyed by pipeline key, version, and stage key together with an exact-<a class="term-ref" href="#term-label">label</a> <a class="term-ref" href="#term-selector">selector</a>, carrying a capacity and a paused flag; the empty-selector control is required before a stage admits anything.</td></tr>
+    <tr><td><dfn class="term-name" id="term-selector-capacity">Selector Capacity</dfn></td><td>The maximum concurrent ADMITTED occupancy a matching <a class="term-ref" href="#term-stage-control">stage control</a> allows for work whose <a class="term-ref" href="#term-label">labels</a> satisfy that control's exact-label <a class="term-ref" href="#term-selector">selector</a>; it is desired concurrent occupancy, not a worker count and not a request-rate or token limit.</td></tr>
+    <tr><td><dfn class="term-name" id="term-empty-selector-capacity">Empty-Selector Capacity</dfn></td><td>The required stage-wide <a class="term-ref" href="#term-stage-control">control</a>, whose <a class="term-ref" href="#term-selector">selector</a> is empty, that every declared <a class="term-ref" href="#term-pipeline-stage">stage</a> must have before <a class="term-ref" href="#term-admission">admission</a>; without it the stage's <a class="term-ref" href="#term-work">work</a> is unconfigured and stays unadmitted.</td></tr>
+    <tr><td><dfn class="term-name" id="term-pause">Pause</dfn></td><td>A flag set on an already-existing <a class="term-ref" href="#term-stage-control">stage control</a> that stops <a class="term-ref" href="#term-admission">admission</a> through that control without changing its <a class="term-ref" href="#term-capacity">capacity</a> or interrupting running work; pausing or resuming a never-configured <a class="term-ref" href="#term-selector">selector</a> raises.</td></tr>
+    <tr><td><dfn class="term-name" id="term-scheduled-dispatcher">Scheduled Dispatcher</dfn></td><td>A per-process registration that owns its DBOS client and runs bounded <a class="term-ref" href="#term-admission">admission</a> passes on a schedule, optionally also scheduling the abandoned-stage sweep; it requires every registered pipeline to be a <a class="term-ref" href="#term-wrapped-pipeline">wrapped pipeline</a>, and its registration must stay alive while the runtime runs.</td></tr>
+    <tr><td><dfn class="term-name" id="term-wrapped-pipeline">Wrapped Pipeline</dfn></td><td>The <a class="term-ref" href="#term-pipeline-definition">pipeline definition</a> returned by the wrapper operation, whose stage callables are replaced with package-owned <a class="term-ref" href="#term-workflow">workflows</a> that commit stage outcome and create the next READY stage atomically; only a fully wrapped definition runs the completion transaction, so the execution wiring (<a class="term-ref" href="#term-scheduled-dispatcher">scheduled dispatcher</a> registration) rejects an unwrapped declaration.</td></tr>
+    <tr><td><dfn class="term-name" id="term-stage-handoff">Stage Handoff</dfn></td><td>The single completion transaction in which a succeeding stage's <a class="term-ref" href="#term-terminal">terminal</a> <a class="term-ref" href="#term-attempt">attempt</a>, its <a class="term-ref" href="#term-stage-execution">stage execution</a>'s SUCCEEDED state, and the next linear stage as READY all commit exactly once; a running <a class="term-ref" href="#term-workflow">workflow</a> not matching its persisted current ADMITTED attempt is a handoff mismatch, except that a late completion by the current attempt of a CANCELLED stage is silently discarded — operator <a class="term-ref" href="#term-cancellation">cancellation</a> wins, and the late completion neither rewrites <a class="term-ref" href="#term-terminal">terminal</a> state nor creates the next stage.</td></tr>
+    <tr><td><dfn class="term-name" id="term-retry">Retry</dfn></td><td>The operation that returns a <a class="term-ref" href="#term-terminal">terminal</a> FAILED <a class="term-ref" href="#term-stage-execution">stage execution</a> to READY with exactly one new <a class="term-ref" href="#term-attempt">attempt</a> for later <a class="term-ref" href="#term-admission">admission</a>; only a FAILED stage is eligible, and CANCELLED and all other states are not.</td></tr>
+    <tr><td><dfn class="term-name" id="term-cancellation">Cancellation</dfn></td><td>The operation that makes a <a class="term-ref" href="#term-work-item">work item</a>'s current logical stage <a class="term-ref" href="#term-terminal">terminal</a> (CANCELLED) before delegating cancellation of the exact admitted DBOS <a class="term-ref" href="#term-workflow">workflow</a>; it is non-recursive, permanently prevents the item from being re-admitted or advanced within its <a class="term-ref" href="#term-campaign">campaign</a>, and re-issues an <a class="term-ref" href="#term-idempotent">idempotent</a> delegation when a prior post-commit delegation was lost.</td></tr>
+    <tr><td><dfn class="term-name" id="term-sweep">Sweep</dfn></td><td>The projection that moves currently ADMITTED stages whose DBOS <a class="term-ref" href="#term-workflow">workflow</a> is CANCELLED, errored, or recovery-exhausted into <a class="term-ref" href="#term-terminal">terminal</a> platform state and reclaims their occupancy; it never retries, resumes, replaces, or waits, and platform state remains authoritative.</td></tr>
+    <tr><td><dfn class="term-name" id="term-capacity-occupancy">Capacity Occupancy</dfn></td><td>The count of currently ADMITTED <a class="term-ref" href="#term-stage-execution">stage executions</a> matching a <a class="term-ref" href="#term-control">control</a>'s <a class="term-ref" href="#term-selector">selector</a>, compared against that control's <a class="term-ref" href="#term-capacity">capacity</a> during <a class="term-ref" href="#term-admission">admission</a>; nothing releases occupancy for an abandoned workflow automatically, so the <a class="term-ref" href="#term-sweep">sweep</a> must reclaim it.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="section-head" id="guarantees"><h2>Guarantees</h2></div>
+
+<div class="callout">
+  <strong>Platform State Is Authoritative for Logical Outcome.</strong> The platform's own tables are the source of truth for a <a class="term-ref" href="#term-stage-execution">stage execution</a>'s <a class="term-ref" href="#term-stage-execution-state">state</a>; DBOS <a class="term-ref" href="#term-workflow">workflow</a> status is treated as execution evidence, never as the logical outcome.
+</div>
+<ul>
+  <li><span class="must">Registers</span> only immutable <a class="term-ref" href="#term-pipeline-definition">pipeline definitions</a>, one per <a class="term-ref" href="#term-pipeline-identity">pipeline identity</a>; re-registering a differing definition for the same identity <span class="must">conflicts</span>.</li>
+  <li><span class="must">Rejects</span> wiring a <a class="term-ref" href="#term-scheduled-dispatcher">scheduled dispatcher</a> over a <a class="term-ref" href="#term-pipeline-registry">registry</a> containing a <a class="term-ref" href="#term-pipeline-definition">pipeline</a> that is not a <a class="term-ref" href="#term-wrapped-pipeline">wrapped pipeline</a> — only a wrapped definition runs the completion transaction; a submission-only registry may hold <span class="key">unwrapped declarations</span>.</li>
+  <li><span class="must">Resumes</span> a replayed <a class="term-ref" href="#term-submission-run">submission run</a> with the <span class="key">same immutable facts</span>, and <span class="must">raises</span> a run conflict on conflicting facts; the first matching <a class="term-ref" href="#term-work-item">work item</a> <span class="key">fixes</span> its <a class="term-ref" href="#term-input-reference">input reference</a> and <a class="term-ref" href="#term-label">labels</a>.</li>
+  <li><span class="must">Stores and passes through</span> every <a class="term-ref" href="#term-reference">reference</a> — both <a class="term-ref" href="#term-input-reference">input reference</a> and <a class="term-ref" href="#term-output-reference">output reference</a> — <span class="key">without ever interpreting or resolving it</span>.</li>
+  <li><span class="must">Never admits</span> a <a class="term-ref" href="#term-pipeline-stage">stage</a> that lacks its <a class="term-ref" href="#term-empty-selector-capacity">empty-selector capacity</a>; admission holds ADMITTED <a class="term-ref" href="#term-capacity-occupancy">occupancy</a> at or under each matching <a class="term-ref" href="#term-control">control</a>'s <a class="term-ref" href="#term-capacity">capacity</a>.</li>
+  <li><span class="must">Selects</span> READY work in a <span class="key">stable randomized order</span>, commits <a class="term-ref" href="#term-admission">admission</a> as <span class="key">one bounded pass</span>, and <span class="key">isolates</span> a single unhealthy stage or repeatedly-failing work item from the rest of the pass.</li>
+  <li><span class="must">Stops</span> admission through a <a class="term-ref" href="#term-pause">paused</a> <a class="term-ref" href="#term-stage-control">control</a> without changing its capacity or interrupting running work; pausing or resuming a never-configured <a class="term-ref" href="#term-selector">selector</a> <span class="must">raises</span>.</li>
+  <li><span class="must">Commits</span> each <a class="term-ref" href="#term-stage-handoff">stage handoff</a> — <a class="term-ref" href="#term-terminal">terminal</a> <a class="term-ref" href="#term-attempt">attempt</a>, SUCCEEDED state, and the next READY stage — <span class="key">exactly once</span>, and <span class="must">rejects</span> a workflow that does not match its persisted current ADMITTED attempt as a handoff mismatch — except that a late completion by the current attempt of a <a class="term-ref" href="#term-cancellation">CANCELLED</a> stage is <span class="key">silently discarded</span>, so operator cancellation wins and the late completion neither rewrites terminal state nor creates the next stage.</li>
+  <li><span class="must">Retries</span> only a <a class="term-ref" href="#term-terminal">terminal</a> FAILED <a class="term-ref" href="#term-stage-execution">stage execution</a>, preparing exactly one new attempt back to READY; CANCELLED and all other states are <span class="key">ineligible</span>.</li>
+  <li><a class="term-ref" href="#term-cancellation">Cancellation</a> is <span class="key">non-recursive</span>, permanently <span class="key">prevents</span> the item from being re-admitted or advanced within its <a class="term-ref" href="#term-campaign">campaign</a>, and re-issues an <a class="term-ref" href="#term-idempotent">idempotent</a> delegation when a prior one was lost.</li>
+  <li>The <a class="term-ref" href="#term-sweep">sweep</a> <span class="must">never</span> retries, resumes, replaces, or waits — it only projects abandoned ADMITTED stages into <a class="term-ref" href="#term-terminal">terminal</a> state and reclaims their <a class="term-ref" href="#term-capacity-occupancy">occupancy</a>.</li>
+  <li><span class="must">Records</span> an <a class="term-ref" href="#term-output-reference">output reference</a> only on a <span class="key">successful</span> stage; a <span class="key">failed</span> stage may not store one.</li>
+</ul>
+
+<div class="section-head" id="scope"><h2>In vs. Out of Scope</h2></div>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>In scope</th><th>Out of scope</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>
+        <ul>
+          <li>Immutable versioned <a class="term-ref" href="#term-pipeline-definition">pipeline definition</a> and <a class="term-ref" href="#term-pipeline-registry">registry</a></li>
+          <li>Durable streaming <a class="term-ref" href="#term-submission-run">submission</a> and <a class="term-ref" href="#term-work-item">work-item</a> admission</li>
+          <li><a class="term-ref" href="#term-selector-capacity">Selector-capacity</a> and <a class="term-ref" href="#term-empty-selector-capacity">empty-selector</a> controls, <a class="term-ref" href="#term-pause">pause</a>, and resume</li>
+          <li><a class="term-ref" href="#term-admission">Admission</a>, <a class="term-ref" href="#term-stage-handoff">stage handoff</a>, <a class="term-ref" href="#term-retry">retry</a>, <a class="term-ref" href="#term-cancellation">cancellation</a>, and <a class="term-ref" href="#term-sweep">sweep</a></li>
+          <li><a class="term-ref" href="#term-campaign">Campaign</a>, run, and stage inspection</li>
+          <li>Domain-neutral DBOS durability and <a class="term-ref" href="#term-colocation">colocation</a></li>
+          <li>Schema management and telemetry initialization</li>
+        </ul>
+      </td>
+      <td>
+        <ul>
+          <li>Interpreting application payloads</li>
+          <li>Resolving input or <a class="term-ref" href="#term-output-reference">output references</a></li>
+          <li>Persisting or binding stage results</li>
+          <li>Non-linear pipelines or graph nodes</li>
+          <li>Rollout, provider, graph, or officialness semantics</li>
+          <li>Worker pools and request-rate or token limiting</li>
+        </ul>
+      </td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="section-head" id="exported-names"><h2>Exported Names</h2></div>
+
+<p class="aside">Each row maps a term, or a group of supporting exports, to names in <a href="https://github.com/danielle-rothermel/dr-platform/blob/main/src/dr_platform/__init__.py"><code>dr_platform.__all__</code></a>. Every exported name appears exactly once in the names column; there are no aliases or alternate spellings. The primitives <a class="term-ref" href="#term-work">work</a>, <a class="term-ref" href="#term-reference">reference</a>, <a class="term-ref" href="#term-queue">queue</a>, <a class="term-ref" href="#term-workflow">workflow</a>, <a class="term-ref" href="#term-attempt">attempt</a>, <a class="term-ref" href="#term-control">control</a>, <a class="term-ref" href="#term-selector">selector</a>, <a class="term-ref" href="#term-capacity">capacity</a>, <a class="term-ref" href="#term-terminal">terminal</a>, <a class="term-ref" href="#term-idempotent">idempotent</a>, <a class="term-ref" href="#term-durability">durability</a>, and <a class="term-ref" href="#term-colocation">colocation</a>, along with the terms <a class="term-ref" href="#term-input-reference">input reference</a>, <a class="term-ref" href="#term-output-reference">output reference</a>, <a class="term-ref" href="#term-label">label</a>, <a class="term-ref" href="#term-capacity-occupancy">capacity occupancy</a>, <a class="term-ref" href="#term-selector-capacity">selector capacity</a>, and <a class="term-ref" href="#term-empty-selector-capacity">empty-selector capacity</a>, name concepts rather than exports, so they have no row. <a class="term-ref" href="#term-admission">Admission</a> likewise has no row: it runs inside the <a class="term-ref" href="#term-scheduled-dispatcher">scheduled dispatcher</a> and reports unhealthy stages through its logs rather than raising a catchable exported error.</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Term</th><th>Exported names</th><th>Note</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><a class="term-ref" href="#term-pipeline-definition">Pipeline Definition</a></td>
+      <td><code>PipelineDefinition</code></td>
+      <td>The immutable versioned sequence itself; its <code>identity</code> surfaces the <a class="term-ref" href="#term-pipeline-identity">pipeline identity</a>.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-pipeline-stage">Pipeline Stage</a></td>
+      <td><code>StageDefinition</code></td>
+      <td>One step, naming a <a class="term-ref" href="#term-queue">queue</a>, a stage callable, and its <code>args_for</code> adapter.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-pipeline-identity">Pipeline Identity</a></td>
+      <td><code>PipelineIdentity</code>, <code>PipelineKey</code></td>
+      <td>A frozen key-and-version identity value, surfaced via <code>PipelineDefinition.identity</code>; not a <a class="term-ref" href="#term-reference">reference</a> or hash.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-pipeline-registry">Pipeline Registry</a></td>
+      <td><code>PipelineRegistry</code>, <code>PipelineConflictError</code></td>
+      <td>Re-registering a differing definition for the same <a class="term-ref" href="#term-pipeline-identity">identity</a> raises <code>PipelineConflictError</code>.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-campaign">Campaign</a></td>
+      <td><code>CampaignKey</code>, <code>CampaignSummary</code>, <code>inspect_campaign</code>, <code>list_campaigns</code>, <code>campaign_state_counts</code>, <code>StateCount</code></td>
+      <td><code>inspect_campaign</code> and <code>list_campaigns</code> read campaign identity and aggregates; <code>campaign_state_counts</code> returns per-<a class="term-ref" href="#term-stage-execution-state">state</a> <code>StateCount</code> rows.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-submission-run">Submission Run</a></td>
+      <td><code>RunKey</code>, <code>SubmissionReceipt</code>, <code>submit</code>, <code>RunSummary</code>, <code>list_runs</code>, <code>run_state_counts</code>, <code>PipelineRunConflictError</code></td>
+      <td><code>submit</code> streams <a class="term-ref" href="#term-work-input">work inputs</a> and returns a <code>SubmissionReceipt</code>; conflicting immutable facts for a run key raise <code>PipelineRunConflictError</code>.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-work-input">Work Input</a></td>
+      <td><code>WorkInput</code>, <code>WorkKey</code>, <code>WorkItemConflictError</code></td>
+      <td>The submission-boundary item; a differing input <a class="term-ref" href="#term-reference">reference</a> or <a class="term-ref" href="#term-label">labels</a> for an existing work key raise <code>WorkItemConflictError</code>.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-work-item">Work Item</a></td>
+      <td><code>WorkItemSummary</code>, <code>list_work_items</code>, <code>get_work_item_stages</code>, <code>BulkWorkStatus</code>, <code>BulkStatusResult</code>, <code>bulk_work_statuses</code></td>
+      <td>Readers over scheduled items; <code>bulk_work_statuses</code> returns a <code>BulkStatusResult</code> of per-key <code>BulkWorkStatus</code> rows, and <code>get_work_item_stages</code> lists an item's stage executions.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-stage-execution">Stage Execution</a></td>
+      <td><code>StageKey</code>, <code>StageExecutionSummary</code>, <code>StageExecutionRecord</code></td>
+      <td>The logical execution of one stage for one item; <code>StageExecutionSummary</code> is its reader view, and <code>StageExecutionRecord</code> is the record it carries and that the <a class="term-ref" href="#term-retry">retry</a> and <a class="term-ref" href="#term-cancellation">cancellation</a> results return.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-stage-attempt">Stage Attempt</a></td>
+      <td><code>StageAttemptRecord</code></td>
+      <td>One row in an ordered attempt sequence. Its admission and terminal fields are filled in place at most once as the attempt advances; <code>terminal_reference</code> is the opaque output reference recorded only on success, while <code>terminal_summary</code> is a diagnostic-only mapping (on failure it records the error class name under <code>error_type</code>), not a result payload.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-stage-execution-state">Stage Execution State</a></td>
+      <td><code>StageExecutionState</code></td>
+      <td>READY, ADMITTED, SUCCEEDED, FAILED, or CANCELLED; no RUNNING member.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-admission-payload">Admission Payload</a></td>
+      <td><code>AdmissionPayload</code></td>
+      <td>The frozen per-candidate routing context handed to a stage's <code>args_for</code>; the payload is the input to admission, not the operation.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-stage-control">Stage Control</a></td>
+      <td><code>set_stage_capacity</code>, <code>set_selector_capacity</code>, <code>read_controls</code>, <code>StageControlRecord</code></td>
+      <td><code>set_stage_capacity</code> configures the <a class="term-ref" href="#term-empty-selector-capacity">empty-selector</a> control; <code>set_selector_capacity</code> configures a labeled one. <code>StageControlRecord</code> is the record returned by these capacity and <a class="term-ref" href="#term-pause">pause</a> operations and by <code>read_controls</code>.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-pause">Pause</a></td>
+      <td><code>pause</code>, <code>resume</code></td>
+      <td>Both act on an already-configured <a class="term-ref" href="#term-selector">selector</a>; a never-configured one raises.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-scheduled-dispatcher">Scheduled Dispatcher</a></td>
+      <td><code>register_scheduled_dispatcher</code>, <code>DispatcherRegistration</code>, <code>UnwrappedPipelineError</code></td>
+      <td>Wiring a dispatcher over a <a class="term-ref" href="#term-pipeline-registry">registry</a> containing a pipeline that is not a <a class="term-ref" href="#term-wrapped-pipeline">wrapped pipeline</a> raises <code>UnwrappedPipelineError</code>; the returned <code>DispatcherRegistration</code> must stay alive.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-wrapped-pipeline">Wrapped Pipeline</a></td>
+      <td><code>wrap_pipeline_workflows</code></td>
+      <td>Returns a definition whose stage callables are package-owned <a class="term-ref" href="#term-workflow">workflows</a>.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-stage-handoff">Stage Handoff</a></td>
+      <td><code>StageHandoffMismatchError</code></td>
+      <td>Raised when a running workflow does not match its persisted current ADMITTED <a class="term-ref" href="#term-attempt">attempt</a>.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-retry">Retry</a></td>
+      <td><code>retry_stage</code>, <code>StageRetryResult</code></td>
+      <td><code>retry_stage</code> returns a <code>StageRetryResult</code>.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-cancellation">Cancellation</a></td>
+      <td><code>cancel_work</code>, <code>WorkCancellationResult</code>, <code>CancellationDisposition</code>, <code>WorkflowCanceller</code></td>
+      <td><code>cancel_work</code> makes the current stage CANCELLED then delegates to a <code>WorkflowCanceller</code>; the <code>CancellationDisposition</code> on the <code>WorkCancellationResult</code> records what happened.</td>
+    </tr>
+    <tr>
+      <td><a class="term-ref" href="#term-sweep">Sweep</a></td>
+      <td><code>sweep_abandoned_stages</code>, <code>SweepProjection</code>, <code>SweepSummary</code></td>
+      <td><code>sweep_abandoned_stages</code> returns a <code>SweepSummary</code> of <code>SweepProjection</code> rows.</td>
+    </tr>
+    <tr>
+      <td>Runtime and schema</td>
+      <td><code>PlatformDbosConfig</code>, <code>build_platform_dbos_config</code>, <code>initialize_dbos_runtime</code>, <code>upgrade_platform_schema</code>, <code>StagingSchema</code></td>
+      <td>DBOS runtime configuration and the schema baseline that colocates platform tables with the DBOS system schema. <code>StagingSchema</code> is the prefix-configurable table set every operation accepts, defaulting to the <code>platform</code> prefix.</td>
+    </tr>
+    <tr>
+      <td>Telemetry</td>
+      <td><code>initialize_telemetry_safely</code>, <code>TelemetryInitializationResult</code></td>
+      <td>Best-effort telemetry setup; the result records whether initialization succeeded.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="colophon">
+  <p><strong>Scope.</strong> This sheet is the authoritative statement of the staged-work pipeline contract dr-platform implements. Exported names match <code>src/dr_platform/__init__.py</code>.</p>
+</div>
+
+</main>
+</body>
+</html>

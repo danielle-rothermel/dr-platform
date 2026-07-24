@@ -1,7 +1,7 @@
 [project]
 name = "dr-platform"
 version = "0.1.0"
-description = "Conventions on top of DBOS for running large sweeps of durable work."
+description = "A durable staged-work funnel built on PostgreSQL and DBOS."
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -41,11 +41,6 @@ dev = [
     "ruff>=0.15.18",
     "ty>=0.0.51",
 ]
-
-# dr-* libs are not on PyPI; sources track main and uv.lock pins the exact
-# commit. Refresh with `uv lock --upgrade-package <name>`.
-[tool.uv.sources]
-dr-serialize = { git = "https://github.com/danielle-rothermel/dr-serialize", branch = "main" }
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src"]

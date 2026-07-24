@@ -120,9 +120,7 @@ def get_pipeline_run(
     table = selected_schema.pipeline_runs
     row = (
         connection.execute(
-            table.select().where(
-                table.c.run_key == normalized_run_key.value
-            )
+            table.select().where(table.c.run_key == normalized_run_key.value)
         )
         .mappings()
         .one_or_none()

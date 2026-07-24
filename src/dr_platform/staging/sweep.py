@@ -136,9 +136,7 @@ def sweep_abandoned_stages(
                 "dbos_status": status.status,
             }
             if status.error is not None:
-                terminal_summary["message"] = _safe_error_message(
-                    status.error
-                )
+                terminal_summary["message"] = _safe_error_message(status.error)
             # Read the clock per projection: pages commit separately, so a
             # single up-front timestamp can fall behind a row bumped after the
             # sweep started and drive updated_at backwards.
