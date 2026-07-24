@@ -1,5 +1,8 @@
 # dr-platform
 
+[![CI](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/dr-platform.svg)](https://pypi.org/project/dr-platform/)
+
 `dr-platform` is an alpha staged-work funnel built on PostgreSQL and DBOS. It
 accepts application-owned work as a stream, moves each item through a linear
 pipeline, and exposes durable controls and inspection. The public API is under
@@ -25,6 +28,28 @@ The [vocabulary sheet](https://danielle-rothermel.github.io/dr-platform/)
 staged-work pipeline contract this repo implements: the terms, the
 guarantees, what is in and out of scope, and the mapping from each term to
 the exported names.
+
+## Installation
+
+```console
+pip install dr-platform
+```
+
+```console
+uv add dr-platform
+```
+
+`dr-platform` requires Python >= 3.12 and a PostgreSQL database. The library
+creates its schema in that database and colocates with the DBOS system schema;
+see [Operational preconditions](#operational-preconditions) for the colocation
+requirement and migration lineage.
+
+`dr-platform` pins its DBOS dependency to an exact version
+(`dbos[otel]==2.27.0`).
+The package couples to DBOS internals, and recovery and sweep behavior is
+validated against exactly this release, so each `dr-platform` release pins the
+DBOS version it was proven against. Consumers get the exact combination that
+was tested.
 
 ## Pipeline and execution model
 
@@ -313,6 +338,22 @@ startup failures are not fail-open.
 
 ## Development
 
-Install the locked environment with `uv sync`. The repository checks are
-`uv run ruff check .`, `uv run ty check`, and
-`uv run pytest -q`.
+Clone the repository and install the locked environment:
+
+```console
+git clone https://github.com/danielle-rothermel/dr-platform
+cd dr-platform
+uv sync
+uv run pre-commit install
+```
+
+The test suite needs a PostgreSQL database. Create the default with
+`createdb dr_platform_test`, or set `DR_PLATFORM_TEST_DATABASE_URL` to any
+PostgreSQL database whose name ends in `_test`; the suite refuses other names
+and resets the database destructively between tests. Then run the checks:
+
+```console
+uv run ruff check .
+uv run ty check
+uv run pytest
+```

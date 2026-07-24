@@ -12,8 +12,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ci:
+  test:
     runs-on: depot-ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     services:
       postgres:
         image: postgres:16
@@ -37,7 +41,7 @@ jobs:
           echo "DR_PLATFORM_TEST_DATABASE_URL=postgresql+psycopg://postgres:postgres@${postgres_ip}:5432/dr_platform_test" >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@v8.3.1
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run ty check
@@ -52,3 +56,20 @@ jobs:
           print('postgres reachable')
           "
       - run: uv run pytest -q
+
+  # Branch protection on main requires the exact status check context 'ci'.
+  # The matrix above produces 'test (3.12)'/'test (3.13)' contexts instead, so
+  # this aggregate gate republishes a single 'ci' check that passes only when
+  # every matrix job succeeded. It runs on a cheap runner (no Depot minutes).
+  ci:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all matrix jobs to succeed
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "test matrix result: ${{ needs.test.result }}"
+            exit 1
+          fi
+          echo "all matrix jobs succeeded"
