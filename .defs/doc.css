@@ -146,6 +146,7 @@ table { width: 100%; border: 1px solid var(--line); border-collapse: collapse; b
 th, td { padding: 8px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 th { background: #f1f4f9; color: var(--muted); font: 600 11.5px/1.4 var(--font-system); letter-spacing: .06em; text-transform: uppercase; }
 tr:last-child td { border-bottom: 0; }
+.table-wrap { overflow-x: auto; }
 
 code {
   padding: 0 5px;

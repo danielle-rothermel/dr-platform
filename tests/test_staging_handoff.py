@@ -11,12 +11,11 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
-from dbos import DBOS, DBOSClient, DBOSConfig, EnqueueOptions, Queue
+from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
 from sqlalchemy import Engine, func, select
 
 import dr_platform.staging.operations as staging_operations
 import dr_platform.staging.sweep as staging_sweep
-from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
     CampaignKey,
     CampaignWorkIdentity,
@@ -29,7 +28,7 @@ from dr_platform.staging import (
     WorkKey,
     stable_random_rank,
 )
-from dr_platform.staging.admission import AdmissionPayload, run_admission_pass
+from dr_platform.staging.admission import run_admission_pass
 from dr_platform.staging.controls import upsert_stage_control
 from dr_platform.staging.handoff import (
     StageHandoffMismatchError,
@@ -41,23 +40,26 @@ from dr_platform.staging.operations import (
     WorkCancellationResult,
     cancel_work,
 )
-from dr_platform.staging.schema import StagingSchema
 from dr_platform.staging.submission import WorkInput, submit
 from dr_platform.staging.sweep import sweep_abandoned_stages
-from tests.conftest import engine_dsn
+from tests.conftest import (
+    _args_for,
+    _as_dbos_client,
+    _migrate,
+    _RecordingCanceller,
+    dbos_config,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from sqlalchemy import Connection
 
+    from dr_platform.staging.schema import StagingSchema
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_reference,)
 
 
 def _pipeline(
@@ -78,11 +80,6 @@ def _pipeline(
             for stage_key, logic in stage_logic
         ),
     )
-
-
-def _migrate(engine: Engine) -> StagingSchema:
-    upgrade_platform_schema(engine_dsn(engine))
-    return StagingSchema()
 
 
 def _configure_controls(
@@ -128,16 +125,17 @@ def _submit_items(  # noqa: PLR0913 -- explicit submission facts
 
 
 def _launch_dbos(database_url: str, *, suffix: str) -> None:
-    config: DBOSConfig = {
-        "name": f"drp-handoff-{suffix}",
-        "system_database_url": database_url,
-        "application_database_url": database_url,
-        "application_version": f"handoff-{suffix}",
-        "run_admin_server": False,
-        "use_listen_notify": False,
-        "notification_listener_polling_interval_sec": 0.01,
-    }
-    DBOS(config=config)
+    # Launch and keep DBOS running; each caller tears it down in its own
+    # finally alongside the DBOSClient it opened.
+    DBOS(
+        config=dbos_config(
+            name=f"drp-handoff-{suffix}",
+            system_database_url=database_url,
+            application_database_url=database_url,
+            application_version=f"handoff-{suffix}",
+            notification_listener_polling_interval_sec=0.01,
+        )
+    )
     DBOS.launch()
 
 
@@ -193,6 +191,9 @@ def _stage_state_count(
         ).scalar_one()
 
 
+# This variant records the enqueue args alongside the options; the
+# options-only _RecordingClient in the operations/inspection suites is a
+# distinct shape.
 class _RecordingClient:
     def __init__(self) -> None:
         self.enqueued: list[tuple[EnqueueOptions, tuple[object, ...]]] = []
@@ -206,10 +207,6 @@ class _RecordingClient:
     ) -> object:
         self.enqueued.append((cast("EnqueueOptions", dict(options)), args))
         return object()
-
-
-def _as_dbos_client(client: object) -> DBOSClient:
-    return cast("DBOSClient", client)
 
 
 def _recorded_workflow_id(options: EnqueueOptions) -> str:
@@ -548,13 +545,13 @@ def test_completion_identity_mismatch_does_not_mutate_state(
     assert _handoff_snapshot(pg_engine, schema) == before
 
 
-# The exact encoded typed Object Reference whetstone binds for a terminal
-# Rollout Result: a declared schema plus a 64-char content_hash.  dr-platform
-# transports it in ``output_reference``/``terminal_reference`` without ever
-# interpreting the embedded scheme, query separators, or hash.
+# An oddly shaped opaque output reference: a scheme, path, query separators,
+# and a 64-char hex tail.  dr-platform transports it byte-for-byte in
+# ``output_reference``/``terminal_reference`` without ever parsing the scheme,
+# the query separators, or the trailing digest.
 _TERMINAL_OBJECT_REFERENCE = (
-    "objref://rollout-result/v3"
-    "?schema=whetstone.rollout_result"
+    "objref://terminal-result/v3"
+    "?schema=terminal_result"
     "&schema_version=7"
     "&content_hash="
     "2c624232cdd221771294dfbb310aca000a0df6ac8b66b696d90ef06fdefb64a3"
@@ -564,11 +561,11 @@ _TERMINAL_OBJECT_REFERENCE = (
 def test_output_reference_is_transported_opaquely_without_parsing(
     pg_engine: Engine,
 ) -> None:
-    """A terminal Object Reference round-trips byte-for-byte, unparsed.
+    """A terminal output reference round-trips byte-for-byte, unparsed.
 
     A succeeding stage's ``output_reference`` and its attempt
     ``terminal_reference`` preserve the exact encoded string; dr-platform never
-    parses, resolves, or reconstructs the stored Rollout Result behind it.
+    parses, resolves, or reconstructs whatever the reference points at.
     """
     schema = _migrate(pg_engine)
     pipeline = _pipeline(
@@ -577,27 +574,13 @@ def test_output_reference_is_transported_opaquely_without_parsing(
             ("execute", lambda input_reference: f"output:{input_reference}"),
         ),
     )
-    registry = PipelineRegistry()
-    registry.register(pipeline)
-    _configure_controls(pg_engine, pipeline, capacity=1)
-    _submit_items(
+    workflow_id, _stage_execution_id, _work_item_id = _submit_and_admit_one(
         pg_engine,
-        registry,
+        schema,
         pipeline,
         campaign_key="campaign-opaque-output",
         run_key="run-opaque-output",
-        items=(
-            WorkInput(work_key="work", input_reference="input", labels={}),
-        ),
     )
-    admission_client = _RecordingClient()
-    run_admission_pass(
-        pg_engine,
-        client=_as_dbos_client(admission_client),
-        registry=registry,
-        clock=_utc_now,
-    )
-    workflow_id = _recorded_workflow_id(admission_client.enqueued[0][0])
 
     with pg_engine.begin() as connection:
         _complete_stage_in_transaction(
@@ -848,7 +831,8 @@ def test_invalid_application_output_lands_failed_without_a_successor(
             "output-reference string"
         ),
     }
-    assert attempt.terminal_reference == "builtins.ValueError"
+    assert attempt.terminal_reference is None
+    assert attempt.terminal_summary["error_type"] == "builtins.ValueError"
 
 
 class _UnprintableError(RuntimeError):
@@ -961,19 +945,6 @@ class _BarrierStatusClient:
         return [self._status]
 
 
-class _RecordingCanceller:
-    def __init__(self) -> None:
-        self.cancelled: list[tuple[str, bool]] = []
-
-    def cancel_workflow(
-        self,
-        workflow_id: str,
-        *,
-        cancel_children: bool = False,
-    ) -> None:
-        self.cancelled.append((workflow_id, cancel_children))
-
-
 class _PagingStatusClient:
     """Return only the statuses whose ids are in the requested page.
 
@@ -1022,6 +993,33 @@ def _commit_successful_handoff(
             completed_at=completed_at,
             before_next_stage=before_next_stage,
         )
+
+
+def _release_after_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    barrier: Barrier,
+) -> None:
+    """Let the sweep project a terminal status, then release the barrier.
+
+    The competing handoff/cancellation waits on the same barrier, so this pins
+    the sweep as the first writer before the other path re-locks the attempt.
+    """
+    project = cast(
+        "Callable[..., bool]",
+        staging_sweep._project_terminal_status,
+    )
+
+    def project_then_release(*args: object, **kwargs: object) -> bool:
+        applied = project(*args, **kwargs)
+        assert applied
+        barrier.wait(timeout=10)
+        return applied
+
+    monkeypatch.setattr(
+        staging_sweep,
+        "_project_terminal_status",
+        project_then_release,
+    )
 
 
 @pytest.mark.parametrize("winner", ["handoff", "sweep"])
@@ -1076,25 +1074,7 @@ def test_sweep_race_with_successful_handoff_has_one_terminal_outcome(
             )
             handoff.result()
         else:
-            project = cast(
-                "Callable[..., bool]",
-                staging_sweep._project_terminal_status,
-            )
-
-            def project_then_release(
-                *args: object,
-                **kwargs: object,
-            ) -> bool:
-                applied = project(*args, **kwargs)
-                assert applied
-                barrier.wait(timeout=10)
-                return applied
-
-            monkeypatch.setattr(
-                staging_sweep,
-                "_project_terminal_status",
-                project_then_release,
-            )
+            _release_after_projection(monkeypatch, barrier)
 
             def handoff_after_projection() -> None:
                 barrier.wait(timeout=10)
@@ -1218,25 +1198,7 @@ def test_sweep_race_with_operator_cancellation_has_one_terminal_outcome(
             )
             result = cancellation.result()
         else:
-            project = cast(
-                "Callable[..., bool]",
-                staging_sweep._project_terminal_status,
-            )
-
-            def project_then_release(
-                *args: object,
-                **kwargs: object,
-            ) -> bool:
-                applied = project(*args, **kwargs)
-                assert applied
-                barrier.wait(timeout=10)
-                return applied
-
-            monkeypatch.setattr(
-                staging_sweep,
-                "_project_terminal_status",
-                project_then_release,
-            )
+            _release_after_projection(monkeypatch, barrier)
 
             def cancel_after_projection() -> WorkCancellationResult:
                 barrier.wait(timeout=10)

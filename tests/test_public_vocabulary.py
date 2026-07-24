@@ -1,5 +1,8 @@
 """Explicit contract for the public root namespace."""
 
+import re
+from pathlib import Path
+
 import dr_platform
 from dr_platform import db, dbos_config, telemetry
 from dr_platform.staging import (
@@ -93,3 +96,42 @@ def test_root_exports_are_the_public_contract() -> None:
 def test_root_exports_are_bound_to_the_contract_objects() -> None:
     for name, expected in _ROOT_BINDINGS.items():
         assert getattr(dr_platform, name) is expected
+
+
+_VOCAB_HTML = Path(__file__).resolve().parents[1] / ".defs" / "vocab.html"
+
+
+def _exported_names_from_vocab_sheet() -> list[str]:
+    # Parse the Exported Names table's names column (the second <td> of each
+    # body row): every exported name must appear there exactly once, per the
+    # sheet's own claim. The Note column also holds <code> tokens, so only the
+    # names column is read. A missing section or empty parse fails loudly.
+    html = _VOCAB_HTML.read_text(encoding="utf-8")
+    anchor = 'id="exported-names"'
+    assert anchor in html, f"exported-names section not found in {_VOCAB_HTML}"
+    section = html[html.index(anchor) :]
+    body = re.search(r"<tbody>(.*?)</tbody>", section, re.DOTALL)
+    assert body is not None, "exported-names table body not found"
+    rows = re.findall(r"<tr>(.*?)</tr>", body.group(1), re.DOTALL)
+    assert rows, "exported-names table has no rows"
+    names: list[str] = []
+    for row in rows:
+        cells = re.findall(r"<td>(.*?)</td>", row, re.DOTALL)
+        assert len(cells) >= 2, "exported-names row missing a names column"
+        names += re.findall(r"<code>([^<]+)</code>", cells[1])
+    names = [name.strip() for name in names]
+    assert names, "exported-names table parsed no names"
+    return names
+
+
+def test_vocab_sheet_names_column_has_no_duplicates() -> None:
+    names = _exported_names_from_vocab_sheet()
+    assert len(names) == len(set(names))
+
+
+def test_vocab_sheet_names_match_root_exports_both_directions() -> None:
+    names = set(_exported_names_from_vocab_sheet())
+    exported = set(dr_platform.__all__)
+    assert names - exported == set(), "vocab sheet names not in __all__"
+    assert exported - names == set(), "__all__ names missing from vocab sheet"
+    assert names == exported

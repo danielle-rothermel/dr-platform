@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -16,6 +16,7 @@ from sqlalchemy import (
     Engine,
     Integer,
     Text,
+    bindparam,
     inspect,
     text,
 )
@@ -51,7 +52,7 @@ from dr_platform.staging.stage_executions import (
 )
 from dr_platform.staging.states import StageExecutionState
 from dr_platform.staging.work_items import insert_work_item
-from tests.conftest import engine_dsn
+from tests.conftest import NOW, engine_dsn
 
 if TYPE_CHECKING:
     from dr_platform.staging.records import (
@@ -67,7 +68,6 @@ STAGING_TABLE_SUFFIXES = (
     "stage_controls",
 )
 STAGING_TABLES = {f"platform_{suffix}" for suffix in STAGING_TABLE_SUFFIXES}
-NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +81,9 @@ class _ColumnInventory:
 
 @dataclass(frozen=True, slots=True)
 class _TableInventory:
-    columns: tuple[_ColumnInventory, ...]
+    # Column set parity is semantic; declaration order is not. Primary-key
+    # and index column order below stay ordered because they are semantic.
+    columns: frozenset[_ColumnInventory]
     primary_key: tuple[str, ...]
     unique_constraints: frozenset[tuple[str, tuple[str, ...]]]
     check_constraints: frozenset[tuple[str, str]]
@@ -182,7 +184,7 @@ def _table_inventory(
     indexes = inspector.get_indexes(table)
 
     return _TableInventory(
-        columns=tuple(
+        columns=frozenset(
             _column_inventory(column)
             for column in inspector.get_columns(table)
         ),
@@ -272,6 +274,9 @@ def _trigger_inventory(
     *,
     prefix: str,
 ) -> frozenset[_TriggerInventory]:
+    scoped_tables = tuple(
+        f"{prefix}_{suffix}" for suffix in STAGING_TABLE_SUFFIXES
+    )
     with engine.connect() as connection:
         rows = connection.execute(
             text(
@@ -290,10 +295,10 @@ def _trigger_inventory(
                     ON function.oid = trigger.tgfoid
                 WHERE NOT trigger.tgisinternal
                     AND namespace.nspname = current_schema()
-                    AND relation.relname = :pipeline_runs
+                    AND relation.relname IN :scoped_tables
                 """
-            ),
-            {"pipeline_runs": f"{prefix}_pipeline_runs"},
+            ).bindparams(bindparam("scoped_tables", expanding=True)),
+            {"scoped_tables": scoped_tables},
         ).mappings()
         return frozenset(
             _TriggerInventory(

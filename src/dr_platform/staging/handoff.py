@@ -187,7 +187,7 @@ def _wrap_stage_workflow(
                         error, error_type=error_type
                     ),
                 },
-                terminal_reference=error_type,
+                terminal_reference=None,
                 next_stage_key=None,
                 next_stage_index=None,
             )

@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from dbos import DBOSClient, EnqueueOptions
+from dbos import EnqueueOptions
 from sqlalchemy import Engine, event, func, select
 
-from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
     PipelineDefinition,
     PipelineIdentity,
@@ -21,7 +20,7 @@ from dr_platform.staging import (
     StageKey,
     WorkKey,
 )
-from dr_platform.staging.admission import AdmissionPayload, run_admission_pass
+from dr_platform.staging.admission import run_admission_pass
 from dr_platform.staging.inspection import (
     StateCount,
     bulk_work_statuses,
@@ -39,7 +38,6 @@ from dr_platform.staging.operations import (
     set_selector_capacity,
     set_stage_capacity,
 )
-from dr_platform.staging.schema import StagingSchema
 from dr_platform.staging.stage_attempts import (
     append_stage_attempt,
     record_stage_attempt_terminal,
@@ -49,20 +47,21 @@ from dr_platform.staging.stage_executions import (
     transition_stage_execution,
 )
 from dr_platform.staging.submission import WorkInput, submit
-from tests.conftest import engine_dsn
+from tests.conftest import (
+    NOW,
+    _args_for,
+    _as_dbos_client,
+    _migrate,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection
 
-NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
+    from dr_platform.staging.schema import StagingSchema
 
 
 def _workflow(input_reference: str) -> str:
     return f"output:{input_reference}"
-
-
-def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_reference,)
 
 
 def _registry(*, two_stages: bool = False) -> PipelineRegistry:
@@ -92,11 +91,6 @@ def _registry(*, two_stages: bool = False) -> PipelineRegistry:
         )
     )
     return registry
-
-
-def _migrate(engine: Engine) -> StagingSchema:
-    upgrade_platform_schema(engine_dsn(engine))
-    return StagingSchema()
 
 
 def _submit(  # noqa: PLR0913 -- explicit desired-state test facts
@@ -154,6 +148,8 @@ def _seed_reader_data(engine: Engine) -> None:
     )
 
 
+# This variant records only the enqueue options; the args-tracking
+# _RecordingClient in the admission/handoff suites is a distinct shape.
 class _RecordingClient:
     def __init__(self) -> None:
         self.enqueued: list[EnqueueOptions] = []
@@ -167,10 +163,6 @@ class _RecordingClient:
     ) -> object:
         self.enqueued.append(cast("EnqueueOptions", dict(options)))
         return object()
-
-
-def _as_dbos_client(client: object) -> DBOSClient:
-    return cast("DBOSClient", client)
 
 
 def _execution_by_work_key(
@@ -452,7 +444,9 @@ def test_list_campaigns_rejects_an_unknown_cursor(
 ) -> None:
     _migrate(pg_engine)
 
-    with pytest.raises(LookupError, match="campaign is unknown: absent"):
+    with pytest.raises(
+        ValueError, match="campaign cursor is unknown among campaigns"
+    ):
         list_campaigns(engine=pg_engine, cursor="absent")
 
 
@@ -534,24 +528,48 @@ def test_list_work_items_rejects_a_cross_campaign_cursor(
         )
 
 
+def _call_list_reader(reader: str, pg_engine: Engine, *, limit: int) -> None:
+    if reader == "campaigns":
+        list_campaigns(engine=pg_engine, limit=limit)
+    elif reader == "runs":
+        list_runs("campaign-a", engine=pg_engine, limit=limit)
+    else:
+        list_work_items("campaign-a", engine=pg_engine, limit=limit)
+
+
 @pytest.mark.parametrize("reader", ["campaigns", "runs", "work-items"])
-@pytest.mark.parametrize("limit", [0, -1, True, 1_001])
-def test_inspection_list_readers_reject_malformed_limits(
+def test_inspection_list_readers_reject_a_non_integer_limit(
+    pg_engine: Engine,
+    reader: str,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(TypeError, match="inspection limit must be an integer"):
+        _call_list_reader(reader, pg_engine, limit=True)
+
+
+@pytest.mark.parametrize("reader", ["campaigns", "runs", "work-items"])
+@pytest.mark.parametrize("limit", [0, -1])
+def test_inspection_list_readers_reject_a_non_positive_limit(
     pg_engine: Engine,
     reader: str,
     limit: int,
 ) -> None:
     _migrate(pg_engine)
 
-    if reader == "campaigns":
-        with pytest.raises(ValueError, match="inspection limit"):
-            list_campaigns(engine=pg_engine, limit=limit)
-    elif reader == "runs":
-        with pytest.raises(ValueError, match="inspection limit"):
-            list_runs("campaign-a", engine=pg_engine, limit=limit)
-    else:
-        with pytest.raises(ValueError, match="inspection limit"):
-            list_work_items("campaign-a", engine=pg_engine, limit=limit)
+    with pytest.raises(ValueError, match="inspection limit must be positive"):
+        _call_list_reader(reader, pg_engine, limit=limit)
+
+
+@pytest.mark.parametrize("reader", ["campaigns", "runs", "work-items"])
+def test_inspection_list_readers_reject_a_limit_above_the_maximum(
+    pg_engine: Engine,
+    reader: str,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(ValueError, match="inspection limit must not exceed"):
+        _call_list_reader(reader, pg_engine, limit=1_001)
 
 
 def test_list_work_items_rejects_a_malformed_state(
@@ -559,9 +577,7 @@ def test_list_work_items_rejects_a_malformed_state(
 ) -> None:
     _migrate(pg_engine)
 
-    with pytest.raises(
-        ValueError, match="state must be a StageExecutionState"
-    ):
+    with pytest.raises(TypeError, match="state must be a StageExecutionState"):
         list_work_items(
             "campaign-a",
             engine=pg_engine,
@@ -798,13 +814,13 @@ def test_bulk_statuses_accepts_empty_input(
         )
 
 
-def test_bulk_statuses_rejects_a_malformed_chunk_size(
+def test_bulk_statuses_rejects_a_non_integer_chunk_size(
     pg_engine: Engine,
 ) -> None:
     _migrate(pg_engine)
 
     with pytest.raises(
-        ValueError,
+        TypeError,
         match="bulk status chunk size must be an integer",
     ):
         bulk_work_statuses(
@@ -812,6 +828,25 @@ def test_bulk_statuses_rejects_a_malformed_chunk_size(
             ("work",),
             engine=pg_engine,
             chunk_size=True,
+        )
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_bulk_statuses_rejects_a_non_positive_chunk_size(
+    pg_engine: Engine,
+    chunk_size: int,
+) -> None:
+    _migrate(pg_engine)
+
+    with pytest.raises(
+        ValueError,
+        match="bulk status chunk size must be positive",
+    ):
+        bulk_work_statuses(
+            "campaign",
+            ("work",),
+            engine=pg_engine,
+            chunk_size=chunk_size,
         )
 
 

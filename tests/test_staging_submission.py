@@ -10,7 +10,6 @@ from threading import Barrier
 import pytest
 from sqlalchemy import Engine, create_engine, func, select
 
-from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
     PipelineDefinition,
     PipelineKey,
@@ -23,16 +22,13 @@ from dr_platform.staging.runs import (
     PipelineRunConflictError,
     get_pipeline_run,
 )
-from dr_platform.staging.schema import StagingSchema
 from dr_platform.staging.submission import (
     SubmissionReceipt,
     WorkInput,
     submit,
 )
 from dr_platform.staging.work_items import WorkItemConflictError
-from tests.conftest import engine_dsn
-
-NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
+from tests.conftest import NOW, _migrate, engine_dsn
 
 
 def _workflow(*args: object) -> object:
@@ -73,11 +69,6 @@ def _item(index: int) -> WorkInput:
         input_reference=f"input:{index}",
         labels={"cohort": "blue"},
     )
-
-
-def _migrate(engine: Engine) -> StagingSchema:
-    upgrade_platform_schema(engine_dsn(engine))
-    return StagingSchema()
 
 
 def _submit_after_barrier(
@@ -687,26 +678,69 @@ def test_input_reference_is_transported_opaquely_without_parsing(
     assert stored == _TYPED_OBJECT_REFERENCE
 
 
-def test_work_input_never_validates_reference_structure() -> None:
-    """The submission boundary accepts any non-empty reference string.
-
-    Opacity means dr-platform imposes no schema, scheme, delimiter, hash
-    length, or well-formedness requirement on the transported reference; only
-    emptiness is rejected, and the accepted value is preserved unchanged.
-    """
-    for opaque in (
+@pytest.mark.parametrize(
+    "opaque",
+    [
         "x",
         _TYPED_OBJECT_REFERENCE,
         "not-a-reference-at-all",
         "objref://missing-content-hash",
         '{"looks":"like json","but":"is not parsed"}',
-    ):
-        assert (
-            WorkInput(
-                work_key="work", input_reference=opaque, labels={}
-            ).input_reference
-            == opaque
-        )
+    ],
+)
+def test_work_input_never_validates_reference_structure(opaque: str) -> None:
+    """The submission boundary accepts any non-empty reference string.
 
+    Opacity means dr-platform imposes no schema, scheme, delimiter, hash
+    length, or well-formedness requirement on the transported reference; the
+    accepted value is preserved unchanged.
+    """
+    assert (
+        WorkInput(
+            work_key="work", input_reference=opaque, labels={}
+        ).input_reference
+        == opaque
+    )
+
+
+def test_work_input_rejects_an_empty_reference() -> None:
     with pytest.raises(ValueError, match="input reference"):
         WorkInput(work_key="work", input_reference="", labels={})
+
+
+def test_submit_rejects_a_non_integer_chunk_size(pg_engine: Engine) -> None:
+    registry, pipeline = _registry()
+
+    with pytest.raises(TypeError, match="chunk size must be an integer"):
+        submit(
+            campaign_key="campaign-1",
+            run_key="run-1",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:1",
+            items=(_item(0),),
+            registry=registry,
+            engine=pg_engine,
+            chunk_size=True,
+            clock=lambda: NOW,
+        )
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_submit_rejects_a_non_positive_chunk_size(
+    pg_engine: Engine,
+    chunk_size: int,
+) -> None:
+    registry, pipeline = _registry()
+
+    with pytest.raises(ValueError, match="chunk size must be positive"):
+        submit(
+            campaign_key="campaign-1",
+            run_key="run-1",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:1",
+            items=(_item(0),),
+            registry=registry,
+            engine=pg_engine,
+            chunk_size=chunk_size,
+            clock=lambda: NOW,
+        )

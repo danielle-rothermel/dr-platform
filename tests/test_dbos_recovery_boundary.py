@@ -19,19 +19,20 @@ from dr_platform.staging import (
     StageExecutionState,
     StageKey,
 )
-from dr_platform.staging.admission import AdmissionPayload, run_admission_pass
+from dr_platform.staging.admission import run_admission_pass
 from dr_platform.staging.handoff import wrap_pipeline_workflows
 from dr_platform.staging.operations import set_stage_capacity
 from dr_platform.staging.schema import StagingSchema
 from dr_platform.staging.submission import WorkInput, submit
+from tests.conftest import _args_for, dbos_config, initialize_dbos_schema
 
 _HARD_EXIT_CODE = 86
+# The worker polls for SUCCEEDED up to its own deadline; the parent joins with
+# a wider margin so terminate() cannot race in and destroy the worker's
+# diagnostic traceback exactly as it reports the timeout.
 _WORKER_TIMEOUT_SECONDS = 10
+_WORKER_JOIN_TIMEOUT_SECONDS = 20
 _PROBE_ROW_ID = 1
-
-
-def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_reference,)
 
 
 def _recovery_probe_stage(database_url: str) -> str:
@@ -84,15 +85,13 @@ def _dbos_config(
     application_name: str,
     application_version: str,
 ) -> DBOSConfig:
-    return {
-        "name": application_name,
-        "system_database_url": database_url,
-        "application_database_url": database_url,
-        "application_version": application_version,
-        "run_admin_server": False,
-        "use_listen_notify": False,
-        "notification_listener_polling_interval_sec": 0.01,
-    }
+    return dbos_config(
+        name=application_name,
+        system_database_url=database_url,
+        application_database_url=database_url,
+        application_version=application_version,
+        notification_listener_polling_interval_sec=0.01,
+    )
 
 
 def _initialize_dbos_schema(
@@ -101,17 +100,13 @@ def _initialize_dbos_schema(
     application_name: str,
     application_version: str,
 ) -> None:
-    try:
-        DBOS(
-            config=_dbos_config(
-                database_url=database_url,
-                application_name=application_name,
-                application_version=application_version,
-            )
+    initialize_dbos_schema(
+        _dbos_config(
+            database_url=database_url,
+            application_name=application_name,
+            application_version=application_version,
         )
-        DBOS.launch()
-    finally:
-        DBOS.destroy(destroy_registry=True)
+    )
 
 
 def _run_recovery_worker(
@@ -171,7 +166,7 @@ def _run_worker_process(
         ),
     )
     process.start()
-    process.join(_WORKER_TIMEOUT_SECONDS)
+    process.join(_WORKER_JOIN_TIMEOUT_SECONDS)
     if process.is_alive():
         process.terminate()
         process.join()

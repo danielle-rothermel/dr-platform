@@ -6,7 +6,7 @@ import time
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from dbos import DBOS, DBOSConfig, Queue
+from dbos import DBOS, Queue
 from sqlalchemy import Engine
 
 from dr_platform import (
@@ -27,6 +27,7 @@ from dr_platform import (
     upgrade_platform_schema,
     wrap_pipeline_workflows,
 )
+from tests.conftest import dbos_config
 
 
 def _utc_now() -> datetime:
@@ -145,15 +146,13 @@ def test_root_contract_defines_submits_executes_and_inspects(
     assert yielded == list(work_keys)
     assert receipt.inserted_count == 2
 
-    runtime_config: DBOSConfig = {
-        "name": f"drp-public-{suffix}",
-        "system_database_url": clean_pg,
-        "application_database_url": clean_pg,
-        "application_version": f"public-{suffix}",
-        "run_admin_server": False,
-        "use_listen_notify": False,
-        "notification_listener_polling_interval_sec": 0.01,
-    }
+    runtime_config = dbos_config(
+        name=f"drp-public-{suffix}",
+        system_database_url=clean_pg,
+        application_database_url=clean_pg,
+        application_version=f"public-{suffix}",
+        notification_listener_polling_interval_sec=0.01,
+    )
     platform_config = PlatformDbosConfig(
         database_url=clean_pg,
         system_database_url=clean_pg,

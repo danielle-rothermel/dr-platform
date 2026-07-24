@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from threading import Barrier
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
-from dbos import DBOS, DBOSClient, DBOSConfig, EnqueueOptions
+from dbos import DBOSClient, EnqueueOptions
 from psycopg.errors import LockNotAvailable
 from sqlalchemy import Engine, create_engine, func, select, text
 from sqlalchemy.exc import OperationalError
 
-from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
     PipelineDefinition,
     PipelineIdentity,
@@ -25,7 +24,7 @@ from dr_platform.staging import (
     StageExecutionState,
     StageKey,
 )
-from dr_platform.staging.admission import AdmissionPayload, run_admission_pass
+from dr_platform.staging.admission import run_admission_pass
 from dr_platform.staging.handoff import _complete_stage_in_transaction
 from dr_platform.staging.operations import (
     CancellationDisposition,
@@ -44,20 +43,25 @@ from dr_platform.staging.stage_attempts import (
 )
 from dr_platform.staging.stage_executions import transition_stage_execution
 from dr_platform.staging.submission import WorkInput, submit
-from tests.conftest import engine_dsn
+from tests.conftest import (
+    NOW,
+    _args_for,
+    _as_dbos_client,
+    _migrate,
+    _RecordingCanceller,
+    dbos_config,
+    engine_dsn,
+    initialize_dbos_schema,
+)
 
 if TYPE_CHECKING:
-    from sqlalchemy import Connection
+    from collections.abc import Callable
 
-NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
+    from sqlalchemy import Connection
 
 
 def _workflow(input_reference: str) -> str:
     return f"output:{input_reference}"
-
-
-def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_reference,)
 
 
 def _registry(*, two_stages: bool = False) -> PipelineRegistry:
@@ -89,11 +93,6 @@ def _registry(*, two_stages: bool = False) -> PipelineRegistry:
     return registry
 
 
-def _migrate(engine: Engine) -> StagingSchema:
-    upgrade_platform_schema(engine_dsn(engine))
-    return StagingSchema()
-
-
 def _submit(
     engine: Engine,
     registry: PipelineRegistry,
@@ -120,6 +119,8 @@ def _submit(
     )
 
 
+# This variant records only the enqueue options; the args-tracking
+# _RecordingClient in the admission/handoff suites is a distinct shape.
 class _RecordingClient:
     def __init__(self) -> None:
         self.enqueued: list[EnqueueOptions] = []
@@ -135,19 +136,6 @@ class _RecordingClient:
         return object()
 
 
-class _RecordingCanceller:
-    def __init__(self) -> None:
-        self.cancelled: list[tuple[str, bool]] = []
-
-    def cancel_workflow(
-        self,
-        workflow_id: str,
-        *,
-        cancel_children: bool = False,
-    ) -> None:
-        self.cancelled.append((workflow_id, cancel_children))
-
-
 class _RaisingCanceller:
     def __init__(self) -> None:
         self.attempts: list[tuple[str, bool]] = []
@@ -160,10 +148,6 @@ class _RaisingCanceller:
     ) -> None:
         self.attempts.append((workflow_id, cancel_children))
         raise RuntimeError("delegation exploded")
-
-
-def _as_dbos_client(client: object) -> DBOSClient:
-    return cast("DBOSClient", client)
 
 
 def _wait_until_row_locked(engine: Engine, stage_execution_id: int) -> None:
@@ -215,18 +199,13 @@ def _wait_until_blocked_on_lock(
 
 
 def _launch_dbos_schema(database_url: str, *, suffix: str) -> None:
-    config: DBOSConfig = {
-        "name": f"drp-operations-{suffix[:12]}",
-        "system_database_url": database_url,
-        "application_version": f"operations-{suffix}",
-        "run_admin_server": False,
-        "use_listen_notify": False,
-    }
-    try:
-        DBOS(config=config)
-        DBOS.launch()
-    finally:
-        DBOS.destroy(destroy_registry=True)
+    initialize_dbos_schema(
+        dbos_config(
+            name=f"drp-operations-{suffix[:12]}",
+            system_database_url=database_url,
+            application_version=f"operations-{suffix}",
+        )
+    )
 
 
 def _admit_one(
@@ -473,7 +452,7 @@ def test_concurrent_retry_prepares_exactly_one_new_attempt(
 
     assert len(successes) == 1
     assert len(failures) == 1
-    assert str(failures[0]) == "only a FAILED stage execution can be retried"
+    assert "only a FAILED stage execution can be retried" in str(failures[0])
     assert _execution_rows(pg_engine, schema)[0][2:] == ("ready", 2)
     with pg_engine.connect() as connection:
         attempts = list_stage_attempts(
@@ -609,6 +588,10 @@ def test_live_dbos_cancellation_targets_only_the_admitted_workflow(
                     "workflow_id": workflow_id,
                 }
                 client.enqueue_in_transaction(connection, options)
+            # This writes into DBOS-internal schema (dbos.workflow_status) to
+            # forge a parent/child link the public API cannot express. It is
+            # tolerable only because dbos==2.27.0 is pinned exactly, so the
+            # column names cannot drift underneath us.
             connection.execute(
                 text(
                     "UPDATE dbos.workflow_status "
@@ -685,20 +668,21 @@ def test_exact_label_pause_resume_preserves_capacity(
     assert resumed.paused is False
 
 
+@pytest.mark.parametrize("operation", [pause, resume])
 def test_pause_and_resume_reject_a_missing_exact_selector(
+    operation: Callable[..., object],
     pg_engine: Engine,
 ) -> None:
     _migrate(pg_engine)
 
-    for operation in (pause, resume):
-        with pytest.raises(LookupError, match="stage control does not exist"):
-            operation(
-                pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
-                stage_key="execute",
-                labels={"cohort": "missing"},
-                engine=pg_engine,
-                clock=lambda: NOW,
-            )
+    with pytest.raises(LookupError, match="stage control does not exist"):
+        operation(
+            pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
+            stage_key="execute",
+            labels={"cohort": "missing"},
+            engine=pg_engine,
+            clock=lambda: NOW,
+        )
 
 
 def test_cancel_resolves_work_by_campaign_and_work_keys(

@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 import pytest
 
+from dr_platform import staging
 from dr_platform.staging import (
     CampaignKey,
     CampaignWorkIdentity,
@@ -18,9 +19,44 @@ from dr_platform.staging import (
     StageExecutionState,
     StageKey,
     WorkKey,
+    definitions,
+    identities,
+    recipes,
+    registry,
     stable_random_rank,
     stage_workflow_id,
+    states,
 )
+
+_STAGING_BINDINGS = {
+    "ArgumentsCallable": definitions.ArgumentsCallable,
+    "CampaignKey": identities.CampaignKey,
+    "CampaignWorkIdentity": identities.CampaignWorkIdentity,
+    "PipelineConflictError": registry.PipelineConflictError,
+    "PipelineDefinition": definitions.PipelineDefinition,
+    "PipelineIdentity": definitions.PipelineIdentity,
+    "PipelineKey": identities.PipelineKey,
+    "PipelineRegistry": registry.PipelineRegistry,
+    "RunKey": identities.RunKey,
+    "StageDefinition": definitions.StageDefinition,
+    "StageExecutionState": states.StageExecutionState,
+    "StageKey": identities.StageKey,
+    "WorkKey": identities.WorkKey,
+    "WorkflowCallable": definitions.WorkflowCallable,
+    "stable_random_rank": recipes.stable_random_rank,
+    "stage_workflow_id": recipes.stage_workflow_id,
+}
+
+
+def test_staging_exports_are_the_internal_contract() -> None:
+    assert len(staging.__all__) == len(_STAGING_BINDINGS)
+    assert set(staging.__all__) == set(_STAGING_BINDINGS)
+
+
+def test_staging_exports_are_bound_to_the_contract_objects() -> None:
+    for name, expected in _STAGING_BINDINGS.items():
+        assert getattr(staging, name) is expected
+
 
 KeyType = type[CampaignKey | RunKey | WorkKey | StageKey | PipelineKey]
 

@@ -29,6 +29,15 @@ def _quote_identifier(connection: Connection, value: str) -> str:
     return connection.dialect.identifier_preparer.quote(value)
 
 
+# --- Test-harness self-tests (not product contract) ---
+# The tests below exercise the conftest fixtures themselves: they reach into
+# conftest private helpers (_validate_test_database_url, _reset_test_database,
+# _verify_postgres_available) and monkeypatch conftest.create_engine by name.
+# That monkeypatch works only because conftest imports create_engine into its
+# own namespace. If conftest switches to qualified sqlalchemy.create_engine
+# calls, the by-name patch stops intercepting and these tests must change with
+# it. Everything from here down to the product-contract tests shares this
+# coupling.
 @pytest.mark.parametrize(
     "database_url",
     [
@@ -84,11 +93,13 @@ def test_unsafe_database_url_is_rejected_before_destructive_setup(
         conftest._reset_test_database(database_url)
 
 
+@pytest.mark.parametrize("ci_value", ["true", "TRUE", "1", "yes"])
 def test_ci_connection_failure_fails_and_disposes_engine(
     monkeypatch: pytest.MonkeyPatch,
+    ci_value: str,
 ) -> None:
     engine = _UnavailableEngine()
-    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("CI", ci_value)
     monkeypatch.setattr(
         conftest,
         "create_engine",
@@ -103,11 +114,16 @@ def test_ci_connection_failure_fails_and_disposes_engine(
     assert engine.disposed
 
 
+@pytest.mark.parametrize("ci_value", [None, "", "false", "FALSE", "0"])
 def test_local_connection_failure_skips_and_disposes_engine(
     monkeypatch: pytest.MonkeyPatch,
+    ci_value: str | None,
 ) -> None:
     engine = _UnavailableEngine()
-    monkeypatch.delenv("CI", raising=False)
+    if ci_value is None:
+        monkeypatch.delenv("CI", raising=False)
+    else:
+        monkeypatch.setenv("CI", ci_value)
     monkeypatch.setattr(
         conftest,
         "create_engine",
@@ -122,6 +138,7 @@ def test_local_connection_failure_skips_and_disposes_engine(
     assert engine.disposed
 
 
+# --- Product-contract tests (real engine, real migration) ---
 def test_password_dsn_survives_rendering_reconnection_and_migration(
     pg_engine: Engine,
 ) -> None:

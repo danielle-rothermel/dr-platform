@@ -4,16 +4,15 @@ from __future__ import annotations
 
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from threading import Barrier
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from dbos import DBOS, DBOSClient, DBOSConfig, EnqueueOptions
+from dbos import DBOSClient, EnqueueOptions
 from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import IntegrityError
 
-from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
     CampaignKey,
     CampaignWorkIdentity,
@@ -48,26 +47,28 @@ from dr_platform.staging.controls import (
     list_stage_controls,
     upsert_stage_control,
 )
-from dr_platform.staging.schema import StagingSchema
 from dr_platform.staging.stage_attempts import append_stage_attempt
 from dr_platform.staging.stage_executions import transition_stage_execution
 from dr_platform.staging.submission import WorkInput, submit
-from tests.conftest import engine_dsn
+from tests.conftest import (
+    NOW,
+    _args_for,
+    _as_dbos_client,
+    _migrate,
+    dbos_config,
+    initialize_dbos_schema,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from sqlalchemy import Connection
 
-NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
+    from dr_platform.staging.schema import StagingSchema
 
 
 def _workflow(input_reference: str) -> str:
     return input_reference
-
-
-def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_reference,)
 
 
 def _registry() -> PipelineRegistry:
@@ -87,11 +88,6 @@ def _registry() -> PipelineRegistry:
         )
     )
     return registry
-
-
-def _migrate(engine: Engine) -> StagingSchema:
-    upgrade_platform_schema(engine_dsn(engine))
-    return StagingSchema()
 
 
 def _submit(
@@ -313,10 +309,6 @@ class _EnqueueOnceThenFail:
         return result
 
 
-def _as_dbos_client(client: object) -> DBOSClient:
-    return cast("DBOSClient", client)
-
-
 def _execution_states(
     engine: Engine, schema: StagingSchema
 ) -> list[tuple[int, str, int]]:
@@ -333,18 +325,13 @@ def _execution_states(
 
 
 def _launch_dbos_schema(database_url: str) -> None:
-    config: DBOSConfig = {
-        "name": "drp-admission-test",
-        "system_database_url": database_url,
-        "application_version": "staging-admission-v1",
-        "run_admin_server": False,
-        "use_listen_notify": False,
-    }
-    try:
-        DBOS(config=config)
-        DBOS.launch()
-    finally:
-        DBOS.destroy(destroy_registry=True)
+    initialize_dbos_schema(
+        dbos_config(
+            name="drp-admission-test",
+            system_database_url=database_url,
+            application_version="staging-admission-v1",
+        )
+    )
 
 
 def test_stage_capacity_uses_stable_rank_and_terminal_releases_slot(
@@ -670,6 +657,9 @@ def test_selector_paused_after_candidate_selection_skips_admission(
             identities=identities,
         )
 
+    # Patching the private _lock_controls is the only deterministic seam to
+    # open the pause-after-selection window; nothing public lets a test pause a
+    # selector between candidate selection and the control lock.
     monkeypatch.setattr(
         "dr_platform.staging.admission._lock_controls",
         pause_before_control_lock,
