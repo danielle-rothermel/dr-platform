@@ -42,12 +42,6 @@ dev = [
     "ty>=0.0.51",
 ]
 
-# TEMPORARY: editable path deps for cross-repo integration testing.
-# do-not-merge-as-is. Original git-branch source (restore before merge):
-#   dr-serialize = { git = "https://github.com/danielle-rothermel/dr-serialize", branch = "main" }
-[tool.uv.sources]
-dr-serialize = { path = "../dr-serialize", editable = true }
-
 [tool.hatch.build.targets.sdist]
 only-include = ["src"]
 

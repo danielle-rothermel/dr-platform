@@ -188,7 +188,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.16.2" },
     { name = "dbos", extras = ["otel"], specifier = "==2.27.0" },
-    { name = "dr-serialize", editable = "../dr-serialize" },
+    { name = "dr-serialize", specifier = ">=0.1.0" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
 ]
@@ -205,20 +205,13 @@ dev = [
 [[package]]
 name = "dr-serialize"
 version = "0.1.0"
-source = { editable = "../dr-serialize" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
 ]
-
-[package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.13.4" }]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pre-commit", specifier = ">=4.6.0" },
-    { name = "pytest", specifier = ">=9.1.1" },
-    { name = "ruff", specifier = ">=0.15.18" },
-    { name = "ty", specifier = ">=0.0.51" },
+sdist = { url = "https://files.pythonhosted.org/packages/c6/25/8d4cdf3d0cd3dc4f8540bef72ab853ef12d4e34536f3c6dbb5381d95fb54/dr_serialize-0.1.0.tar.gz", hash = "sha256:47863d076bc6a123dad5ff9f5e4005b5b69e2ddcc1824390bd71160d51d07bf5", size = 14532, upload-time = "2026-07-24T08:06:33.677Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/37/1d/a6faf68c5a93a332279cce55db5ce2f0aa992f7a4727541ef7f6204eaf9e/dr_serialize-0.1.0-py3-none-any.whl", hash = "sha256:b0e1110d5cf4fae346c04ad79b568c43c950e35cba71afb5af5f99f6262babc8", size = 18585, upload-time = "2026-07-24T08:06:32.512Z" },
 ]
 
 [[package]]
