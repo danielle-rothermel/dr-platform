@@ -39,9 +39,9 @@ from dr_platform.staging.admission import (
     _Candidate,
     _Control,
     _evaluate_candidate,
+    _lock_controls,
     _PassTally,
     _SkipFull,
-    _SkipPaused,
     run_admission_pass,
 )
 from dr_platform.staging.controls import (
@@ -634,6 +634,72 @@ def test_pause_keeps_matching_ready_until_resume(
     )
 
 
+def test_selector_paused_after_candidate_selection_skips_admission(
+    pg_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    _submit(pg_engine, registry, ({"cohort": "blue"},))
+    _control(pg_engine, selector=None, capacity=0)
+    _control(
+        pg_engine,
+        selector={"cohort": "blue"},
+        capacity=1,
+    )
+    client = _RecordingClient()
+    lock_calls = 0
+
+    def pause_before_control_lock(
+        connection: Connection,
+        *,
+        schema: StagingSchema,
+        identities: set[tuple[str, int, str]],
+    ) -> tuple[_Control, ...]:
+        nonlocal lock_calls
+        lock_calls += 1
+        _control(
+            pg_engine,
+            selector={"cohort": "blue"},
+            capacity=1,
+            paused=True,
+        )
+        return _lock_controls(
+            connection,
+            schema=schema,
+            identities=identities,
+        )
+
+    monkeypatch.setattr(
+        "dr_platform.staging.admission._lock_controls",
+        pause_before_control_lock,
+    )
+
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+
+    assert lock_calls == 1
+    assert summary.admitted_total == 0
+    assert summary.skipped_for_pause == 1
+    assert summary.skipped_for_capacity == 0
+    assert client.enqueued == []
+    assert [
+        (state, current_attempt)
+        for _, state, current_attempt in _execution_states(pg_engine, schema)
+    ] == [(StageExecutionState.READY.value, 0)]
+    with pg_engine.connect() as connection:
+        assert (
+            connection.execute(
+                select(func.count()).select_from(schema.stage_attempts)
+            ).scalar_one()
+            == 0
+        )
+
+
 def test_enqueue_failure_rolls_back_platform_and_dbos_rows(
     clean_pg: str,
     pg_engine: Engine,
@@ -917,26 +983,6 @@ def _make_control(
     )
 
 
-def test_evaluate_candidate_paused_beats_full() -> None:
-    candidate = _candidate(labels={"cohort": "blue"})
-    default = _make_control(control_id=1, selector={}, capacity=1)
-    paused = _make_control(
-        control_id=2,
-        selector={"cohort": "blue"},
-        capacity=5,
-        paused=True,
-    )
-    occupancy = {1: 5, 2: 0}
-
-    result = _evaluate_candidate(
-        candidate,
-        controls=(default, paused),
-        occupancy=occupancy,
-    )
-
-    assert isinstance(result, _SkipPaused)
-
-
 def test_evaluate_candidate_occupancy_at_capacity_is_full() -> None:
     candidate = _candidate(labels={})
     control = _make_control(control_id=1, selector={}, capacity=2)
@@ -1012,19 +1058,6 @@ def test_evaluate_candidate_full_but_non_matching_control_does_not_block() -> (
     )
 
     assert result == _Admit(matching=(default,))
-
-
-def test_pass_tally_admitted_total_derives_from_per_stage_counts() -> None:
-    tally = _PassTally()
-    tally.record_admitted(("evaluation", 1, "execute"))
-    tally.record_admitted(("evaluation", 1, "execute"))
-    tally.record_admitted(("other", 2, "stage"))
-
-    assert tally.admitted_total == 3
-    assert tally.admitted == {
-        ("evaluation", 1, "execute"): 2,
-        ("other", 2, "stage"): 1,
-    }
 
 
 def test_pass_tally_to_summary_sorts_and_converts_stage_keys() -> None:
@@ -1210,7 +1243,7 @@ def test_args_for_failure_isolates_to_its_stage(
     )
 
 
-def test_poison_candidate_does_not_starve_same_stage_higher_rank_row(
+def test_non_tuple_args_for_rolls_back_candidate_and_continues_same_stage(
     pg_engine: Engine,
 ) -> None:
     schema = _migrate(pg_engine)
@@ -1229,7 +1262,7 @@ def test_poison_candidate_does_not_starve_same_stage_higher_rank_row(
 
     def args_for(payload: AdmissionPayload) -> tuple[object, ...]:
         if payload.input_reference == poison_input:
-            raise ValueError("deterministic poison")
+            return cast("tuple[object, ...]", ["not-a-tuple"])
         return (payload.input_reference,)
 
     registry = PipelineRegistry()
@@ -1258,28 +1291,31 @@ def test_poison_candidate_does_not_starve_same_stage_higher_rank_row(
         clock=lambda: NOW,
     )
 
-    # The poison row stays READY (retried next pass); its higher-rank sibling
-    # in the same stage still admits this pass.
     assert summary.admitted_total == 1
-    admitted = [
-        state
-        for _, state, _ in _execution_states(pg_engine, schema)
-        if state == StageExecutionState.ADMITTED.value
+    states = _execution_states(pg_engine, schema)
+    assert [state for _, state, _ in states] == [
+        StageExecutionState.READY.value,
+        StageExecutionState.ADMITTED.value,
     ]
-    ready = [
-        state
-        for _, state, _ in _execution_states(pg_engine, schema)
-        if state == StageExecutionState.READY.value
-    ]
-    assert len(admitted) == 1
-    assert len(ready) == 1
+    assert [attempt for _, _, attempt in states] == [0, 1]
+    assert len(client.enqueued) == 1
+    assert client.enqueued[0][1] == (
+        f"input:{ranked[1].removeprefix('work-')}",
+    )
+    with pg_engine.connect() as connection:
+        assert (
+            connection.execute(
+                select(func.count()).select_from(schema.stage_attempts)
+            ).scalar_one()
+            == 1
+        )
     assert summary.failed_stages == (
         StageAdmissionFailure(
             pipeline_key="evaluation",
             pipeline_version=1,
             stage_key=StageKey("execute"),
-            error_type="ValueError",
-            message="deterministic poison",
+            error_type="TypeError",
+            message="stage args_for must return a tuple",
         ),
     )
     assert summary.mismatched_stages == ()
