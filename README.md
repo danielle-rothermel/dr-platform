@@ -83,19 +83,19 @@ from dr_platform import (
 
 
 def args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_ref,)
+    return (payload.input_reference,)
 
 
-def prepare(input_ref: str) -> str:
-    return f"prepared:{input_ref}"
+def prepare(input_reference: str) -> str:
+    return f"prepared:{input_reference}"
 
 
-def execute(input_ref: str) -> str:
-    return f"executed:{input_ref}"
+def execute(input_reference: str) -> str:
+    return f"executed:{input_reference}"
 
 
-def score(input_ref: str) -> str:
-    return f"scored:{input_ref}"
+def score(input_reference: str) -> str:
+    return f"scored:{input_reference}"
 
 
 config = build_platform_dbos_config(database_url=None)  # resolves DATABASE_URL
@@ -153,7 +153,7 @@ def work_inputs():
     for index in range(10):
         yield WorkInput(
             work_key=f"work-{index}",
-            input_ref=f"input:{index}",
+            input_reference=f"input:{index}",
             labels={"group": "example"},
         )
 
@@ -163,7 +163,7 @@ try:
         campaign_key="campaign-1",
         run_key="run-1",
         pipeline=pipeline.identity,
-        config_ref="config:1",
+        execution_config_reference="config:1",
         items=work_inputs(),
         registry=registry,
         engine=engine,

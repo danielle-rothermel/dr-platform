@@ -13,6 +13,7 @@ from sqlalchemy import Engine, event, func, select
 from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
     PipelineDefinition,
+    PipelineIdentity,
     PipelineKey,
     PipelineRegistry,
     StageDefinition,
@@ -49,12 +50,12 @@ if TYPE_CHECKING:
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 
 
-def _workflow(input_ref: str) -> str:
-    return f"output:{input_ref}"
+def _workflow(input_reference: str) -> str:
+    return f"output:{input_reference}"
 
 
 def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_ref,)
+    return (payload.input_reference,)
 
 
 def _registry() -> PipelineRegistry:
@@ -93,12 +94,12 @@ def _submit(  # noqa: PLR0913 -- explicit desired-state test facts
     submit(
         campaign_key=campaign_key,
         run_key=run_key,
-        pipeline=(PipelineKey("evaluation"), 1),
-        config_ref="config:1",
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
+        execution_config_reference="config:1",
         items=(
             WorkInput(
                 work_key=work_key,
-                input_ref=f"input:{work_key}",
+                input_reference=f"input:{work_key}",
                 labels={"kind": "sample"},
             )
             for work_key in work_keys
@@ -221,7 +222,7 @@ def test_inspection_readers_are_bounded_cursor_stable_and_frozen(
         clock=NOW + timedelta(seconds=2),
     )
     set_stage_capacity(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=4,
         engine=pg_engine,
@@ -259,7 +260,7 @@ def test_inspection_readers_are_bounded_cursor_stable_and_frozen(
         engine=pg_engine,
     )
     controls = read_controls(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         engine=pg_engine,
     )
@@ -422,12 +423,12 @@ def test_six_seed_top_up_uses_bulk_statuses_for_one_campaign(
     receipt = submit(
         campaign_key="estimate-v1",
         run_key="run-top-up",
-        pipeline=(PipelineKey("evaluation"), 1),
-        config_ref="config:1",
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
+        execution_config_reference="config:1",
         items=(
             WorkInput(
                 work_key=work_key,
-                input_ref=f"input:{work_key}",
+                input_reference=f"input:{work_key}",
                 labels={"kind": "sample"},
             )
             for work_key in absent
@@ -485,7 +486,7 @@ def test_attempts_never_count_as_additional_samples(
         clock=lambda: NOW + timedelta(seconds=2),
     )
     set_stage_capacity(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=1,
         engine=pg_engine,

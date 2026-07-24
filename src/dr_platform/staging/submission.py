@@ -12,6 +12,7 @@ from dr_platform.staging._validation import (
 )
 from dr_platform.staging.definitions import (
     PipelineIdentity,
+    validate_pipeline_identity,
     validate_positive_integer,
 )
 from dr_platform.staging.identities import (
@@ -49,26 +50,28 @@ class WorkInput:
     """One validated, immutable item at the submission boundary."""
 
     work_key: WorkKey
-    input_ref: str
+    input_reference: str
     labels: Mapping[str, str]
 
     def __init__(
         self,
         *,
         work_key: WorkKey | str,
-        input_ref: str,
+        input_reference: str,
         labels: Mapping[str, str],
     ) -> None:
         normalized_work_key = (
             work_key if isinstance(work_key, WorkKey) else WorkKey(work_key)
         )
-        normalized_input_ref = validate_non_empty_string(
-            input_ref,
+        normalized_input_reference = validate_non_empty_string(
+            input_reference,
             label="input reference",
         )
         normalized_labels = validate_labels(labels, label="work input labels")
         object.__setattr__(self, "work_key", normalized_work_key)
-        object.__setattr__(self, "input_ref", normalized_input_ref)
+        object.__setattr__(
+            self, "input_reference", normalized_input_reference
+        )
         object.__setattr__(
             self,
             "labels",
@@ -90,7 +93,7 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
     campaign_key: CampaignKey | str,
     run_key: RunKey | str,
     pipeline: PipelineIdentity,
-    config_ref: str,
+    execution_config_reference: str,
     items: Iterable[WorkInput],
     registry: PipelineRegistry,
     engine: Engine,
@@ -100,6 +103,7 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
 ) -> SubmissionReceipt:
     """Incrementally commit campaign work from an arbitrary iterable."""
     validate_positive_integer(chunk_size, label="chunk size")
+    validate_pipeline_identity(pipeline)
     selected_schema = schema or StagingSchema()
     normalized_campaign_key = (
         campaign_key
@@ -110,8 +114,8 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
         run_key if isinstance(run_key, RunKey) else RunKey(run_key)
     )
     pipeline_definition = registry.get(
-        key=pipeline[0],
-        version=pipeline[1],
+        key=pipeline.key,
+        version=pipeline.version,
     )
     first_stage = pipeline_definition.stages[0]
 
@@ -122,7 +126,7 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
             campaign_key=normalized_campaign_key,
             pipeline_key=pipeline_definition.key.value,
             pipeline_version=pipeline_definition.version,
-            execution_config_reference=config_ref,
+            execution_config_reference=execution_config_reference,
             created_at=clock(),
             schema=selected_schema,
         )
@@ -205,7 +209,7 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
                 campaign_key=campaign_key,
                 work_key=item.work_key,
                 origin_run_key=run_key,
-                input_reference=item.input_ref,
+                input_reference=item.input_reference,
                 labels=item.labels,
                 schema=schema,
                 pipeline_run=run,

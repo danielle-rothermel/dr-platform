@@ -74,16 +74,16 @@ def test_root_contract_defines_submits_executes_and_inspects(
     work_keys = ("work-a", "work-b")
 
     def args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-        return (payload.input_ref,)
+        return (payload.input_reference,)
 
-    def prepare(input_ref: str) -> str:
-        return f"prepared:{input_ref}"
+    def prepare(input_reference: str) -> str:
+        return f"prepared:{input_reference}"
 
-    def execute(input_ref: str) -> str:
-        return f"executed:{input_ref}"
+    def execute(input_reference: str) -> str:
+        return f"executed:{input_reference}"
 
-    def score(input_ref: str) -> str:
-        return f"scored:{input_ref}"
+    def score(input_reference: str) -> str:
+        return f"scored:{input_reference}"
 
     declared = PipelineDefinition(
         key=PipelineKey(f"public-contract-{suffix}"),
@@ -128,7 +128,7 @@ def test_root_contract_defines_submits_executes_and_inspects(
             yielded.append(work_key)
             yield WorkInput(
                 work_key=work_key,
-                input_ref=f"input:{work_key}",
+                input_reference=f"input:{work_key}",
                 labels={"kind": "neutral"},
             )
 
@@ -136,7 +136,7 @@ def test_root_contract_defines_submits_executes_and_inspects(
         campaign_key=campaign_key,
         run_key=f"run-{suffix}",
         pipeline=pipeline.identity,
-        config_ref="config:public-contract",
+        execution_config_reference="config:public-contract",
         items=items(),
         registry=registry,
         engine=pg_engine,

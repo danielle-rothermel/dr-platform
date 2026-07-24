@@ -18,6 +18,7 @@ from dr_platform.staging import (
     CampaignKey,
     CampaignWorkIdentity,
     PipelineDefinition,
+    PipelineIdentity,
     PipelineKey,
     PipelineRegistry,
     RunKey,
@@ -61,12 +62,12 @@ if TYPE_CHECKING:
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 
 
-def _workflow(input_ref: str) -> str:
-    return input_ref
+def _workflow(input_reference: str) -> str:
+    return input_reference
 
 
 def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_ref,)
+    return (payload.input_reference,)
 
 
 def _registry() -> PipelineRegistry:
@@ -101,12 +102,12 @@ def _submit(
     submit(
         campaign_key="campaign-1",
         run_key="run-1",
-        pipeline=(PipelineKey("evaluation"), 1),
-        config_ref="config:1",
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
+        execution_config_reference="config:1",
         items=(
             WorkInput(
                 work_key=f"work-{index}",
-                input_ref=f"input:{index}",
+                input_reference=f"input:{index}",
                 labels=item_labels,
             )
             for index, item_labels in enumerate(labels)
@@ -173,10 +174,10 @@ def _submit_starvation_backlog(
     submit(
         campaign_key=campaign_key,
         run_key="run-a",
-        pipeline=(PipelineKey("pipeline-a"), 1),
-        config_ref="config:a",
+        pipeline=PipelineIdentity(PipelineKey("pipeline-a"), 1),
+        execution_config_reference="config:a",
         items=(
-            WorkInput(work_key=work_key, input_ref=work_key, labels={})
+            WorkInput(work_key=work_key, input_reference=work_key, labels={})
             for work_key in ranked_keys[:5]
         ),
         registry=registry,
@@ -186,12 +187,12 @@ def _submit_starvation_backlog(
     submit(
         campaign_key=campaign_key,
         run_key="run-b",
-        pipeline=(PipelineKey("pipeline-b"), 1),
-        config_ref="config:b",
+        pipeline=PipelineIdentity(PipelineKey("pipeline-b"), 1),
+        execution_config_reference="config:b",
         items=(
             WorkInput(
                 work_key=ranked_keys[-1],
-                input_ref=ranked_keys[-1],
+                input_reference=ranked_keys[-1],
                 labels={},
             ),
         ),
@@ -556,7 +557,7 @@ def test_args_for_receives_only_the_frozen_admission_payload(
         campaign_key=CampaignKey("campaign-1"),
         work_key=WorkKey("work-0"),
         run_key=RunKey("run-1"),
-        input_ref="input:0",
+        input_reference="input:0",
         labels={"cohort": "blue"},
         pipeline_key="evaluation",
         pipeline_version=1,
@@ -891,7 +892,7 @@ def _candidate(
         campaign_key="campaign-1",
         work_key="work-0",
         run_key="run-1",
-        input_ref="input:0",
+        input_reference="input:0",
         labels=labels,
         pipeline_key=stage_identity[0],
         pipeline_version=stage_identity[1],
@@ -1065,12 +1066,12 @@ def _submit_two_stage_backlog(
         submit(
             campaign_key="campaign-two-stage",
             run_key=f"run-{suffix}",
-            pipeline=(PipelineKey(f"pipeline-{suffix}"), 1),
-            config_ref=f"config:{suffix}",
+            pipeline=PipelineIdentity(PipelineKey(f"pipeline-{suffix}"), 1),
+            execution_config_reference=f"config:{suffix}",
             items=(
                 WorkInput(
                     work_key=f"work-{suffix}",
-                    input_ref=f"input-{suffix}",
+                    input_reference=f"input-{suffix}",
                     labels={},
                 ),
             ),
@@ -1227,9 +1228,9 @@ def test_poison_candidate_does_not_starve_same_stage_higher_rank_row(
     poison_input = f"input:{ranked[0].removeprefix('work-')}"
 
     def args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-        if payload.input_ref == poison_input:
+        if payload.input_reference == poison_input:
             raise ValueError("deterministic poison")
-        return (payload.input_ref,)
+        return (payload.input_reference,)
 
     registry = PipelineRegistry()
     registry.register(

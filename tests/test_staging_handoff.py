@@ -47,7 +47,7 @@ def _utc_now() -> datetime:
 
 
 def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_ref,)
+    return (payload.input_reference,)
 
 
 def _pipeline(
@@ -109,7 +109,7 @@ def _submit_items(  # noqa: PLR0913 -- explicit submission facts
         campaign_key=campaign_key,
         run_key=run_key,
         pipeline=pipeline.identity,
-        config_ref="config:smoke",
+        execution_config_reference="config:smoke",
         items=items,
         registry=registry,
         engine=engine,
@@ -215,14 +215,14 @@ def test_three_stage_pipeline_streams_end_to_end_through_wrapped_workflows(
     schema = _migrate(pg_engine)
     suffix = uuid4().hex[:10]
 
-    def prepare(input_ref: str) -> str:
-        return f"prepared:{input_ref}"
+    def prepare(input_reference: str) -> str:
+        return f"prepared:{input_reference}"
 
-    def execute(input_ref: str) -> str:
-        return f"executed:{input_ref}"
+    def execute(input_reference: str) -> str:
+        return f"executed:{input_reference}"
 
-    def score(input_ref: str) -> str:
-        return f"scored:{input_ref}"
+    def score(input_reference: str) -> str:
+        return f"scored:{input_reference}"
 
     declared = _pipeline(
         key=f"evaluation-{suffix}",
@@ -243,8 +243,8 @@ def test_three_stage_pipeline_streams_end_to_end_through_wrapped_workflows(
         campaign_key=f"campaign-{suffix}",
         run_key=f"run-{suffix}",
         items=(
-            WorkInput(work_key="work-a", input_ref="input:a", labels={}),
-            WorkInput(work_key="work-b", input_ref="input:b", labels={}),
+            WorkInput(work_key="work-a", input_reference="input:a", labels={}),
+            WorkInput(work_key="work-b", input_reference="input:b", labels={}),
         ),
     )
     for stage in pipeline.stages:
@@ -322,8 +322,8 @@ def test_completion_and_next_ready_insert_roll_back_together(
     pipeline = _pipeline(
         key="atomic-handoff",
         stage_logic=(
-            ("prepare", lambda input_ref: f"prepared:{input_ref}"),
-            ("execute", lambda input_ref: f"executed:{input_ref}"),
+            ("prepare", lambda input_reference: f"prepared:{input_reference}"),
+            ("execute", lambda input_reference: f"executed:{input_reference}"),
         ),
     )
     registry = PipelineRegistry()
@@ -335,7 +335,11 @@ def test_completion_and_next_ready_insert_roll_back_together(
         pipeline,
         campaign_key="campaign-atomic",
         run_key="run-atomic",
-        items=(WorkInput(work_key="work", input_ref="input", labels={}),),
+        items=(
+            WorkInput(
+                work_key="work", input_reference="input", labels={}
+            ),
+        ),
     )
     admission_client = _RecordingClient()
     run_admission_pass(
@@ -415,7 +419,9 @@ def test_output_reference_is_transported_opaquely_without_parsing(
     schema = _migrate(pg_engine)
     pipeline = _pipeline(
         key="opaque-output",
-        stage_logic=(("execute", lambda input_ref: f"output:{input_ref}"),),
+        stage_logic=(
+            ("execute", lambda input_reference: f"output:{input_reference}"),
+        ),
     )
     registry = PipelineRegistry()
     registry.register(pipeline)
@@ -426,7 +432,11 @@ def test_output_reference_is_transported_opaquely_without_parsing(
         pipeline,
         campaign_key="campaign-opaque-output",
         run_key="run-opaque-output",
-        items=(WorkInput(work_key="work", input_ref="input", labels={}),),
+        items=(
+            WorkInput(
+                work_key="work", input_reference="input", labels={}
+            ),
+        ),
     )
     admission_client = _RecordingClient()
     run_admission_pass(
@@ -483,10 +493,10 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
         ),
     )
 
-    def sometimes_fails(input_ref: str) -> str:
-        if input_ref == "input:fail":
+    def sometimes_fails(input_reference: str) -> str:
+        if input_reference == "input:fail":
             raise RuntimeError("application stage failed")
-        return f"output:{input_ref}"
+        return f"output:{input_reference}"
 
     declared = _pipeline(
         key=f"failure-{suffix}",
@@ -505,7 +515,7 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
         items=tuple(
             WorkInput(
                 work_key=work_key,
-                input_ref=(
+                input_reference=(
                     "input:fail" if work_key == first_work_key else "input:ok"
                 ),
                 labels={},
@@ -593,7 +603,7 @@ def test_application_failure_with_unprintable_error_lands_failed(
     schema = _migrate(pg_engine)
     suffix = uuid4().hex[:10]
 
-    def raises_unprintable(_input_ref: str) -> str:
+    def raises_unprintable(_input_reference: str) -> str:
         raise _UnprintableError
 
     declared = _pipeline(
@@ -610,7 +620,11 @@ def test_application_failure_with_unprintable_error_lands_failed(
         pipeline,
         campaign_key=f"campaign-unprintable-{suffix}",
         run_key=f"run-unprintable-{suffix}",
-        items=(WorkInput(work_key="work", input_ref="input", labels={}),),
+        items=(
+            WorkInput(
+                work_key="work", input_reference="input", labels={}
+            ),
+        ),
     )
     Queue(pipeline.stages[0].queue_name, polling_interval_sec=0.02)
 
@@ -708,7 +722,9 @@ def test_sweep_projects_only_cancelled_or_abandoned_admitted_attempts(
     schema = _migrate(pg_engine)
     pipeline = _pipeline(
         key="sweep-pipeline",
-        stage_logic=(("execute", lambda input_ref: f"output:{input_ref}"),),
+        stage_logic=(
+            ("execute", lambda input_reference: f"output:{input_reference}"),
+        ),
     )
     registry = PipelineRegistry()
     registry.register(pipeline)
@@ -722,7 +738,7 @@ def test_sweep_projects_only_cancelled_or_abandoned_admitted_attempts(
         items=tuple(
             WorkInput(
                 work_key=f"work-{index}",
-                input_ref=f"input:{index}",
+                input_reference=f"input:{index}",
                 labels={},
             )
             for index in range(4)
@@ -803,7 +819,9 @@ def test_sweep_projects_an_abandoned_attempt_with_an_unprintable_error(
     schema = _migrate(pg_engine)
     pipeline = _pipeline(
         key="sweep-unprintable",
-        stage_logic=(("execute", lambda input_ref: f"output:{input_ref}"),),
+        stage_logic=(
+            ("execute", lambda input_reference: f"output:{input_reference}"),
+        ),
     )
     registry = PipelineRegistry()
     registry.register(pipeline)
@@ -814,7 +832,11 @@ def test_sweep_projects_an_abandoned_attempt_with_an_unprintable_error(
         pipeline,
         campaign_key="campaign-sweep-unprintable",
         run_key="run-sweep-unprintable",
-        items=(WorkInput(work_key="work", input_ref="input", labels={}),),
+        items=(
+            WorkInput(
+                work_key="work", input_reference="input", labels={}
+            ),
+        ),
     )
     admission_client = _RecordingClient()
     admitted = run_admission_pass(
@@ -858,7 +880,9 @@ def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
     schema = _migrate(pg_engine)
     pipeline = _pipeline(
         key="sweep-page-pipeline",
-        stage_logic=(("execute", lambda input_ref: f"output:{input_ref}"),),
+        stage_logic=(
+            ("execute", lambda input_reference: f"output:{input_reference}"),
+        ),
     )
     registry = PipelineRegistry()
     registry.register(pipeline)
@@ -873,7 +897,7 @@ def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
         items=tuple(
             WorkInput(
                 work_key=f"work-{index}",
-                input_ref=f"input:{index}",
+                input_reference=f"input:{index}",
                 labels={},
             )
             for index in range(admitted_total)

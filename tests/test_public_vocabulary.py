@@ -31,3 +31,13 @@ def test_root_facade_unbinds_superseded_vocabulary() -> None:
 def test_root_facade_exports_stage_attempt_records() -> None:
     assert "StageAttemptRecord" in dr_platform.__all__
     assert dr_platform.StageAttemptRecord.__name__ == "StageAttemptRecord"
+
+
+def test_root_facade_exports_returned_record_and_schema_types() -> None:
+    for name in (
+        "StagingSchema",
+        "StageExecutionRecord",
+        "StageControlRecord",
+    ):
+        assert name in dr_platform.__all__
+        assert getattr(dr_platform, name).__name__ == name

@@ -7,6 +7,7 @@ import pytest
 from dr_platform.staging import (
     PipelineConflictError,
     PipelineDefinition,
+    PipelineIdentity,
     PipelineKey,
     PipelineRegistry,
     StageDefinition,
@@ -62,7 +63,9 @@ def test_registry_rejects_a_conflicting_definition() -> None:
     with pytest.raises(PipelineConflictError) as caught:
         registry.register(_pipeline(queue_name="other-queue"))
 
-    assert caught.value.identity == (PipelineKey("evaluation"), 1)
+    assert caught.value.identity == PipelineIdentity(
+        PipelineKey("evaluation"), 1
+    )
 
 
 def test_registry_exposes_registered_pipelines_for_wiring_checks() -> None:

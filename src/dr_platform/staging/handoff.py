@@ -416,8 +416,11 @@ def _stage_workflow_name(
     identity = (
         f"{pipeline_key.value}\0{pipeline_version}\0{stage_key.value}"
     )
-    digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
+    # This truncated digest only disambiguates the DBOS workflow *name* for
+    # display/routing; it is not an identity or content hash.  Attempt
+    # identity uses the full-length digest in recipes.stage_workflow_id.
+    name_slug = hashlib.sha256(identity.encode()).hexdigest()[:12]
     readable = re.sub(
         r"[^A-Za-z0-9_]", "_", f"{pipeline_key.value}_{stage_key.value}"
     )
-    return f"dr_platform_stage_{readable}_v{pipeline_version}_{digest}"
+    return f"dr_platform_stage_{readable}_v{pipeline_version}_{name_slug}"

@@ -10,7 +10,9 @@ from dr_platform.staging import (
     CampaignKey,
     CampaignWorkIdentity,
     PipelineDefinition,
+    PipelineIdentity,
     PipelineKey,
+    PipelineRegistry,
     RunKey,
     StageDefinition,
     StageExecutionState,
@@ -83,9 +85,37 @@ def test_pipeline_preserves_declared_linear_stage_order() -> None:
         stages=(prepare, execute),
     )
 
-    assert pipeline.identity == (PipelineKey("evaluation"), 1)
+    assert pipeline.identity == PipelineIdentity(PipelineKey("evaluation"), 1)
     assert pipeline.stages == (prepare, execute)
     assert pipeline.stages[0].key == StageKey("prepare")
+
+
+def test_pipeline_identity_rejects_a_non_pipeline_key() -> None:
+    with pytest.raises(TypeError, match="pipeline key must be a PipelineKey"):
+        PipelineIdentity("evaluation", 1)  # ty: ignore[invalid-argument-type]
+
+
+def test_pipeline_identity_rejects_a_non_positive_version() -> None:
+    with pytest.raises(ValueError, match="pipeline version must be positive"):
+        PipelineIdentity(PipelineKey("evaluation"), 0)
+
+
+def test_pipeline_identity_round_trips_through_registry() -> None:
+    pipeline = PipelineDefinition(
+        key=PipelineKey("evaluation"),
+        version=1,
+        stages=(_stage("execute"),),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+
+    identity = pipeline.identity
+    twin = PipelineIdentity(PipelineKey("evaluation"), 1)
+    assert identity == twin
+    assert hash(identity) == hash(twin)
+    assert (
+        registry.get(key=identity.key, version=identity.version) is pipeline
+    )
 
 
 def test_pipeline_rejects_an_empty_stage_tuple() -> None:

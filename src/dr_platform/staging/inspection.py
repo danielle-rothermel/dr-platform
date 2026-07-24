@@ -11,11 +11,11 @@ from sqlalchemy import and_, func, or_, select
 from dr_platform.staging.controls import list_stage_controls
 from dr_platform.staging.definitions import (
     PipelineIdentity,
+    validate_pipeline_identity,
     validate_positive_integer,
 )
 from dr_platform.staging.identities import (
     CampaignKey,
-    PipelineKey,
     RunKey,
     StageKey,
     WorkKey,
@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 DEFAULT_INSPECTION_LIMIT = 100
 MAX_INSPECTION_LIMIT = 1_000
 DEFAULT_BULK_STATUS_CHUNK_SIZE = 500
-PIPELINE_IDENTITY_PARTS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,13 +335,13 @@ def read_controls(
     schema: StagingSchema | None = None,
 ) -> tuple[StageControlRecord, ...]:
     """Read all controls, or only controls matching supplied work labels."""
-    pipeline_key, pipeline_version = _validate_pipeline(pipeline)
+    identity = validate_pipeline_identity(pipeline)
     selected_schema = schema or StagingSchema()
     with engine.connect() as connection:
         return list_stage_controls(
             connection,
-            pipeline_key=pipeline_key.value,
-            pipeline_version=pipeline_version,
+            pipeline_key=identity.key.value,
+            pipeline_version=identity.version,
             stage_key=stage_key,
             labels=labels,
             schema=selected_schema,
@@ -730,18 +729,6 @@ def _validate_work_item_id(work_item_id: int) -> None:
         or work_item_id <= 0
     ):
         raise ValueError("work item id must be a positive integer")
-
-
-def _validate_pipeline(pipeline: PipelineIdentity) -> PipelineIdentity:
-    if (
-        not isinstance(pipeline, tuple)
-        or len(pipeline) != PIPELINE_IDENTITY_PARTS
-        or not isinstance(pipeline[0], PipelineKey)
-        or not isinstance(pipeline[1], int)
-    ):
-        raise TypeError("pipeline must be a (key, version) tuple")
-    validate_positive_integer(pipeline[1], label="pipeline version")
-    return pipeline
 
 
 def _campaign_key(value: CampaignKey | str) -> CampaignKey:

@@ -14,6 +14,7 @@ from sqlalchemy import Engine, create_engine, func, select, text
 from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
     PipelineDefinition,
+    PipelineIdentity,
     PipelineKey,
     PipelineRegistry,
     StageDefinition,
@@ -47,12 +48,12 @@ if TYPE_CHECKING:
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 
 
-def _workflow(input_ref: str) -> str:
-    return f"output:{input_ref}"
+def _workflow(input_reference: str) -> str:
+    return f"output:{input_reference}"
 
 
 def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_ref,)
+    return (payload.input_reference,)
 
 
 def _registry(*, two_stages: bool = False) -> PipelineRegistry:
@@ -99,12 +100,12 @@ def _submit(
     submit(
         campaign_key="campaign-1",
         run_key=run_key,
-        pipeline=(PipelineKey("evaluation"), 1),
-        config_ref="config:1",
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
+        execution_config_reference="config:1",
         items=(
             WorkInput(
                 work_key=work_key,
-                input_ref=f"input:{work_key}",
+                input_reference=f"input:{work_key}",
                 labels={"cohort": "blue"},
             )
             for work_key in work_keys
@@ -212,7 +213,7 @@ def _admit_one(
     """Submit and admit a single work item, returning its stage/work ids."""
     _submit(engine, registry, run_key=run_key, work_keys=(work_key,))
     set_stage_capacity(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=1,
         engine=engine,
@@ -257,7 +258,7 @@ def test_lowering_capacity_drains_without_preempting_admitted_work(
         work_keys=("work-0", "work-1", "work-2"),
     )
     set_stage_capacity(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=3,
         engine=pg_engine,
@@ -272,7 +273,7 @@ def test_lowering_capacity_drains_without_preempting_admitted_work(
     ).admitted_total == 3
 
     set_stage_capacity(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=1,
         engine=pg_engine,
@@ -325,7 +326,7 @@ def test_retry_preserves_lineage_and_readmits_prepared_attempt(
         work_keys=("work-retry",),
     )
     set_stage_capacity(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=1,
         engine=pg_engine,
@@ -396,7 +397,7 @@ def test_cancellation_delegates_only_an_admitted_exact_attempt(
         work_keys=("work-a", "work-b"),
     )
     set_stage_capacity(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         capacity=1,
         engine=pg_engine,
@@ -477,7 +478,7 @@ def test_exact_label_pause_resume_preserves_capacity(
 ) -> None:
     _migrate(pg_engine)
     control = set_selector_capacity(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         labels={"cohort": "blue"},
         capacity=4,
@@ -485,14 +486,14 @@ def test_exact_label_pause_resume_preserves_capacity(
         clock=lambda: NOW,
     )
     paused = pause(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         labels={"cohort": "blue"},
         engine=pg_engine,
         clock=lambda: NOW + timedelta(seconds=1),
     )
     resumed = resume(
-        pipeline=(PipelineKey("evaluation"), 1),
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
         stage_key="execute",
         labels={"cohort": "blue"},
         engine=pg_engine,
@@ -662,3 +663,18 @@ def test_cancel_after_committed_handoff_cancels_the_successor(
     assert result.stage_execution.stage_key == StageKey("score")
     assert result.stage_execution.state is StageExecutionState.CANCELLED
     assert canceller.cancelled == []
+
+
+def test_set_stage_capacity_rejects_a_raw_pipeline_tuple(
+    pg_engine: Engine,
+) -> None:
+    with pytest.raises(TypeError, match="pipeline must be a PipelineIdentity"):
+        set_stage_capacity(
+            pipeline=(  # ty: ignore[invalid-argument-type]
+                PipelineKey("evaluation"),
+                1,
+            ),
+            stage_key="execute",
+            capacity=1,
+            engine=pg_engine,
+        )

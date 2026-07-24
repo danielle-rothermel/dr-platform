@@ -63,7 +63,7 @@ def _registry() -> tuple[PipelineRegistry, PipelineDefinition]:
 def _item(index: int) -> WorkInput:
     return WorkInput(
         work_key=f"work-{index}",
-        input_ref=f"input:{index}",
+        input_reference=f"input:{index}",
         labels={"cohort": "blue"},
     )
 
@@ -93,7 +93,7 @@ def test_source_commits_before_it_is_exhausted(pg_engine: Engine) -> None:
         campaign_key="campaign-1",
         run_key="run-1",
         pipeline=pipeline.identity,
-        config_ref="config:1",
+        execution_config_reference="config:1",
         items=items(),
         registry=registry,
         engine=pg_engine,
@@ -123,7 +123,7 @@ def test_interrupted_replay_fills_only_absent_keys(
             campaign_key="campaign-1",
             run_key="run-1",
             pipeline=pipeline.identity,
-            config_ref="config:1",
+            execution_config_reference="config:1",
             items=interrupted_items(),
             registry=registry,
             engine=pg_engine,
@@ -145,7 +145,7 @@ def test_interrupted_replay_fills_only_absent_keys(
         campaign_key="campaign-1",
         run_key="run-1",
         pipeline=pipeline.identity,
-        config_ref="config:1",
+        execution_config_reference="config:1",
         items=(_item(index) for index in range(4)),
         registry=registry,
         engine=pg_engine,
@@ -183,7 +183,7 @@ def test_completed_run_replay_does_not_restamp_completion(
         campaign_key="campaign-1",
         run_key="run-1",
         pipeline=pipeline.identity,
-        config_ref="config:1",
+        execution_config_reference="config:1",
         items=(_item(0),),
         registry=registry,
         engine=pg_engine,
@@ -194,7 +194,7 @@ def test_completed_run_replay_does_not_restamp_completion(
         campaign_key="campaign-1",
         run_key="run-1",
         pipeline=pipeline.identity,
-        config_ref="config:1",
+        execution_config_reference="config:1",
         items=(_item(0),),
         registry=registry,
         engine=pg_engine,
@@ -218,7 +218,7 @@ def test_config_mismatched_resume_is_rejected(pg_engine: Engine) -> None:
         campaign_key="campaign-1",
         run_key="run-1",
         pipeline=pipeline.identity,
-        config_ref="config:1",
+        execution_config_reference="config:1",
         items=(),
         registry=registry,
         engine=pg_engine,
@@ -230,7 +230,7 @@ def test_config_mismatched_resume_is_rejected(pg_engine: Engine) -> None:
             campaign_key="campaign-1",
             run_key="run-1",
             pipeline=pipeline.identity,
-            config_ref="config:other",
+            execution_config_reference="config:other",
             items=(),
             registry=registry,
             engine=pg_engine,
@@ -266,7 +266,7 @@ def test_new_items_have_only_the_first_stage_ready(
         campaign_key="campaign-1",
         run_key="run-1",
         pipeline=pipeline.identity,
-        config_ref="config:1",
+        execution_config_reference="config:1",
         items=items(),
         registry=registry,
         engine=pg_engine,
@@ -303,7 +303,7 @@ def test_cross_run_campaign_duplicates_converge(
         campaign_key="campaign-1",
         run_key="run-1",
         pipeline=pipeline.identity,
-        config_ref="config:1",
+        execution_config_reference="config:1",
         items=(_item(0),),
         registry=registry,
         engine=pg_engine,
@@ -313,7 +313,7 @@ def test_cross_run_campaign_duplicates_converge(
         campaign_key="campaign-1",
         run_key="run-2",
         pipeline=pipeline.identity,
-        config_ref="config:2",
+        execution_config_reference="config:2",
         items=(_item(0),),
         registry=registry,
         engine=pg_engine,
@@ -350,13 +350,13 @@ _TYPED_OBJECT_REFERENCE = (
 )
 
 
-def test_input_ref_is_transported_opaquely_without_parsing(
+def test_input_reference_is_transported_opaquely_without_parsing(
     pg_engine: Engine,
 ) -> None:
     """A typed Object Reference round-trips byte-for-byte, unparsed.
 
-    dr-platform validates ``input_ref`` only as a non-empty string and never
-    parses, resolves, normalizes, or decomposes its encoded schema or
+    dr-platform validates ``input_reference`` only as a non-empty string and
+    never parses, resolves, normalizes, or decomposes its encoded schema or
     ``content_hash``.  The exact submitted string must reappear verbatim in the
     persisted ``work_items.input_reference`` column.
     """
@@ -367,11 +367,11 @@ def test_input_ref_is_transported_opaquely_without_parsing(
         campaign_key="campaign-1",
         run_key="run-1",
         pipeline=pipeline.identity,
-        config_ref="config:1",
+        execution_config_reference="config:1",
         items=(
             WorkInput(
                 work_key="work-opaque",
-                input_ref=_TYPED_OBJECT_REFERENCE,
+                input_reference=_TYPED_OBJECT_REFERENCE,
                 labels={},
             ),
         ),
@@ -406,8 +406,8 @@ def test_work_input_never_validates_reference_structure() -> None:
         '{"looks":"like json","but":"is not parsed"}',
     ):
         assert WorkInput(
-            work_key="work", input_ref=opaque, labels={}
-        ).input_ref == opaque
+            work_key="work", input_reference=opaque, labels={}
+        ).input_reference == opaque
 
     with pytest.raises(ValueError, match="input reference"):
-        WorkInput(work_key="work", input_ref="", labels={})
+        WorkInput(work_key="work", input_reference="", labels={})
