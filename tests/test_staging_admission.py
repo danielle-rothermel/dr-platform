@@ -782,7 +782,7 @@ def test_two_passes_cannot_admit_one_ready_row_twice(
     start = Barrier(2)
 
     def admit() -> int:
-        start.wait()
+        start.wait(timeout=10)
         return run_admission_pass(
             pg_engine,
             client=_as_dbos_client(_RecordingClient()),
@@ -1559,7 +1559,7 @@ def test_two_passes_cannot_exceed_control_capacity(
     start = Barrier(2)
 
     def admit() -> AdmissionSummary:
-        start.wait()
+        start.wait(timeout=10)
         return run_admission_pass(
             pg_engine,
             client=_as_dbos_client(_RecordingClient()),

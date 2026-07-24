@@ -57,16 +57,31 @@ def test_test_database_identity_rejects_other_names(
         conftest._validate_test_database_url(database_url)
 
 
+def test_test_database_identity_rejects_other_backends() -> None:
+    with pytest.raises(ValueError, match="must use PostgreSQL"):
+        conftest._validate_test_database_url("sqlite:///dr_platform_test")
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+psycopg:///dr_platform",
+        "postgresql+psycopg:///safe_test?dbname=dr_platform",
+        "postgresql+psycopg:///safe_test?service=production",
+        "postgresql+psycopg:///safe_test?servicefile=/tmp/pg_service.conf",
+    ],
+)
 def test_unsafe_database_url_is_rejected_before_destructive_setup(
     monkeypatch: pytest.MonkeyPatch,
+    database_url: str,
 ) -> None:
     def fail_if_called(_database_url: str) -> None:
         pytest.fail("unsafe database URL reached engine creation")
 
     monkeypatch.setattr(conftest, "create_engine", fail_if_called)
 
-    with pytest.raises(ValueError, match="ending in '_test'"):
-        conftest._reset_test_database("postgresql+psycopg:///dr_platform")
+    with pytest.raises(ValueError, match="DR_PLATFORM_TEST_DATABASE_URL"):
+        conftest._reset_test_database(database_url)
 
 
 def test_ci_connection_failure_fails_and_disposes_engine(

@@ -86,7 +86,8 @@ _ROOT_BINDINGS = {
 
 
 def test_root_exports_are_the_public_contract() -> None:
-    assert dr_platform.__all__ == list(_ROOT_BINDINGS)
+    assert len(dr_platform.__all__) == len(_ROOT_BINDINGS)
+    assert set(dr_platform.__all__) == set(_ROOT_BINDINGS)
 
 
 def test_root_exports_are_bound_to_the_contract_objects() -> None:

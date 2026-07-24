@@ -239,7 +239,7 @@ def list_work_items(  # noqa: PLR0913 -- explicit reader filters
     """Return logical items once each, filtered by current stage state."""
     _validate_limit(limit)
     if state is not None and not isinstance(state, StageExecutionState):
-        raise TypeError("state must be a StageExecutionState")
+        raise ValueError("state must be a StageExecutionState")
     selected_schema = schema or StagingSchema()
     normalized_campaign = _campaign_key(campaign_key)
     items = selected_schema.work_items
@@ -404,7 +404,10 @@ def bulk_work_statuses(
     campaign keys have ``present=False`` and ``None`` for all state fields.
     Duplicate input keys are queried and returned once.
     """
-    validate_positive_integer(chunk_size, label="bulk status chunk size")
+    _validate_public_positive_integer(
+        chunk_size,
+        label="bulk status chunk size",
+    )
     normalized_campaign = _campaign_key(campaign_key)
     normalized_keys = tuple(dict.fromkeys(_work_key(key) for key in work_keys))
     selected_schema = schema or StagingSchema()
@@ -715,11 +718,18 @@ def _validate_work_item_cursor(
 
 
 def _validate_limit(limit: int) -> None:
-    validate_positive_integer(limit, label="inspection limit")
+    _validate_public_positive_integer(limit, label="inspection limit")
     if limit > MAX_INSPECTION_LIMIT:
         raise ValueError(
             f"inspection limit must not exceed {MAX_INSPECTION_LIMIT}"
         )
+
+
+def _validate_public_positive_integer(value: int, *, label: str) -> None:
+    try:
+        validate_positive_integer(value, label=label)
+    except TypeError as error:
+        raise ValueError(str(error)) from error
 
 
 def _validate_work_item_id(work_item_id: int) -> None:

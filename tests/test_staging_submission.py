@@ -89,7 +89,7 @@ def _submit_after_barrier(
     item: WorkInput,
 ) -> SubmissionReceipt:
     def synchronized_items() -> Iterator[WorkInput]:
-        barrier.wait()
+        barrier.wait(timeout=10)
         yield item
 
     return submit(

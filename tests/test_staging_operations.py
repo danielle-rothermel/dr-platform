@@ -454,7 +454,7 @@ def test_concurrent_retry_prepares_exactly_one_new_attempt(
     start = Barrier(2)
 
     def retry_concurrently() -> object:
-        start.wait()
+        start.wait(timeout=10)
         return retry_stage(
             stage_execution_id,
             engine=pg_engine,
