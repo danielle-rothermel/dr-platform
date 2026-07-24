@@ -3,12 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from sqlalchemy import Connection, Engine, inspect, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Connection,
+    DateTime,
+    Engine,
+    Integer,
+    Text,
+    inspect,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.engine.interfaces import ReflectedColumn
+from sqlalchemy.engine.reflection import Inspector
+from sqlalchemy.exc import IntegrityError, ProgrammingError
+from sqlalchemy.sql.type_api import TypeEngine
 
 from dr_platform.db.migrate import (
     PLATFORM_BASELINE_REVISION,
@@ -44,18 +59,268 @@ if TYPE_CHECKING:
         StageExecutionRecord,
     )
 
-STAGING_TABLES = {
-    "platform_pipeline_runs",
-    "platform_work_items",
-    "platform_stage_executions",
-    "platform_stage_attempts",
-    "platform_stage_controls",
-}
+STAGING_TABLE_SUFFIXES = (
+    "pipeline_runs",
+    "work_items",
+    "stage_executions",
+    "stage_attempts",
+    "stage_controls",
+)
+STAGING_TABLES = {f"platform_{suffix}" for suffix in STAGING_TABLE_SUFFIXES}
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class _ColumnInventory:
+    name: str
+    type_semantics: str
+    nullable: bool
+    default: str | None
+    identity: tuple[bool, int, int, bool] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _TableInventory:
+    columns: tuple[_ColumnInventory, ...]
+    primary_key: tuple[str, ...]
+    unique_constraints: frozenset[tuple[str, tuple[str, ...]]]
+    check_constraints: frozenset[tuple[str, str]]
+    foreign_keys: frozenset[
+        tuple[
+            str,
+            tuple[str, ...],
+            str,
+            tuple[str, ...],
+            tuple[tuple[str, str], ...],
+        ]
+    ]
+    indexes: frozenset[
+        tuple[
+            str,
+            tuple[str | None, ...],
+            tuple[str, ...],
+            bool,
+            str,
+            str | None,
+            tuple[str, ...],
+        ]
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class _TriggerInventory:
+    name: str
+    table: str
+    function: str
+    timing: str
+    orientation: str
+    events: tuple[str, ...]
 
 
 def _migrate(engine: Engine) -> None:
     upgrade_platform_schema(engine_dsn(engine))
+
+
+def _type_semantics(type_: TypeEngine) -> str:
+    if isinstance(type_, JSONB):
+        return "jsonb"
+    if isinstance(type_, BigInteger):
+        return "bigint"
+    if isinstance(type_, Integer):
+        return "integer"
+    if isinstance(type_, Text):
+        return "text"
+    if isinstance(type_, DateTime):
+        timezone = "with" if type_.timezone else "without"
+        return f"timestamp {timezone} time zone"
+    if isinstance(type_, Boolean):
+        return "boolean"
+    raise AssertionError(f"unhandled reflected column type: {type_!r}")
+
+
+def _normalize_name(name: str | None, prefix: str) -> str:
+    assert name is not None
+    return name.removeprefix(f"{prefix}_")
+
+
+def _normalize_sql(sql: object, prefix: str) -> str:
+    return " ".join(str(sql).split()).replace(f"{prefix}_", "<prefix>_")
+
+
+def _column_inventory(column: ReflectedColumn) -> _ColumnInventory:
+    identity = column.get("identity")
+    identity_inventory = (
+        None
+        if identity is None
+        else (
+            bool(identity["always"]),
+            int(identity["start"]),
+            int(identity["increment"]),
+            bool(identity["cycle"]),
+        )
+    )
+    default = column.get("default")
+    return _ColumnInventory(
+        name=column["name"],
+        type_semantics=_type_semantics(column["type"]),
+        nullable=bool(column["nullable"]),
+        default=None if default is None else str(default),
+        identity=identity_inventory,
+    )
+
+
+def _table_inventory(
+    inspector: Inspector,
+    *,
+    table: str,
+    prefix: str,
+) -> _TableInventory:
+    primary_key = inspector.get_pk_constraint(table)
+    unique_constraints = inspector.get_unique_constraints(table)
+    check_constraints = inspector.get_check_constraints(table)
+    foreign_keys = inspector.get_foreign_keys(table)
+    indexes = inspector.get_indexes(table)
+
+    return _TableInventory(
+        columns=tuple(
+            _column_inventory(column)
+            for column in inspector.get_columns(table)
+        ),
+        primary_key=tuple(primary_key["constrained_columns"]),
+        unique_constraints=frozenset(
+            (
+                _normalize_name(constraint["name"], prefix),
+                tuple(constraint["column_names"]),
+            )
+            for constraint in unique_constraints
+        ),
+        check_constraints=frozenset(
+            (
+                _normalize_name(constraint["name"], prefix),
+                _normalize_sql(constraint["sqltext"], prefix),
+            )
+            for constraint in check_constraints
+        ),
+        foreign_keys=frozenset(
+            (
+                _normalize_name(constraint["name"], prefix),
+                tuple(constraint["constrained_columns"]),
+                _normalize_name(constraint["referred_table"], prefix),
+                tuple(constraint["referred_columns"]),
+                tuple(
+                    sorted(
+                        (str(key), str(value))
+                        for key, value in constraint.get(
+                            "options",
+                            {},
+                        ).items()
+                    )
+                ),
+            )
+            for constraint in foreign_keys
+        ),
+        indexes=frozenset(
+            (
+                _normalize_name(index["name"], prefix),
+                tuple(index["column_names"]),
+                tuple(
+                    _normalize_sql(expression, prefix)
+                    for expression in index.get("expressions", ())
+                ),
+                bool(index["unique"]),
+                str(
+                    index.get("dialect_options", {}).get(
+                        "postgresql_using",
+                        "btree",
+                    )
+                ),
+                (
+                    None
+                    if index.get("dialect_options", {}).get("postgresql_where")
+                    is None
+                    else _normalize_sql(
+                        index.get("dialect_options", {})["postgresql_where"],
+                        prefix,
+                    )
+                ),
+                tuple(index.get("include_columns", ())),
+            )
+            for index in indexes
+            if index.get("duplicates_constraint") is None
+        ),
+    )
+
+
+def _schema_inventory(
+    engine: Engine,
+    *,
+    prefix: str,
+) -> dict[str, _TableInventory]:
+    inspector = inspect(engine)
+    return {
+        suffix: _table_inventory(
+            inspector,
+            table=f"{prefix}_{suffix}",
+            prefix=prefix,
+        )
+        for suffix in STAGING_TABLE_SUFFIXES
+    }
+
+
+def _trigger_inventory(
+    engine: Engine,
+    *,
+    prefix: str,
+) -> frozenset[_TriggerInventory]:
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT
+                    trigger.tgname AS trigger_name,
+                    relation.relname AS table_name,
+                    function.proname AS function_name,
+                    trigger.tgtype
+                FROM pg_catalog.pg_trigger AS trigger
+                JOIN pg_catalog.pg_class AS relation
+                    ON relation.oid = trigger.tgrelid
+                JOIN pg_catalog.pg_namespace AS namespace
+                    ON namespace.oid = relation.relnamespace
+                JOIN pg_catalog.pg_proc AS function
+                    ON function.oid = trigger.tgfoid
+                WHERE NOT trigger.tgisinternal
+                    AND namespace.nspname = current_schema()
+                    AND relation.relname = :pipeline_runs
+                """
+            ),
+            {"pipeline_runs": f"{prefix}_pipeline_runs"},
+        ).mappings()
+        return frozenset(
+            _TriggerInventory(
+                name=_normalize_name(row["trigger_name"], prefix),
+                table=_normalize_name(row["table_name"], prefix),
+                function=_normalize_name(row["function_name"], prefix),
+                timing=(
+                    "instead"
+                    if row["tgtype"] & 64
+                    else "before"
+                    if row["tgtype"] & 2
+                    else "after"
+                ),
+                orientation="row" if row["tgtype"] & 1 else "statement",
+                events=tuple(
+                    event
+                    for event, bit in (
+                        ("insert", 4),
+                        ("delete", 8),
+                        ("update", 16),
+                        ("truncate", 32),
+                    )
+                    if row["tgtype"] & bit
+                ),
+            )
+            for row in rows
+        )
 
 
 def _create_stage_execution(
@@ -101,6 +366,111 @@ def test_fresh_baseline_creates_only_the_staged_work_schema(
     assert PLATFORM_BASELINE_REVISION == PLATFORM_HEAD_REVISION
     assert installed_revision == PLATFORM_HEAD_REVISION
     assert tables == STAGING_TABLES | {"platform_platform_alembic_version"}
+
+
+def test_custom_prefix_upgrade_matches_runtime_names_and_is_idempotent(
+    pg_engine: Engine,
+) -> None:
+    prefix = "tenant"
+    schema = StagingSchema(prefix)
+
+    upgrade_platform_schema(engine_dsn(pg_engine), prefix=prefix)
+
+    expected_tables = set(schema.metadata.tables)
+    assert set(inspect(pg_engine).get_table_names()) == expected_tables | {
+        "tenant_platform_alembic_version"
+    }
+    with pg_engine.connect() as connection:
+        installed_revision = connection.execute(
+            text("SELECT version_num FROM tenant_platform_alembic_version")
+        ).scalar_one()
+    assert installed_revision == PLATFORM_HEAD_REVISION
+
+    first_inventory = _schema_inventory(pg_engine, prefix=prefix)
+    first_triggers = _trigger_inventory(pg_engine, prefix=prefix)
+    upgrade_platform_schema(engine_dsn(pg_engine), prefix=prefix)
+
+    assert _schema_inventory(pg_engine, prefix=prefix) == first_inventory
+    assert _trigger_inventory(pg_engine, prefix=prefix) == first_triggers
+    assert set(inspect(pg_engine).get_table_names()) == expected_tables | {
+        "tenant_platform_alembic_version"
+    }
+    with pg_engine.connect() as connection:
+        assert (
+            connection.execute(
+                text("SELECT version_num FROM tenant_platform_alembic_version")
+            ).scalar_one()
+            == PLATFORM_HEAD_REVISION
+        )
+
+
+def test_migration_and_runtime_schema_inventories_match(
+    pg_engine: Engine,
+) -> None:
+    migrated_prefix = "migrated"
+    runtime_prefix = "runtime"
+    upgrade_platform_schema(
+        engine_dsn(pg_engine),
+        prefix=migrated_prefix,
+    )
+    StagingSchema(runtime_prefix).metadata.create_all(pg_engine)
+
+    assert _schema_inventory(
+        pg_engine,
+        prefix=migrated_prefix,
+    ) == _schema_inventory(pg_engine, prefix=runtime_prefix)
+    assert _trigger_inventory(
+        pg_engine,
+        prefix=migrated_prefix,
+    ) == frozenset(
+        {
+            _TriggerInventory(
+                name="guard_pipeline_run_provenance",
+                table="pipeline_runs",
+                function="guard_pipeline_run_provenance",
+                timing="before",
+                orientation="row",
+                events=("update",),
+            )
+        }
+    )
+    assert _trigger_inventory(pg_engine, prefix=runtime_prefix) == frozenset()
+
+
+def test_upgrade_rejects_conflicting_table_without_destroying_data(
+    pg_engine: Engine,
+) -> None:
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE platform_pipeline_runs (
+                    marker TEXT PRIMARY KEY
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO platform_pipeline_runs (marker)
+                VALUES ('preexisting')
+                """
+            )
+        )
+    tables_before = set(inspect(pg_engine).get_table_names())
+
+    with pytest.raises(ProgrammingError):
+        _migrate(pg_engine)
+
+    assert set(inspect(pg_engine).get_table_names()) == tables_before
+    with pg_engine.connect() as connection:
+        assert (
+            connection.execute(
+                text("SELECT marker FROM platform_pipeline_runs")
+            ).scalar_one()
+            == "preexisting"
+        )
 
 
 def test_campaign_work_identity_is_unique(pg_engine: Engine) -> None:
