@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from threading import Barrier
 
 import pytest
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, create_engine, func, select
 
 from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
@@ -22,7 +24,12 @@ from dr_platform.staging.runs import (
     get_pipeline_run,
 )
 from dr_platform.staging.schema import StagingSchema
-from dr_platform.staging.submission import WorkInput, submit
+from dr_platform.staging.submission import (
+    SubmissionReceipt,
+    WorkInput,
+    submit,
+)
+from dr_platform.staging.work_items import WorkItemConflictError
 from tests.conftest import engine_dsn
 
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
@@ -71,6 +78,30 @@ def _item(index: int) -> WorkInput:
 def _migrate(engine: Engine) -> StagingSchema:
     upgrade_platform_schema(engine_dsn(engine))
     return StagingSchema()
+
+
+def _submit_after_barrier(
+    *,
+    engine: Engine,
+    registry: PipelineRegistry,
+    pipeline: PipelineDefinition,
+    barrier: Barrier,
+    item: WorkInput,
+) -> SubmissionReceipt:
+    def synchronized_items() -> Iterator[WorkInput]:
+        barrier.wait()
+        yield item
+
+    return submit(
+        campaign_key="campaign-1",
+        run_key="run-concurrent",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=synchronized_items(),
+        registry=registry,
+        engine=engine,
+        clock=lambda: NOW,
+    )
 
 
 def test_source_commits_before_it_is_exhausted(pg_engine: Engine) -> None:
@@ -236,6 +267,273 @@ def test_config_mismatched_resume_is_rejected(pg_engine: Engine) -> None:
             engine=pg_engine,
             clock=lambda: NOW,
         )
+
+
+@pytest.mark.parametrize(
+    ("campaign_key", "pipeline_key", "pipeline_version"),
+    [
+        ("campaign-other", PipelineKey("evaluation"), 1),
+        ("campaign-1", PipelineKey("evaluation-other"), 1),
+        ("campaign-1", PipelineKey("evaluation"), 2),
+    ],
+    ids=["campaign", "pipeline-key", "pipeline-version"],
+)
+def test_run_key_rejects_campaign_and_pipeline_provenance_changes(
+    pg_engine: Engine,
+    campaign_key: str,
+    pipeline_key: PipelineKey,
+    pipeline_version: int,
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=(),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    conflicting_pipeline = pipeline
+    if pipeline_key != pipeline.key or pipeline_version != pipeline.version:
+        conflicting_pipeline = PipelineDefinition(
+            key=pipeline_key,
+            version=pipeline_version,
+            stages=pipeline.stages,
+        )
+        registry.register(conflicting_pipeline)
+
+    with pytest.raises(PipelineRunConflictError):
+        submit(
+            campaign_key=campaign_key,
+            run_key="run-1",
+            pipeline=conflicting_pipeline.identity,
+            execution_config_reference="config:1",
+            items=(),
+            registry=registry,
+            engine=pg_engine,
+            clock=lambda: NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("input_reference", "labels"),
+    [
+        ("input:changed", {"cohort": "blue"}),
+        ("input:0", {"cohort": "red"}),
+    ],
+    ids=["input-reference", "labels"],
+)
+def test_reused_campaign_work_key_rejects_changed_immutable_facts(
+    pg_engine: Engine,
+    input_reference: str,
+    labels: dict[str, str],
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=(_item(0),),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(WorkItemConflictError):
+        submit(
+            campaign_key="campaign-1",
+            run_key="run-1",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:1",
+            items=(
+                WorkInput(
+                    work_key="work-0",
+                    input_reference=input_reference,
+                    labels=labels,
+                ),
+            ),
+            registry=registry,
+            engine=pg_engine,
+            clock=lambda: NOW,
+        )
+
+
+def test_matching_concurrent_submissions_converge(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+    barrier = Barrier(2)
+    engines = (
+        create_engine(engine_dsn(pg_engine)),
+        create_engine(engine_dsn(pg_engine)),
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = tuple(
+                executor.submit(
+                    _submit_after_barrier,
+                    engine=engine,
+                    registry=registry,
+                    pipeline=pipeline,
+                    barrier=barrier,
+                    item=_item(0),
+                )
+                for engine in engines
+            )
+            receipts = tuple(future.result() for future in futures)
+    finally:
+        for engine in engines:
+            engine.dispose()
+
+    with pg_engine.connect() as connection:
+        work_count = connection.execute(
+            select(func.count()).select_from(schema.work_items)
+        ).scalar_one()
+        stage_count = connection.execute(
+            select(func.count()).select_from(schema.stage_executions)
+        ).scalar_one()
+
+    assert sorted(
+        (receipt.inserted_count, receipt.already_existing_count)
+        for receipt in receipts
+    ) == [(0, 1), (1, 0)]
+    assert (work_count, stage_count) == (1, 1)
+
+
+def test_conflicting_concurrent_submissions_have_one_winner(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+    barrier = Barrier(2)
+    engines = (
+        create_engine(engine_dsn(pg_engine)),
+        create_engine(engine_dsn(pg_engine)),
+    )
+    items = (
+        _item(0),
+        WorkInput(
+            work_key="work-0",
+            input_reference="input:changed",
+            labels={"cohort": "blue"},
+        ),
+    )
+    receipts: list[SubmissionReceipt] = []
+    conflicts: list[WorkItemConflictError] = []
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = tuple(
+                executor.submit(
+                    _submit_after_barrier,
+                    engine=engine,
+                    registry=registry,
+                    pipeline=pipeline,
+                    barrier=barrier,
+                    item=item,
+                )
+                for engine, item in zip(engines, items, strict=True)
+            )
+            for future in futures:
+                try:
+                    receipts.append(future.result())
+                except WorkItemConflictError as error:
+                    conflicts.append(error)
+    finally:
+        for engine in engines:
+            engine.dispose()
+
+    with pg_engine.connect() as connection:
+        stored_references = (
+            connection.execute(select(schema.work_items.c.input_reference))
+            .scalars()
+            .all()
+        )
+        stage_count = connection.execute(
+            select(func.count()).select_from(schema.stage_executions)
+        ).scalar_one()
+
+    assert len(receipts) == 1
+    assert len(conflicts) == 1
+    assert (
+        receipts[0].inserted_count,
+        receipts[0].already_existing_count,
+    ) == (1, 0)
+    assert stored_references in [["input:0"], ["input:changed"]]
+    assert stage_count == 1
+
+
+def test_conflict_rolls_back_only_its_multi_item_chunk(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+    submit(
+        campaign_key="campaign-1",
+        run_key="run-seed",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:seed",
+        items=(
+            WorkInput(
+                work_key="work-conflict",
+                input_reference="input:original",
+                labels={"cohort": "blue"},
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(WorkItemConflictError):
+        submit(
+            campaign_key="campaign-1",
+            run_key="run-failing",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:failing",
+            items=(
+                _item(0),
+                _item(1),
+                _item(2),
+                WorkInput(
+                    work_key="work-conflict",
+                    input_reference="input:changed",
+                    labels={"cohort": "blue"},
+                ),
+            ),
+            registry=registry,
+            engine=pg_engine,
+            chunk_size=2,
+            clock=lambda: NOW,
+        )
+
+    with pg_engine.connect() as connection:
+        work_keys = (
+            connection.execute(
+                select(schema.work_items.c.work_key).order_by(
+                    schema.work_items.c.work_key
+                )
+            )
+            .scalars()
+            .all()
+        )
+        stage_count = connection.execute(
+            select(func.count()).select_from(schema.stage_executions)
+        ).scalar_one()
+        failed_run = get_pipeline_run(
+            connection,
+            run_key="run-failing",
+        )
+
+    assert work_keys == ["work-0", "work-1", "work-conflict"]
+    assert stage_count == 3
+    assert failed_run is not None
+    assert failed_run.submission_completed_at is None
 
 
 def test_new_items_have_only_the_first_stage_ready(
