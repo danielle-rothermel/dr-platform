@@ -20,6 +20,12 @@ The package does not interpret application payloads or privilege a source
 transport. A database query, API iterator, generated sequence, or file reader
 can all yield the same `WorkInput` values.
 
+The [vocabulary sheet](https://danielle-rothermel.github.io/dr-platform/)
+(source: `.defs/vocab.html`) is the authoritative statement of the
+staged-work pipeline contract this repo implements: the terms, the
+guarantees, what is in and out of scope, and the mapping from each term to
+the exported names.
+
 ## Pipeline and execution model
 
 A `PipelineDefinition` is an immutable, versioned, non-empty sequence of
