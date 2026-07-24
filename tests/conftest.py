@@ -4,7 +4,7 @@ import os
 from collections.abc import Iterator
 
 import pytest
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, make_url, text
 
 TEST_DATABASE_URL = os.environ.get(
     "DR_PLATFORM_TEST_DATABASE_URL",
@@ -23,34 +23,59 @@ def engine_dsn(engine: Engine) -> str:
     return engine.url.render_as_string(hide_password=False)
 
 
-@pytest.fixture(scope="session")
-def pg_url() -> str:
+def _validate_test_database_url(database_url: str) -> None:
+    database_name = make_url(database_url).database
+    if database_name is None or not database_name.endswith("_test"):
+        raise ValueError(
+            "DR_PLATFORM_TEST_DATABASE_URL must name a database ending in "
+            "'_test'"
+        )
+
+
+def _verify_postgres_available(database_url: str) -> None:
+    _validate_test_database_url(database_url)
+    engine = create_engine(database_url)
     try:
-        engine = create_engine(TEST_DATABASE_URL)
         with engine.connect():
             pass
-        engine.dispose()
-    except Exception:  # noqa: BLE001 -- any connect failure means skip
+    except Exception:
+        if os.environ.get("CI", "").lower() == "true":
+            raise
         pytest.skip(
             "postgres unavailable (set DR_PLATFORM_TEST_DATABASE_URL "
             "or create dr_platform_test)"
         )
+    finally:
+        engine.dispose()
+
+
+def _reset_test_database(database_url: str) -> None:
+    _validate_test_database_url(database_url)
+    engine = create_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            # pgcrypto installs its functions in public. Dropping public
+            # without removing the extension leaves a catalog entry whose
+            # functions no longer exist, so recreate the extension after the
+            # schema reset.
+            connection.execute(text("DROP EXTENSION IF EXISTS pgcrypto"))
+            connection.execute(text("DROP SCHEMA public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+            connection.execute(text("CREATE EXTENSION pgcrypto"))
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def pg_url() -> str:
+    _verify_postgres_available(TEST_DATABASE_URL)
     return TEST_DATABASE_URL
 
 
 @pytest.fixture
 def clean_pg(pg_url: str) -> str:
     """A scratch database with pgcrypto restored after each schema reset."""
-    engine = create_engine(pg_url)
-    with engine.begin() as connection:
-        # pgcrypto installs its functions in public. Dropping public without
-        # removing the extension leaves a catalog entry whose functions no
-        # longer exist, so recreate the extension after the schema reset.
-        connection.execute(text("DROP EXTENSION IF EXISTS pgcrypto"))
-        connection.execute(text("DROP SCHEMA public CASCADE"))
-        connection.execute(text("CREATE SCHEMA public"))
-        connection.execute(text("CREATE EXTENSION pgcrypto"))
-    engine.dispose()
+    _reset_test_database(pg_url)
     return pg_url
 
 

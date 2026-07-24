@@ -4,16 +4,107 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from psycopg import sql
 from sqlalchemy import Connection, Engine, create_engine
 
 from dr_platform.db import upgrade_platform_schema
 from dr_platform.staging.inspection import list_campaigns
+from tests import conftest
 from tests.conftest import engine_dsn
+
+
+class _UnavailableEngine:
+    def __init__(self) -> None:
+        self.disposed = False
+
+    def connect(self) -> None:
+        raise ConnectionError("postgres unavailable")
+
+    def dispose(self) -> None:
+        self.disposed = True
 
 
 def _quote_identifier(connection: Connection, value: str) -> str:
     return connection.dialect.identifier_preparer.quote(value)
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+psycopg:///dr_platform_test",
+        "postgresql+psycopg://user:secret@db:5432/team_agent_test",
+    ],
+)
+def test_test_database_identity_accepts_explicit_test_names(
+    database_url: str,
+) -> None:
+    conftest._validate_test_database_url(database_url)
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+psycopg:///postgres",
+        "postgresql+psycopg:///dr_platform",
+        "postgresql+psycopg://db.example.invalid",
+    ],
+)
+def test_test_database_identity_rejects_other_names(
+    database_url: str,
+) -> None:
+    with pytest.raises(ValueError, match="ending in '_test'"):
+        conftest._validate_test_database_url(database_url)
+
+
+def test_unsafe_database_url_is_rejected_before_destructive_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(_database_url: str) -> None:
+        pytest.fail("unsafe database URL reached engine creation")
+
+    monkeypatch.setattr(conftest, "create_engine", fail_if_called)
+
+    with pytest.raises(ValueError, match="ending in '_test'"):
+        conftest._reset_test_database("postgresql+psycopg:///dr_platform")
+
+
+def test_ci_connection_failure_fails_and_disposes_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _UnavailableEngine()
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setattr(
+        conftest,
+        "create_engine",
+        lambda _database_url: engine,
+    )
+
+    with pytest.raises(ConnectionError, match="postgres unavailable"):
+        conftest._verify_postgres_available(
+            "postgresql+psycopg:///dr_platform_test"
+        )
+
+    assert engine.disposed
+
+
+def test_local_connection_failure_skips_and_disposes_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _UnavailableEngine()
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(
+        conftest,
+        "create_engine",
+        lambda _database_url: engine,
+    )
+
+    with pytest.raises(pytest.skip.Exception, match="postgres unavailable"):
+        conftest._verify_postgres_available(
+            "postgresql+psycopg:///dr_platform_test"
+        )
+
+    assert engine.disposed
 
 
 def test_password_dsn_survives_rendering_reconnection_and_migration(
