@@ -21,8 +21,12 @@ from dr_platform.staging.runs import (
 )
 from dr_platform.staging.schema import StagingSchema
 from dr_platform.staging.stage_attempts import (
+    StageAttemptSequenceError,
+    StageAttemptTerminalError,
     append_stage_attempt,
     list_stage_attempts,
+    mark_stage_attempt_admitted,
+    record_stage_attempt_terminal,
 )
 from dr_platform.staging.stage_executions import (
     StageTransitionError,
@@ -35,7 +39,10 @@ from dr_platform.staging.work_items import insert_work_item
 from tests.conftest import engine_dsn
 
 if TYPE_CHECKING:
-    from dr_platform.staging.records import StageExecutionRecord
+    from dr_platform.staging.records import (
+        StageAttemptRecord,
+        StageExecutionRecord,
+    )
 
 STAGING_TABLES = {
     "platform_pipeline_runs",
@@ -351,6 +358,76 @@ def test_stage_attempt_append_rejects_stale_created_at(
     assert unchanged.current_attempt == 0
     assert unchanged.updated_at == latest
     assert attempts == ()
+
+
+def test_stage_attempt_lifecycle_fills_one_row_once(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    admitted_at = NOW + timedelta(seconds=1)
+    terminal_at = NOW + timedelta(seconds=2)
+
+    with pg_engine.begin() as connection:
+        execution = _create_stage_execution(connection)
+        pending = append_stage_attempt(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+            created_at=NOW,
+        )
+        admitted = mark_stage_attempt_admitted(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+            attempt_number=pending.attempt_number,
+            admitted_at=admitted_at,
+        )
+        terminal = record_stage_attempt_terminal(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+            attempt_number=pending.attempt_number,
+            terminal_at=terminal_at,
+            terminal_summary={"outcome": "failed"},
+            terminal_reference="builtins.RuntimeError",
+        )
+        attempts = list_stage_attempts(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+        )
+
+        with pytest.raises(StageAttemptSequenceError):
+            mark_stage_attempt_admitted(
+                connection,
+                stage_execution_id=execution.stage_execution_id,
+                attempt_number=pending.attempt_number,
+                admitted_at=terminal_at,
+            )
+        with pytest.raises(StageAttemptTerminalError):
+            record_stage_attempt_terminal(
+                connection,
+                stage_execution_id=execution.stage_execution_id,
+                attempt_number=pending.attempt_number,
+                terminal_at=terminal_at,
+                terminal_summary={"outcome": "changed"},
+            )
+
+    def identity(record: StageAttemptRecord) -> tuple[object, ...]:
+        return (
+            record.stage_attempt_id,
+            record.stage_execution_id,
+            record.attempt_number,
+            record.workflow_id,
+            record.created_at,
+        )
+
+    assert identity(pending) == identity(admitted) == identity(terminal)
+    assert pending.admitted_at is None
+    assert pending.terminal_at is None
+    assert admitted.admitted_at == admitted_at
+    assert admitted.terminal_at is None
+    assert terminal.admitted_at == admitted_at
+    assert terminal.terminal_at == terminal_at
+    assert terminal.terminal_summary == {"outcome": "failed"}
+    assert terminal.terminal_reference == "builtins.RuntimeError"
+    assert attempts == (terminal,)
 
 
 def test_stage_attempt_terminal_summary_is_recursively_immutable(

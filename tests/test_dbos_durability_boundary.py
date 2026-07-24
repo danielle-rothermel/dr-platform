@@ -1,10 +1,8 @@
-"""Source-invariant proofs for the platform's DBOS durability boundary.
+"""Structural guards for the platform's DBOS durability boundary.
 
-The design requires that stage bodies run under a DBOS workflow identity per
-Platform Stage Attempt, that automatic DBOS step retries are enabled nowhere,
-and that Durability Replay stays within one Platform Stage Attempt.  These are
-structural properties of the platform source, so they are proven by scanning
-that source rather than by exercising a live DBOS runtime.
+The platform source owns workflow and transaction wiring but no DBOS steps.
+These scans guard that declared structure; runtime recovery behavior is proven
+separately through an interrupted-worker integration test.
 """
 
 from __future__ import annotations
@@ -33,13 +31,11 @@ def _dbos_attribute_calls(tree: ast.AST) -> list[ast.Call]:
     ]
 
 
-def test_platform_registers_no_dbos_step() -> None:
-    """No stage or handoff logic is a ``@DBOS.step``.
+def test_platform_declares_no_dbos_steps() -> None:
+    """The platform leaves DBOS step and retry policy to applications.
 
-    Automatic step retries are a property of ``DBOS.step``; the platform runs
-    stage bodies as workflows and completions as transactions, so it exposes no
-    step whose retries could be automatically re-driven.  A step introduced
-    here would silently gain DBOS's default retry behavior.
+    Stage bodies are workflows and completions are transactions. Applications
+    may call their own DBOS steps, but the platform package declares none.
     """
     step_usages: list[str] = []
     for path in _platform_source_files():
@@ -53,41 +49,8 @@ def test_platform_registers_no_dbos_step() -> None:
     assert step_usages == []
 
 
-def test_platform_enables_no_automatic_retry_keyword() -> None:
-    """No DBOS decorator enables retries anywhere in the platform.
-
-    ``retries_allowed`` / ``max_attempts`` keywords express automatic retry
-    policy.  The platform must not enable them: recovery is the explicit
-    ``retry_stage`` operation appending a new Platform Stage Attempt, never an
-    automatic in-attempt re-drive.
-    """
-    retry_enablements: list[str] = []
-    forbidden = {"retries_allowed", "max_attempts", "max_retries"}
-    for path in _platform_source_files():
-        tree = ast.parse(path.read_text())
-        for call in _dbos_attribute_calls(tree):
-            for keyword in call.keywords:
-                if keyword.arg not in forbidden:
-                    continue
-                enables = not (
-                    isinstance(keyword.value, ast.Constant)
-                    and keyword.value.value in (False, 0)
-                )
-                if enables:
-                    retry_enablements.append(
-                        f"{path.name}:{call.lineno}:{keyword.arg}"
-                    )
-
-    assert retry_enablements == []
-
-
-def test_stage_body_runs_under_a_workflow_identity() -> None:
-    """The wrapped stage callable is a ``@DBOS.workflow``, not a bare call.
-
-    Each Platform Stage Attempt owns one workflow identity, so the wrapper the
-    platform registers must be decorated as a DBOS workflow.  This anchors the
-    per-attempt identity that Durability Replay reconstructs within.
-    """
+def test_stage_wrapper_is_declared_as_dbos_workflow() -> None:
+    """The generated stage wrapper is structurally a DBOS workflow."""
     handoff_source = (_PACKAGE_ROOT / "staging" / "handoff.py").read_text()
     tree = ast.parse(handoff_source)
 

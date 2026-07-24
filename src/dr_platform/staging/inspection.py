@@ -304,7 +304,7 @@ def get_work_item_stages(
     engine: Engine,
     schema: StagingSchema | None = None,
 ) -> tuple[StageExecutionSummary, ...]:
-    """Return every logical stage and its append-only attempts."""
+    """Return every logical stage and its ordered attempts."""
     _validate_work_item_id(work_item_id)
     selected_schema = schema or StagingSchema()
     table = selected_schema.stage_executions

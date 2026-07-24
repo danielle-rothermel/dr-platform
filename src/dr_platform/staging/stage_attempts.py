@@ -1,4 +1,4 @@
-"""Persistence leaf operations for append-only stage attempts."""
+"""Persistence leaf operations for ordered stage-attempt sequences."""
 
 from __future__ import annotations
 
