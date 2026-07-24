@@ -300,10 +300,10 @@ validate colocation and fail fast when the URLs identify different databases.
 The staging tables use the same `upgrade_platform_schema` Alembic chain as the
 rest of the package.
 
-**Migration lineage.** The Alembic history was reset to a single fresh
-baseline (`0001_staging_baseline`); there is deliberately no upgrade bridge
-from earlier schemas. A database created from a pre-cutover rebuild branch,
-or from the old kernel, must be recreated rather than upgraded in place.
+**Migration lineage.** `0001_staging_baseline` is the root of the supported
+Alembic chain. Apply the chain only to a database that has no platform schema.
+If a database already contains platform tables outside this lineage, archive
+it and initialize a replacement instead of attempting an in-place upgrade.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher
 before `DBOS.launch()`. Keep the returned dispatcher registration alive while
