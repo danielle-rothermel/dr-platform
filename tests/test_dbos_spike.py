@@ -88,7 +88,8 @@ def test_enqueue_in_platform_transaction_commits_and_rolls_back_atomically(
             assert (
                 connection.execute(
                     text(
-                        "SELECT value FROM dbos_spike_platform_rows WHERE id = :id"
+                        "SELECT value FROM dbos_spike_platform_rows "
+                        "WHERE id = :id"
                     ),
                     {"id": PLATFORM_ROW_ID},
                 ).scalar_one()
@@ -125,7 +126,8 @@ def test_enqueue_in_platform_transaction_commits_and_rolls_back_atomically(
             assert (
                 connection.execute(
                     text(
-                        "SELECT value FROM dbos_spike_platform_rows WHERE id = :id"
+                        "SELECT value FROM dbos_spike_platform_rows"
+                        "WHERE id = :id"
                     ),
                     {"id": PLATFORM_ROW_ID},
                 ).scalar_one()
@@ -184,7 +186,7 @@ def test_dbos_checkpointed_transaction_writes_platform_table(
         assert (
             connection.execute(
                 text(
-                    "SELECT value FROM dbos_spike_platform_rows WHERE id = :id"
+                    "SELECT value FROM dbos_spike_platform_rowsWHERE id = :id"
                 ),
                 {"id": PLATFORM_ROW_ID},
             ).scalar_one()
