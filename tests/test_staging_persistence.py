@@ -88,10 +88,7 @@ def test_fresh_baseline_creates_only_the_staged_work_schema(
     tables = set(inspect(pg_engine).get_table_names())
     with pg_engine.connect() as connection:
         installed_revision = connection.execute(
-            text(
-                "SELECT version_num FROM "
-                "platform_platform_alembic_version"
-            )
+            text("SELECT version_num FROM platform_platform_alembic_version")
         ).scalar_one()
 
     assert PLATFORM_BASELINE_REVISION == PLATFORM_HEAD_REVISION

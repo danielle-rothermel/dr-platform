@@ -39,6 +39,7 @@ DBOS_SYSTEM_DATABASE_URL_ENV = "DBOS_SYSTEM_DATABASE_URL"
 POSTGRESQL_URL_PREFIX = "postgresql://"
 POSTGRESQL_PSYCOPG_URL_PREFIX = "postgresql+psycopg://"
 
+
 class DbosWorkflowStatus(StrEnum):
     PENDING = "PENDING"
     SUCCESS = "SUCCESS"

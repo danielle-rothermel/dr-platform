@@ -336,9 +336,7 @@ def test_completion_and_next_ready_insert_roll_back_together(
         campaign_key="campaign-atomic",
         run_key="run-atomic",
         items=(
-            WorkInput(
-                work_key="work", input_reference="input", labels={}
-            ),
+            WorkInput(work_key="work", input_reference="input", labels={}),
         ),
     )
     admission_client = _RecordingClient()
@@ -433,9 +431,7 @@ def test_output_reference_is_transported_opaquely_without_parsing(
         campaign_key="campaign-opaque-output",
         run_key="run-opaque-output",
         items=(
-            WorkInput(
-                work_key="work", input_reference="input", labels={}
-            ),
+            WorkInput(work_key="work", input_reference="input", labels={}),
         ),
     )
     admission_client = _RecordingClient()
@@ -621,9 +617,7 @@ def test_application_failure_with_unprintable_error_lands_failed(
         campaign_key=f"campaign-unprintable-{suffix}",
         run_key=f"run-unprintable-{suffix}",
         items=(
-            WorkInput(
-                work_key="work", input_reference="input", labels={}
-            ),
+            WorkInput(work_key="work", input_reference="input", labels={}),
         ),
     )
     Queue(pipeline.stages[0].queue_name, polling_interval_sec=0.02)
@@ -833,9 +827,7 @@ def test_sweep_projects_an_abandoned_attempt_with_an_unprintable_error(
         campaign_key="campaign-sweep-unprintable",
         run_key="run-sweep-unprintable",
         items=(
-            WorkInput(
-                work_key="work", input_reference="input", labels={}
-            ),
+            WorkInput(work_key="work", input_reference="input", labels={}),
         ),
     )
     admission_client = _RecordingClient()

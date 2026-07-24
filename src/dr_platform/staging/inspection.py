@@ -117,12 +117,16 @@ def inspect_campaign(
     normalized_campaign = _campaign_key(campaign_key)
     statement = _campaign_summary_statement(selected_schema)
     with engine.connect() as connection:
-        row = connection.execute(
-            statement.where(
-                statement.selected_columns.campaign_key
-                == normalized_campaign.value
+        row = (
+            connection.execute(
+                statement.where(
+                    statement.selected_columns.campaign_key
+                    == normalized_campaign.value
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
     if row is None:
         raise LookupError(f"campaign is unknown: {normalized_campaign.value}")
     return _decode_campaign_summary(row)
@@ -478,14 +482,10 @@ def _state_counts(
         .order_by(executions.c.state)
     )
     if campaign_key is not None:
-        statement = statement.where(
-            items.c.campaign_key == campaign_key.value
-        )
+        statement = statement.where(items.c.campaign_key == campaign_key.value)
     else:
         assert run_key is not None
-        statement = statement.where(
-            items.c.origin_run_key == run_key.value
-        )
+        statement = statement.where(items.c.origin_run_key == run_key.value)
     with engine.connect() as connection:
         if campaign_key is not None:
             _require_campaign(

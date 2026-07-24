@@ -78,8 +78,7 @@ def test_build_platform_dbos_config_system_url_fallbacks(
         database_url="postgresql://app-user@app/db",
     )
     assert (
-        from_app.system_database_url
-        == "postgresql+psycopg://app-user@app/db"
+        from_app.system_database_url == "postgresql+psycopg://app-user@app/db"
     )
 
 

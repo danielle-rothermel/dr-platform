@@ -61,15 +61,9 @@ def upgrade() -> None:
         sa.Column("campaign_key", sa.Text(), nullable=False),
         sa.Column("pipeline_key", sa.Text(), nullable=False),
         sa.Column("pipeline_version", sa.Integer(), nullable=False),
-        sa.Column(
-            "execution_config_reference", sa.Text(), nullable=False
-        ),
-        sa.Column(
-            "created_at", sa.DateTime(timezone=True), nullable=False
-        ),
-        sa.Column(
-            "submission_completed_at", sa.DateTime(timezone=True)
-        ),
+        sa.Column("execution_config_reference", sa.Text(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("submission_completed_at", sa.DateTime(timezone=True)),
         sa.CheckConstraint(
             "pipeline_version > 0",
             name=_name(prefix, "ck_pipeline_runs_version"),
@@ -181,12 +175,8 @@ def upgrade() -> None:
         sa.Column("current_attempt", sa.Integer(), nullable=False),
         sa.Column("rank", sa.BigInteger(), nullable=False),
         sa.Column("output_reference", sa.Text()),
-        sa.Column(
-            "created_at", sa.DateTime(timezone=True), nullable=False
-        ),
-        sa.Column(
-            "updated_at", sa.DateTime(timezone=True), nullable=False
-        ),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
             "stage_index >= 0",
             name=_name(prefix, "ck_stage_executions_index"),
@@ -242,9 +232,7 @@ def upgrade() -> None:
         sa.Column("workflow_id", sa.Text(), nullable=False),
         sa.Column("terminal_summary", postgresql.JSONB()),
         sa.Column("terminal_reference", sa.Text()),
-        sa.Column(
-            "created_at", sa.DateTime(timezone=True), nullable=False
-        ),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("admitted_at", sa.DateTime(timezone=True)),
         sa.Column("terminal_at", sa.DateTime(timezone=True)),
         sa.CheckConstraint(
@@ -301,9 +289,7 @@ def upgrade() -> None:
         sa.Column("selector", postgresql.JSONB(), nullable=False),
         sa.Column("capacity", sa.Integer(), nullable=False),
         sa.Column("paused", sa.Boolean(), nullable=False),
-        sa.Column(
-            "updated_at", sa.DateTime(timezone=True), nullable=False
-        ),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
             "pipeline_version > 0",
             name=_name(prefix, "ck_stage_controls_version"),
@@ -331,8 +317,7 @@ def downgrade() -> None:
     prefix = _prefix()
     provenance_guard = _name(prefix, "guard_pipeline_run_provenance")
     _execute(
-        f"DROP TRIGGER {provenance_guard} "
-        f"ON {_name(prefix, 'pipeline_runs')}"
+        f"DROP TRIGGER {provenance_guard} ON {_name(prefix, 'pipeline_runs')}"
     )
     _execute(f"DROP FUNCTION {provenance_guard}()")
     op.drop_table(_name(prefix, "stage_controls"))

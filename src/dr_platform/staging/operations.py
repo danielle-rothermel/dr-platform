@@ -391,9 +391,7 @@ def _resolve_work_item_id(
             table.c.work_key == identity.work_key.value,
         )
     else:
-        raise ValueError(
-            "campaign_key and work_key must be supplied together"
-        )
+        raise ValueError("campaign_key and work_key must be supplied together")
     resolved = connection.execute(statement).scalar_one_or_none()
     if resolved is None:
         raise LookupError("work item does not exist")
@@ -469,9 +467,7 @@ def _cancel_current_stage(
             schema=schema,
         )
         if attempt is None or attempt.terminal_at is not None:
-            raise RuntimeError(
-                "ADMITTED stage has no active current attempt"
-            )
+            raise RuntimeError("ADMITTED stage has no active current attempt")
         workflow_id = attempt.workflow_id
         disposition = CancellationDisposition.CANCELLED_ADMITTED
 

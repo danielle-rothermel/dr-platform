@@ -113,9 +113,7 @@ def test_pipeline_identity_round_trips_through_registry() -> None:
     twin = PipelineIdentity(PipelineKey("evaluation"), 1)
     assert identity == twin
     assert hash(identity) == hash(twin)
-    assert (
-        registry.get(key=identity.key, version=identity.version) is pipeline
-    )
+    assert registry.get(key=identity.key, version=identity.version) is pipeline
 
 
 def test_pipeline_rejects_an_empty_stage_tuple() -> None:

@@ -85,12 +85,15 @@ def test_enqueue_in_platform_transaction_commits_and_rolls_back_atomically(
             assert handle.get_workflow_id() == commit_workflow_id
 
         with pg_engine.connect() as connection:
-            assert connection.execute(
-                text(
-                    "SELECT value FROM dbos_spike_platform_rows WHERE id = :id"
-                ),
-                {"id": PLATFORM_ROW_ID},
-            ).scalar_one() == "committed"
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT value FROM dbos_spike_platform_rows WHERE id = :id"
+                    ),
+                    {"id": PLATFORM_ROW_ID},
+                ).scalar_one()
+                == "committed"
+            )
             assert connection.execute(
                 text(
                     """
@@ -119,22 +122,28 @@ def test_enqueue_in_platform_transaction_commits_and_rolls_back_atomically(
             transaction.rollback()
 
         with pg_engine.connect() as connection:
-            assert connection.execute(
-                text(
-                    "SELECT value FROM dbos_spike_platform_rows WHERE id = :id"
-                ),
-                {"id": PLATFORM_ROW_ID},
-            ).scalar_one() == "committed"
-            assert connection.execute(
-                text(
-                    """
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT value FROM dbos_spike_platform_rows WHERE id = :id"
+                    ),
+                    {"id": PLATFORM_ROW_ID},
+                ).scalar_one()
+                == "committed"
+            )
+            assert (
+                connection.execute(
+                    text(
+                        """
                     SELECT count(*)
                     FROM dbos.workflow_status
                     WHERE workflow_uuid = :workflow_id
                     """
-                ),
-                {"workflow_id": rollback_workflow_id},
-            ).scalar_one() == 0
+                    ),
+                    {"workflow_id": rollback_workflow_id},
+                ).scalar_one()
+                == 0
+            )
     finally:
         client.destroy()
 
@@ -172,17 +181,25 @@ def test_dbos_checkpointed_transaction_writes_platform_table(
         DBOS.destroy(destroy_registry=True)
 
     with pg_engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT value FROM dbos_spike_platform_rows WHERE id = :id"),
-            {"id": PLATFORM_ROW_ID},
-        ).scalar_one() == "checkpointed"
-        assert connection.execute(
-            text(
-                """
+        assert (
+            connection.execute(
+                text(
+                    "SELECT value FROM dbos_spike_platform_rows WHERE id = :id"
+                ),
+                {"id": PLATFORM_ROW_ID},
+            ).scalar_one()
+            == "checkpointed"
+        )
+        assert (
+            connection.execute(
+                text(
+                    """
                 SELECT function_name
                 FROM dbos.transaction_outputs
                 WHERE workflow_uuid = :workflow_id
                 """
-            ),
-            {"workflow_id": workflow_id},
-        ).scalar_one() == "dbos_spike_write_platform_row"
+                ),
+                {"workflow_id": workflow_id},
+            ).scalar_one()
+            == "dbos_spike_write_platform_row"
+        )

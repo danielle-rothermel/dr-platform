@@ -255,9 +255,7 @@ def test_new_items_have_only_the_first_stage_ready(
                         schema.stage_executions.c.stage_key,
                         schema.stage_executions.c.stage_index,
                         schema.stage_executions.c.state,
-                    ).order_by(
-                        schema.stage_executions.c.stage_execution_id
-                    )
+                    ).order_by(schema.stage_executions.c.stage_execution_id)
                 ).tuples()
             )
         yield _item(2)
@@ -405,9 +403,12 @@ def test_work_input_never_validates_reference_structure() -> None:
         "objref://missing-content-hash",
         '{"looks":"like json","but":"is not parsed"}',
     ):
-        assert WorkInput(
-            work_key="work", input_reference=opaque, labels={}
-        ).input_reference == opaque
+        assert (
+            WorkInput(
+                work_key="work", input_reference=opaque, labels={}
+            ).input_reference
+            == opaque
+        )
 
     with pytest.raises(ValueError, match="input reference"):
         WorkInput(work_key="work", input_reference="", labels={})

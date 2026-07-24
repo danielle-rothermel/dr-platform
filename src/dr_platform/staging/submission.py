@@ -69,9 +69,7 @@ class WorkInput:
         )
         normalized_labels = validate_labels(labels, label="work input labels")
         object.__setattr__(self, "work_key", normalized_work_key)
-        object.__setattr__(
-            self, "input_reference", normalized_input_reference
-        )
+        object.__setattr__(self, "input_reference", normalized_input_reference)
         object.__setattr__(
             self,
             "labels",

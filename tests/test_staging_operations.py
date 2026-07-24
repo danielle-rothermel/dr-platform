@@ -265,12 +265,15 @@ def test_lowering_capacity_drains_without_preempting_admitted_work(
         clock=lambda: NOW,
     )
     client = _RecordingClient()
-    assert run_admission_pass(
-        pg_engine,
-        client=_as_dbos_client(client),
-        registry=registry,
-        clock=lambda: NOW,
-    ).admitted_total == 3
+    assert (
+        run_admission_pass(
+            pg_engine,
+            client=_as_dbos_client(client),
+            registry=registry,
+            clock=lambda: NOW,
+        ).admitted_total
+        == 3
+    )
 
     set_stage_capacity(
         pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
@@ -286,12 +289,15 @@ def test_lowering_capacity_drains_without_preempting_admitted_work(
         work_keys=("work-3",),
     )
 
-    assert run_admission_pass(
-        pg_engine,
-        client=_as_dbos_client(client),
-        registry=registry,
-        clock=lambda: NOW + timedelta(seconds=2),
-    ).admitted_total == 0
+    assert (
+        run_admission_pass(
+            pg_engine,
+            client=_as_dbos_client(client),
+            registry=registry,
+            clock=lambda: NOW + timedelta(seconds=2),
+        ).admitted_total
+        == 0
+    )
     rows = _execution_rows(pg_engine, schema)
     assert [row[2] for row in rows].count("admitted") == 3
     assert [row[2] for row in rows].count("ready") == 1
@@ -306,12 +312,15 @@ def test_lowering_capacity_drains_without_preempting_admitted_work(
                 output_reference=f"output:{stage_execution_id}",
                 updated_at=NOW + timedelta(seconds=3),
             )
-    assert run_admission_pass(
-        pg_engine,
-        client=_as_dbos_client(client),
-        registry=registry,
-        clock=lambda: NOW + timedelta(seconds=4),
-    ).admitted_total == 1
+    assert (
+        run_admission_pass(
+            pg_engine,
+            client=_as_dbos_client(client),
+            registry=registry,
+            clock=lambda: NOW + timedelta(seconds=4),
+        ).admitted_total
+        == 1
+    )
 
 
 def test_retry_preserves_lineage_and_readmits_prepared_attempt(
@@ -366,12 +375,15 @@ def test_retry_preserves_lineage_and_readmits_prepared_attempt(
     assert retried.new_attempt.workflow_id.endswith("-a2")
     assert retried.new_attempt.admitted_at is None
 
-    assert run_admission_pass(
-        pg_engine,
-        client=_as_dbos_client(client),
-        registry=registry,
-        clock=lambda: NOW + timedelta(seconds=3),
-    ).admitted_total == 1
+    assert (
+        run_admission_pass(
+            pg_engine,
+            client=_as_dbos_client(client),
+            registry=registry,
+            clock=lambda: NOW + timedelta(seconds=3),
+        ).admitted_total
+        == 1
+    )
     with pg_engine.connect() as connection:
         attempts = list_stage_attempts(
             connection,
@@ -468,9 +480,12 @@ def test_cancellation_delegates_only_an_admitted_exact_attempt(
             completed_at=NOW + timedelta(seconds=3),
         )
     with pg_engine.connect() as connection:
-        assert connection.execute(
-            select(func.count()).select_from(schema.stage_executions)
-        ).scalar_one() == 2
+        assert (
+            connection.execute(
+                select(func.count()).select_from(schema.stage_executions)
+            ).scalar_one()
+            == 2
+        )
 
 
 def test_exact_label_pause_resume_preserves_capacity(

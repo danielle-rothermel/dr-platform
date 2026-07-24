@@ -159,9 +159,9 @@ def _wrap_stage_workflow(
             completed_at=clock(),
         )
 
-    complete_stage = DBOS.transaction(
-        name=f"{workflow_name}_complete"
-    )(_complete_stage_transaction)
+    complete_stage = DBOS.transaction(name=f"{workflow_name}_complete")(
+        _complete_stage_transaction
+    )
 
     @DBOS.workflow(name=workflow_name)
     def run_stage(*args: object) -> str | None:
@@ -206,9 +206,7 @@ def _wrap_stage_workflow(
             next_stage_key=(
                 None if next_stage is None else next_stage.key.value
             ),
-            next_stage_index=(
-                None if next_stage is None else stage_index + 1
-            ),
+            next_stage_index=(None if next_stage is None else stage_index + 1),
         )
         return output_reference
 
@@ -413,9 +411,7 @@ def _stage_workflow_name(
     pipeline_version: int,
     stage_key: StageKey,
 ) -> str:
-    identity = (
-        f"{pipeline_key.value}\0{pipeline_version}\0{stage_key.value}"
-    )
+    identity = f"{pipeline_key.value}\0{pipeline_version}\0{stage_key.value}"
     # This truncated digest only disambiguates the DBOS workflow *name* for
     # display/routing; it is not an identity or content hash.  Attempt
     # identity uses the full-length digest in recipes.stage_workflow_id.

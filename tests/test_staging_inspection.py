@@ -279,9 +279,7 @@ def test_inspection_readers_are_bounded_cursor_stable_and_frozen(
     assert len(stages) == 1
     assert stages[0].attempts == ()
     assert controls[0].capacity == 4
-    assert campaign_state_counts(
-        "campaign-a", engine=pg_engine
-    )[0].count == 3
+    assert campaign_state_counts("campaign-a", engine=pg_engine)[0].count == 3
     assert run_state_counts("run-a1", engine=pg_engine)[0].count == 2
     with pytest.raises(FrozenInstanceError):
         first_item[0].state = StageExecutionState.FAILED  # ty: ignore[invalid-assignment]
@@ -449,15 +447,21 @@ def test_six_seed_top_up_uses_bulk_statuses_for_one_campaign(
     assert refreshed[WorkKey(existing_keys[1])].state is (
         StageExecutionState.READY
     )
-    assert get_work_item_stages(
-        executions[existing_keys[1]][0], engine=pg_engine
-    )[0].execution.current_attempt == 2
+    assert (
+        get_work_item_stages(
+            executions[existing_keys[1]][0], engine=pg_engine
+        )[0].execution.current_attempt
+        == 2
+    )
     with pg_engine.connect() as connection:
-        assert connection.execute(
-            select(func.count())
-            .select_from(schema.work_items)
-            .where(schema.work_items.c.origin_run_key == "run-top-up")
-        ).scalar_one() == 3
+        assert (
+            connection.execute(
+                select(func.count())
+                .select_from(schema.work_items)
+                .where(schema.work_items.c.origin_run_key == "run-top-up")
+            ).scalar_one()
+            == 3
+        )
 
 
 def test_attempts_never_count_as_additional_samples(
@@ -511,9 +515,10 @@ def test_attempts_never_count_as_additional_samples(
     assert status.present is True
     assert status.state is StageExecutionState.ADMITTED
     assert len(stages[0].attempts) == 2
-    assert campaign_state_counts(
-        "campaign-attempts", engine=pg_engine
-    )[0].count == 1
+    assert (
+        campaign_state_counts("campaign-attempts", engine=pg_engine)[0].count
+        == 1
+    )
 
 
 def test_bulk_reader_chunks_and_reports_absent_keys(
