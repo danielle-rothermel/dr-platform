@@ -5,11 +5,15 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
 import pytest
-from dbos import DBOSClient, EnqueueOptions
+from dbos import DBOS, DBOSClient, DBOSConfig, EnqueueOptions
+from psycopg.errors import LockNotAvailable
 from sqlalchemy import Engine, create_engine, func, select, text
+from sqlalchemy.exc import OperationalError
 
 from dr_platform.db.migrate import upgrade_platform_schema
 from dr_platform.staging import (
@@ -175,16 +179,20 @@ def _wait_until_row_locked(engine: Engine, stage_execution_id: int) -> None:
                     .where(table.c.stage_execution_id == stage_execution_id)
                     .with_for_update(nowait=True)
                 )
-        except Exception:  # noqa: BLE001 -- NOWAIT lock contention means locked
+        except OperationalError as error:
+            if not isinstance(error.orig, LockNotAvailable):
+                raise
             return
         time.sleep(0.01)
     raise AssertionError("source row was never locked by the handoff holder")
 
 
 def _wait_until_blocked_on_lock(
-    engine: Engine, stage_execution_id: int
+    engine: Engine,
+    *,
+    application_name: str,
 ) -> None:
-    """Block until another backend is waiting on a heavyweight lock."""
+    """Block until the intended cancellation backend is waiting on a lock."""
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         with engine.connect() as probe:
@@ -193,13 +201,32 @@ def _wait_until_blocked_on_lock(
                     "SELECT count(*) FROM pg_stat_activity "
                     "WHERE wait_event_type = 'Lock' "
                     "AND datname = current_database() "
-                    "AND pid <> pg_backend_pid()"
-                )
+                    "AND application_name = :application_name"
+                ),
+                {"application_name": application_name},
             ).scalar_one()
-        if waiting and waiting > 0:
+        if waiting == 1:
             return
         time.sleep(0.01)
-    raise AssertionError("cancel never blocked on the source row lock")
+    raise AssertionError(
+        "the intended cancellation backend never blocked on the source "
+        "row lock"
+    )
+
+
+def _launch_dbos_schema(database_url: str, *, suffix: str) -> None:
+    config: DBOSConfig = {
+        "name": f"drp-operations-{suffix[:12]}",
+        "system_database_url": database_url,
+        "application_version": f"operations-{suffix}",
+        "run_admin_server": False,
+        "use_listen_notify": False,
+    }
+    try:
+        DBOS(config=config)
+        DBOS.launch()
+    finally:
+        DBOS.destroy(destroy_registry=True)
 
 
 def _admit_one(
@@ -397,6 +424,66 @@ def test_retry_preserves_lineage_and_readmits_prepared_attempt(
     assert _execution_rows(pg_engine, schema)[0][2:] == ("admitted", 2)
 
 
+def test_concurrent_retry_prepares_exactly_one_new_attempt(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    stage_execution_id, _work_item_id = _admit_one(
+        pg_engine,
+        registry,
+        schema,
+        run_key="run-concurrent-retry",
+        work_key="work-concurrent-retry",
+    )
+    with pg_engine.begin() as connection:
+        transition_stage_execution(
+            connection,
+            stage_execution_id=stage_execution_id,
+            new_state=StageExecutionState.FAILED,
+            updated_at=NOW + timedelta(seconds=1),
+        )
+        record_stage_attempt_terminal(
+            connection,
+            stage_execution_id=stage_execution_id,
+            attempt_number=1,
+            terminal_at=NOW + timedelta(seconds=1),
+            terminal_summary={"outcome": "failed"},
+        )
+
+    start = Barrier(2)
+
+    def retry_concurrently() -> object:
+        start.wait()
+        return retry_stage(
+            stage_execution_id,
+            engine=pg_engine,
+            clock=lambda: NOW + timedelta(seconds=2),
+        )
+
+    successes: list[object] = []
+    failures: list[ValueError] = []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(retry_concurrently) for _ in range(2)]
+        for future in futures:
+            try:
+                successes.append(future.result())
+            except ValueError as error:
+                failures.append(error)
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert str(failures[0]) == "only a FAILED stage execution can be retried"
+    assert _execution_rows(pg_engine, schema)[0][2:] == ("ready", 2)
+    with pg_engine.connect() as connection:
+        attempts = list_stage_attempts(
+            connection,
+            stage_execution_id=stage_execution_id,
+        )
+    assert [attempt.attempt_number for attempt in attempts] == [1, 2]
+    assert attempts[1].admitted_at is None
+
+
 def test_cancellation_delegates_only_an_admitted_exact_attempt(
     pg_engine: Engine,
 ) -> None:
@@ -488,6 +575,82 @@ def test_cancellation_delegates_only_an_admitted_exact_attempt(
         )
 
 
+def test_live_dbos_cancellation_targets_only_the_admitted_workflow(
+    clean_pg: str,
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    suffix = uuid4().hex
+    stage_execution_id, work_item_id = _admit_one(
+        pg_engine,
+        registry,
+        schema,
+        run_key="run-live-cancel",
+        work_key=f"work-live-cancel-{suffix}",
+    )
+    with pg_engine.connect() as connection:
+        attempt = get_stage_attempt(
+            connection,
+            stage_execution_id=stage_execution_id,
+            attempt_number=1,
+        )
+    assert attempt is not None
+
+    child_workflow_id = f"operations-child-{suffix}"
+    _launch_dbos_schema(clean_pg, suffix=suffix)
+    client = DBOSClient(system_database_url=clean_pg)
+    try:
+        with pg_engine.begin() as connection:
+            for workflow_id in (attempt.workflow_id, child_workflow_id):
+                options: EnqueueOptions = {
+                    "workflow_name": "operations_cancellation_probe",
+                    "queue_name": "operations-cancellation-probe",
+                    "workflow_id": workflow_id,
+                }
+                client.enqueue_in_transaction(connection, options)
+            connection.execute(
+                text(
+                    "UPDATE dbos.workflow_status "
+                    "SET parent_workflow_id = :parent_workflow_id "
+                    "WHERE workflow_uuid = :child_workflow_id"
+                ),
+                {
+                    "parent_workflow_id": attempt.workflow_id,
+                    "child_workflow_id": child_workflow_id,
+                },
+            )
+
+        result = cancel_work(
+            engine=pg_engine,
+            client=client,
+            work_item_id=work_item_id,
+            clock=lambda: NOW + timedelta(seconds=1),
+        )
+
+        statuses = {
+            status.workflow_id: status.status
+            for status in client.list_workflows(
+                workflow_ids=[attempt.workflow_id, child_workflow_id],
+                load_input=False,
+                load_output=False,
+            )
+        }
+        children = client.list_workflows(
+            parent_workflow_id=attempt.workflow_id,
+            load_input=False,
+            load_output=False,
+        )
+        assert result.delegated_workflow_id == attempt.workflow_id
+        assert statuses == {
+            attempt.workflow_id: "CANCELLED",
+            child_workflow_id: "ENQUEUED",
+        }
+        assert [child.workflow_id for child in children] == [child_workflow_id]
+    finally:
+        client.destroy()
+
+
 def test_exact_label_pause_resume_preserves_capacity(
     pg_engine: Engine,
 ) -> None:
@@ -520,6 +683,102 @@ def test_exact_label_pause_resume_preserves_capacity(
     assert paused.paused is True
     assert resumed.capacity == 4
     assert resumed.paused is False
+
+
+def test_pause_and_resume_reject_a_missing_exact_selector(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+
+    for operation in (pause, resume):
+        with pytest.raises(LookupError, match="stage control does not exist"):
+            operation(
+                pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
+                stage_key="execute",
+                labels={"cohort": "missing"},
+                engine=pg_engine,
+                clock=lambda: NOW,
+            )
+
+
+def test_cancel_resolves_work_by_campaign_and_work_keys(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    _submit(
+        pg_engine,
+        registry,
+        run_key="run-logical-cancel",
+        work_keys=("work-logical-cancel",),
+    )
+    work_item_id = _execution_rows(pg_engine, schema)[0][1]
+    canceller = _RecordingCanceller()
+
+    result = cancel_work(
+        engine=pg_engine,
+        client=canceller,
+        campaign_key="campaign-1",
+        work_key="work-logical-cancel",
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+
+    assert result.work_item_id == work_item_id
+    assert result.disposition is CancellationDisposition.CANCELLED_READY
+    assert result.stage_execution.state is StageExecutionState.CANCELLED
+    assert canceller.cancelled == []
+
+
+def test_cancel_of_succeeded_work_is_idempotent(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    stage_execution_id, work_item_id = _admit_one(
+        pg_engine,
+        registry,
+        schema,
+        run_key="run-succeeded",
+        work_key="work-succeeded",
+    )
+    with pg_engine.begin() as connection:
+        transition_stage_execution(
+            connection,
+            stage_execution_id=stage_execution_id,
+            new_state=StageExecutionState.SUCCEEDED,
+            output_reference="output:succeeded",
+            updated_at=NOW + timedelta(seconds=1),
+        )
+        record_stage_attempt_terminal(
+            connection,
+            stage_execution_id=stage_execution_id,
+            attempt_number=1,
+            terminal_at=NOW + timedelta(seconds=1),
+            terminal_summary={"outcome": "succeeded"},
+            terminal_reference="output:succeeded",
+        )
+
+    canceller = _RecordingCanceller()
+    first = cancel_work(
+        engine=pg_engine,
+        client=canceller,
+        work_item_id=work_item_id,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    second = cancel_work(
+        engine=pg_engine,
+        client=canceller,
+        work_item_id=work_item_id,
+        clock=lambda: NOW + timedelta(seconds=3),
+    )
+
+    assert first.disposition is CancellationDisposition.ALREADY_TERMINAL
+    assert second.disposition is CancellationDisposition.ALREADY_TERMINAL
+    assert first.stage_execution.state is StageExecutionState.SUCCEEDED
+    assert second.stage_execution == first.stage_execution
+    assert first.delegated_workflow_id is None
+    assert second.delegated_workflow_id is None
+    assert canceller.cancelled == []
 
 
 def test_cancel_fences_failed_work_against_a_later_retry(
@@ -637,6 +896,11 @@ def test_cancel_after_committed_handoff_cancels_the_successor(
     # survives.
     dsn = engine_dsn(pg_engine)
     holder = create_engine(dsn)
+    cancellation_application_name = f"operations-cancel-{uuid4().hex}"
+    cancellation_engine = create_engine(
+        dsn,
+        connect_args={"application_name": cancellation_application_name},
+    )
 
     def commit_handoff() -> None:
         with holder.begin() as connection:
@@ -655,22 +919,28 @@ def test_cancel_after_committed_handoff_cancels_the_successor(
                 next_stage_index=1,
                 completed_at=NOW + timedelta(seconds=1),
             )
-            _wait_until_blocked_on_lock(pg_engine, stage_execution_id)
+            _wait_until_blocked_on_lock(
+                pg_engine,
+                application_name=cancellation_application_name,
+            )
 
     canceller = _RecordingCanceller()
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(commit_handoff)
-        # Give the holder time to take the source lock before cancel reads the
-        # pre-handoff max stage and blocks acquiring it.
-        _wait_until_row_locked(pg_engine, stage_execution_id)
-        result = cancel_work(
-            engine=pg_engine,
-            client=canceller,
-            work_item_id=work_item_id,
-            clock=lambda: NOW + timedelta(seconds=2),
-        )
-        future.result()
-    holder.dispose()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(commit_handoff)
+            # Give the holder time to take the source lock before cancel reads
+            # the pre-handoff max stage and blocks acquiring it.
+            _wait_until_row_locked(pg_engine, stage_execution_id)
+            result = cancel_work(
+                engine=cancellation_engine,
+                client=canceller,
+                work_item_id=work_item_id,
+                clock=lambda: NOW + timedelta(seconds=2),
+            )
+            future.result()
+    finally:
+        cancellation_engine.dispose()
+        holder.dispose()
 
     assert result.disposition is not CancellationDisposition.ALREADY_TERMINAL
     assert result.disposition is CancellationDisposition.CANCELLED_READY
