@@ -20,6 +20,7 @@ from dr_platform import (
     StageKey,
     WorkInput,
     bulk_work_statuses,
+    initialize_dbos_runtime,
     inspect_campaign,
     register_scheduled_dispatcher,
     set_stage_capacity,
@@ -27,7 +28,6 @@ from dr_platform import (
     upgrade_platform_schema,
     wrap_pipeline_workflows,
 )
-from tests.conftest import dbos_config
 
 
 def _utc_now() -> datetime:
@@ -146,20 +146,16 @@ def test_root_contract_defines_submits_executes_and_inspects(
     assert yielded == list(work_keys)
     assert receipt.inserted_count == 2
 
-    runtime_config = dbos_config(
-        name=f"drp-public-{suffix}",
-        system_database_url=clean_pg,
-        application_database_url=clean_pg,
-        application_version=f"public-{suffix}",
-        notification_listener_polling_interval_sec=0.01,
-    )
     platform_config = PlatformDbosConfig(
         database_url=clean_pg,
         system_database_url=clean_pg,
     )
     registration = None
     try:
-        DBOS(config=runtime_config)
+        initialize_dbos_runtime(
+            platform_config,
+            app_name=f"drp-public-{suffix}",
+        )
         registration = register_scheduled_dispatcher(
             config=platform_config,
             engine=pg_engine,

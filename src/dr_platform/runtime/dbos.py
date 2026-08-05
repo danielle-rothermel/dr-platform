@@ -187,6 +187,7 @@ def build_dbos_config(
 ) -> DBOSConfig:
     result: DBOSConfig = {
         "name": app_name,
+        "application_database_url": config.database_url,
         "system_database_url": config.system_database_url,
         "enable_otlp": config.enable_otlp,
         "otel_attribute_format": config.otel_attribute_format,

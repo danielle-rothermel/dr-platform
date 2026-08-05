@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import pytest
 from dbos import DBOSConfig
 
+from dr_platform import initialize_dbos_runtime
 from dr_platform.runtime import dbos as dbos_config
 
 if TYPE_CHECKING:
@@ -239,7 +240,7 @@ def test_initialize_dbos_runtime_forwards_bootstrap_config() -> None:
     runtime_configs: list[DBOSConfig] = []
     telemetry_configs: list[DBOSConfig] = []
 
-    result = dbos_config.initialize_dbos_runtime(
+    result = initialize_dbos_runtime(
         config,
         app_name="stage-worker",
         runtime_initializer=runtime_configs.append,
@@ -249,6 +250,9 @@ def test_initialize_dbos_runtime_forwards_bootstrap_config() -> None:
     assert len(runtime_configs) == 1
     runtime_config = runtime_configs[0]
     assert runtime_config["name"] == "stage-worker"
+    assert runtime_config["application_database_url"] == (
+        "postgresql+psycopg://app-user@db.example/platform"
+    )
     assert runtime_config["system_database_url"] == (
         "postgresql+psycopg://system-user@db.example:5432/platform"
     )
@@ -261,6 +265,9 @@ def test_initialize_dbos_runtime_forwards_bootstrap_config() -> None:
     assert len(telemetry_configs) == 1
     telemetry_config = telemetry_configs[0]
     assert telemetry_config["name"] == "stage-worker"
+    assert telemetry_config["application_database_url"] == (
+        "postgresql+psycopg://app-user@db.example/platform"
+    )
     assert telemetry_config["system_database_url"] == (
         "postgresql+psycopg://system-user@db.example:5432/platform"
     )
