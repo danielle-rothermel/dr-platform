@@ -1,5 +1,3 @@
-"""PostgreSQL guarantees for the staged-work persistence ledger."""
-
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -80,8 +78,7 @@ class _ColumnInventory:
 
 @dataclass(frozen=True, slots=True)
 class _TableInventory:
-    # Column set parity is semantic; declaration order is not. Primary-key
-    # and index column order below stay ordered because they are semantic.
+    # Column order is semantic only for keys and indexes.
     columns: frozenset[_ColumnInventory]
     primary_key: tuple[str, ...]
     unique_constraints: frozenset[tuple[str, tuple[str, ...]]]

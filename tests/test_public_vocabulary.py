@@ -1,5 +1,3 @@
-"""Explicit contract for the public root namespace."""
-
 import re
 from pathlib import Path
 
@@ -95,10 +93,6 @@ _VOCAB_HTML = Path(__file__).resolve().parents[1] / ".defs" / "vocab.html"
 
 
 def _exported_names_from_vocab_sheet() -> list[str]:
-    # Parse the Exported Names table's names column (the second <td> of each
-    # body row): every exported name must appear there exactly once, per the
-    # sheet's own claim. The Note column also holds <code> tokens, so only the
-    # names column is read. A missing section or empty parse fails loudly.
     html = _VOCAB_HTML.read_text(encoding="utf-8")
     anchor = 'id="exported-names"'
     assert anchor in html, f"exported-names section not found in {_VOCAB_HTML}"

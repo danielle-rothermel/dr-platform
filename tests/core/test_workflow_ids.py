@@ -1,5 +1,3 @@
-"""Tests for persisted workflow identities."""
-
 from dr_platform._core.identities import (
     CampaignKey,
     CampaignWorkIdentity,

@@ -1,5 +1,3 @@
-"""Streaming submission for staged pipeline runs."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -47,8 +45,6 @@ def _utc_now() -> datetime:
 
 @dataclass(frozen=True, slots=True, init=False)
 class WorkInput:
-    """One validated, immutable item at the submission boundary."""
-
     work_key: WorkKey
     input_reference: str
     labels: Mapping[str, str]
@@ -79,8 +75,6 @@ class WorkInput:
 
 @dataclass(frozen=True, slots=True)
 class SubmissionReceipt:
-    """Run identity and item dispositions committed by this call."""
-
     run_key: RunKey
     inserted_count: int
     already_existing_count: int
@@ -193,11 +187,7 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
     already_existing_count = 0
     with engine.begin() as connection:
         created_at = clock()
-        # Resolved once per chunk rather than once per item: at 10^4-10^5
-        # items/chunk_size chunks, a per-item get_pipeline_run SELECT here
-        # would triple this loop's statement count for no new information,
-        # since the run is immutable for the lifetime of this chunk's
-        # transaction.
+        # Resolve the immutable run once per chunk, not once per item.
         run = get_pipeline_run(connection, run_key=run_key, schema=schema)
         if run is None:
             raise LookupError(f"pipeline run does not exist: {run_key}")

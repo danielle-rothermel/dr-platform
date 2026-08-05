@@ -1,5 +1,3 @@
-"""Tests for deterministic work-item ranking."""
-
 from dr_platform._core.identities import (
     CampaignKey,
     CampaignWorkIdentity,

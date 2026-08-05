@@ -1,5 +1,3 @@
-"""Validation shared across staged-work boundaries."""
-
 from __future__ import annotations
 
 from collections.abc import Mapping

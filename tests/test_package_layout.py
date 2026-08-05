@@ -1,5 +1,3 @@
-"""Structural contract for the functional package layout."""
-
 from importlib.util import find_spec
 
 

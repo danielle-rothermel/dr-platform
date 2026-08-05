@@ -1,5 +1,3 @@
-"""Programmatic Alembic entrypoint for the platform schema lineage."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,6 +27,4 @@ def upgrade_platform_schema(
     prefix: str = DEFAULT_PREFIX,
     revision: str = PLATFORM_HEAD_REVISION,
 ) -> None:
-    """Upgrade an empty prefix-owned schema to the requested revision."""
-
     command.upgrade(_alembic_config(database_url, prefix), revision)

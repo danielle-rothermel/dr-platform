@@ -1,5 +1,3 @@
-"""Tests for shared nominal identities."""
-
 from __future__ import annotations
 
 import pytest

@@ -1,5 +1,3 @@
-"""Campaign-scoped work-item records and persistence operations."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -37,11 +35,7 @@ SHUFFLE_RANK_MAX = (1 << SHUFFLE_RANK_BITS) - 1
 
 @verify(UNIQUE)
 class WorkRankDigestField(StrEnum):
-    """Persisted payload keys used to derive stable admission rank.
-
-    Never edit a value or build a payload by iterating this enum. Each key is
-    spelled out at the hashing boundary so the wire format remains explicit.
-    """
+    """Persisted wire keys; spell them out at hashing sites, never iterate."""
 
     CAMPAIGN_KEY = "campaign_key"
     WORK_KEY = "work_key"
@@ -62,7 +56,7 @@ def stable_random_rank(*, work_identity: CampaignWorkIdentity) -> int:
 
 
 class WorkItemConflictError(RuntimeError):
-    """A campaign/work identity was reused with different immutable facts."""
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,8 +72,6 @@ class WorkItemRecord:
 
 @dataclass(frozen=True, slots=True)
 class WorkItemInsertResult:
-    """The stored item and whether this call inserted it."""
-
     work_item: WorkItemRecord
     inserted: bool
 
@@ -117,13 +109,6 @@ def insert_work_item_with_result(  # noqa: PLR0913
     schema: StagingSchema | None = None,
     pipeline_run: PipelineRunRecord | None = None,
 ) -> WorkItemInsertResult:
-    """Insert one item and report its campaign-idempotency disposition.
-
-    ``pipeline_run`` lets a caller that already resolved the origin run
-    (e.g. once per chunk in a streaming submit loop) skip the per-item
-    ``get_pipeline_run`` SELECT. Direct callers that omit it still get the
-    lookup performed here, keyed by ``origin_run_key``.
-    """
     selected_schema = schema or StagingSchema()
     identity = CampaignWorkIdentity(
         campaign_key
@@ -142,8 +127,6 @@ def insert_work_item_with_result(  # noqa: PLR0913
     normalized_labels = validate_labels(labels, label="work item labels")
     if pipeline_run is not None:
         if pipeline_run.run_key != normalized_run_key:
-            # A call-site bug, not a data conflict: the caller resolved one
-            # run and named another.
             raise ValueError(
                 "supplied pipeline run does not match origin_run_key"
             )
@@ -192,20 +175,15 @@ def insert_work_item_with_result(  # noqa: PLR0913
             schema=selected_schema,
         )
         if existing is None:
-            # ON CONFLICT DO NOTHING fired, so a row for this campaign/work
-            # identity was committed by another transaction. The read-back
-            # requires READ COMMITTED to observe it; under REPEATABLE READ
-            # this branch can be legitimately reached from a snapshot taken
-            # before that commit, which is a caller/isolation error, not a
-            # missing row.
+            # Concurrent inserts are visible on read-back only under the
+            # required READ COMMITTED isolation level.
             raise RuntimeError(
                 "work item conflicted but no row was found on read-back "
                 f"(campaign_key={identity.campaign_key.value!r}, "
                 f"work_key={identity.work_key.value!r}); this requires "
                 "READ COMMITTED isolation"
             )
-        # The origin run is first-writer provenance. Later runs in the same
-        # campaign converge on that work item when its application facts match.
+        # Origin run is first-writer provenance across matching submissions.
         if (
             existing.input_reference != reference
             or dict(existing.labels) != normalized_labels
@@ -257,7 +235,6 @@ def list_work_items(
     label_selector: Mapping[str, str] | None = None,
     schema: StagingSchema | None = None,
 ) -> tuple[WorkItemRecord, ...]:
-    """Read work items, optionally using PostgreSQL JSONB containment."""
     selected_schema = schema or StagingSchema()
     table = selected_schema.work_items
     statement = select(table).order_by(table.c.work_item_id)

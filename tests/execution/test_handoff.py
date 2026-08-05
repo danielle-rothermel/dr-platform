@@ -1,5 +1,3 @@
-"""End-to-end and transactional proofs for linear stage handoff."""
-
 from __future__ import annotations
 
 import time
@@ -127,8 +125,6 @@ def _submit_items(  # noqa: PLR0913 -- explicit submission facts
 
 
 def _launch_dbos(database_url: str, *, suffix: str) -> None:
-    # Launch and keep DBOS running; each caller tears it down in its own
-    # finally alongside the DBOSClient it opened.
     DBOS(
         config=dbos_config(
             name=f"drp-handoff-{suffix}",
@@ -193,9 +189,6 @@ def _stage_state_count(
         ).scalar_one()
 
 
-# This variant records the enqueue args alongside the options; the
-# options-only _RecordingClient in the operations/inspection suites is a
-# distinct shape.
 class _RecordingClient:
     def __init__(self) -> None:
         self.enqueued: list[tuple[EnqueueOptions, tuple[object, ...]]] = []
@@ -547,10 +540,6 @@ def test_completion_identity_mismatch_does_not_mutate_state(
     assert _handoff_snapshot(pg_engine, schema) == before
 
 
-# An oddly shaped opaque output reference: a scheme, path, query separators,
-# and a 64-char hex tail.  dr-platform transports it byte-for-byte in
-# ``output_reference``/``terminal_reference`` without ever parsing the scheme,
-# the query separators, or the trailing digest.
 _TERMINAL_OBJECT_REFERENCE = (
     "objref://terminal-result/v3"
     "?schema=terminal_result"
@@ -563,12 +552,6 @@ _TERMINAL_OBJECT_REFERENCE = (
 def test_output_reference_is_transported_opaquely_without_parsing(
     pg_engine: Engine,
 ) -> None:
-    """A terminal output reference round-trips byte-for-byte, unparsed.
-
-    A succeeding stage's ``output_reference`` and its attempt
-    ``terminal_reference`` preserve the exact encoded string; dr-platform never
-    parses, resolves, or reconstructs whatever the reference points at.
-    """
     schema = _migrate(pg_engine)
     pipeline = _pipeline(
         key="opaque-output",
@@ -948,13 +931,6 @@ class _BarrierStatusClient:
 
 
 class _PagingStatusClient:
-    """Return only the statuses whose ids are in the requested page.
-
-    Unlike :class:`_StatusClient`, this honours ``workflow_ids`` so keyset
-    pages queried by a single sweep are served independently, proving the
-    sweep advances past the first page.
-    """
-
     def __init__(self, statuses: tuple[_Status, ...]) -> None:
         self._by_id = {status.workflow_id: status for status in statuses}
         self.requested_ids: list[tuple[str, ...]] = []
@@ -1001,11 +977,7 @@ def _release_after_projection(
     monkeypatch: pytest.MonkeyPatch,
     barrier: Barrier,
 ) -> None:
-    """Let the sweep project a terminal status, then release the barrier.
-
-    The competing handoff/cancellation waits on the same barrier, so this pins
-    the sweep as the first writer before the other path re-locks the attempt.
-    """
+    """Release the contender after sweep projection fixes write order."""
     project = cast(
         "Callable[..., bool]",
         sweep_module._project_terminal_status,
@@ -1454,8 +1426,6 @@ def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
     )
     assert admitted.admitted_total == admitted_total
 
-    # Order the admitted workflow ids by stage_execution_id so the abandoned
-    # one sits strictly beyond the first keyset page.
     with pg_engine.connect() as connection:
         ordered_ids = [
             row[0]
@@ -1489,12 +1459,9 @@ def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
         clock=_utc_now,
     )
 
-    # A single sweep must inspect every admitted attempt across pages and
-    # project the abandoned one that lives past the first page.
     assert summary.inspected_count == admitted_total
     assert summary.projected_count == 1
     assert summary.projections[0].workflow_id == abandoned_id
     assert summary.projections[0].state == StageExecutionState.FAILED
-    # More than one page was queried, reaching the abandoned id later.
     assert len(status_client.requested_ids) > 1
     assert any(abandoned_id in page for page in status_client.requested_ids)

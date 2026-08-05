@@ -1,5 +1,3 @@
-"""Operator cancellation for staged pipeline work."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -38,8 +36,6 @@ def _utc_now() -> datetime:
 
 
 class WorkflowCanceller(Protocol):
-    """The public DBOS cancellation operation used by this boundary."""
-
     def cancel_workflow(
         self,
         workflow_id: str,
@@ -55,8 +51,6 @@ class CancellationDisposition(StrEnum):
     ALREADY_TERMINAL = "already_terminal"
 
 
-# A linear pipeline is a finite chain, so re-selecting the current stage after
-# a concurrent handoff commits can only advance a bounded number of times.
 _MAX_CURRENT_STAGE_RESELECTS = 64
 
 
@@ -78,22 +72,11 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
     clock: Callable[[], datetime] = _utc_now,
     schema: StagingSchema | None = None,
 ) -> WorkCancellationResult:
-    """Cancel the current logical stage and delegate admitted cancellation.
+    """Commit platform cancellation before delegating to DBOS.
 
-    READY work has no admitted physical workflow, so the execution and any
-    retry-prepared attempt are marked CANCELLED without delegation.  For an
-    ADMITTED attempt, platform state and its terminal record are committed
-    first, then DBOS is asked to cancel that exact workflow with child
-    cancellation disabled.  A FAILED attempt is already terminal, so cancelling
-    it only fences the stage against a later ``retry_stage`` and delegates
-    nothing.
-
-    Already-CANCELLED work self-heals a lost post-commit delegation: platform
-    state commits before the canceller runs, so a crashed or raising delegation
-    would otherwise leak a live DBOS workflow.  If the current stage is already
-    CANCELLED with a recorded admitted attempt that was never superseded, its
-    workflow cancellation is re-issued idempotently before returning the
-    ALREADY_TERMINAL disposition.  Other terminal work is an idempotent no-op.
+    READY and FAILED stages do not delegate. A repeated CANCELLED call reissues
+    cancellation for an admitted, unsuperseded attempt to repair a lost
+    post-commit delegation; other terminal work is a no-op.
     """
     selected_schema = schema or StagingSchema()
     cancelled_at = clock()
@@ -190,13 +173,9 @@ def _lock_current_stage(
     work_item_id: int,
     schema: StagingSchema,
 ) -> StageExecutionRecord:
-    # Under READ COMMITTED the max-stage_index SELECT takes its snapshot
-    # before blocking on any concurrent handoff's row lock; when that handoff
-    # commits a freshly inserted successor stage, Postgres re-evaluates only
-    # the locked row and never sees it.  So after acquiring the lock, re-select
-    # the max stage index: if a successor now exists the locked row is stale,
-    # and we loop to lock the newer row.  The pipeline is a finite linear
-    # chain, so each iteration advances by at least one stage and is bounded.
+    # READ COMMITTED may miss a successor inserted while this lock blocks;
+    # reselect until the locked row is still current. The 64-reselection cap
+    # can fail if the current stage keeps advancing.
     table = schema.stage_executions
     for _ in range(_MAX_CURRENT_STAGE_RESELECTS):
         stage_execution_id = connection.execute(
@@ -240,8 +219,6 @@ def _cancel_current_stage(
 ) -> WorkCancellationResult:
     workflow_id: str | None = None
     if current.state is StageExecutionState.FAILED:
-        # The attempt is already terminal; cancelling only fences the stage
-        # against a later retry, so nothing is delegated to DBOS.
         disposition = CancellationDisposition.CANCELLED_FAILED
     else:
         disposition = CancellationDisposition.CANCELLED_READY
@@ -294,18 +271,10 @@ def _redelegable_workflow_id(
     current: StageExecutionRecord,
     schema: StagingSchema,
 ) -> str | None:
-    """The workflow to re-cancel when a prior delegation may have been lost.
+    """Return a workflow eligible to repair lost post-commit delegation.
 
-    Platform CANCELLED commits before the post-commit canceller runs, so a
-    crashed or raising delegation leaves the DBOS workflow alive.  When the
-    already-CANCELLED current stage carries an admitted, non-superseded
-    attempt, re-issuing its cancellation lets repeated ``cancel_work``
-    self-heal.
-
-    Re-issuing is safe even when the workflow already finished only because
-    DBOS's ``cancel_workflows`` UPDATE is guarded with ``status NOT IN
-    (SUCCESS, ERROR)``; a DBOS upgrade that drops that guard would let this
-    path rewrite completed workflows' statuses.
+    This is safe only while DBOS guards cancellation updates against SUCCESS
+    and ERROR statuses.
     """
     if current.state is not StageExecutionState.CANCELLED:
         return None

@@ -1,5 +1,3 @@
-"""Runtime declarations for linear pipelines and their stages."""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -18,8 +16,6 @@ ArgumentsCallable = Callable[..., tuple[object, ...]]
 
 @dataclass(frozen=True, slots=True)
 class PipelineIdentity:
-    """The key and version pair identifying one immutable pipeline."""
-
     key: PipelineKey
     version: int
 
@@ -37,8 +33,6 @@ def validate_pipeline_identity(value: object) -> PipelineIdentity:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StageDefinition:
-    """One ordered stage in a linear pipeline."""
-
     key: StageKey
     queue_name: str
     workflow: WorkflowCallable
@@ -56,8 +50,6 @@ class StageDefinition:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PipelineDefinition:
-    """One immutable version of an ordered, non-empty stage chain."""
-
     key: PipelineKey
     version: int
     stages: tuple[StageDefinition, ...]

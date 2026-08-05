@@ -1,5 +1,3 @@
-"""Current-state counts and bulk status inspection."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -56,7 +54,6 @@ def campaign_state_counts(
     engine: Engine,
     schema: StagingSchema | None = None,
 ) -> tuple[StateCount, ...]:
-    """Derive current logical item counts for one campaign."""
     return _state_counts(
         engine=engine,
         campaign_key=normalize_campaign_key(campaign_key),
@@ -71,7 +68,6 @@ def run_state_counts(
     engine: Engine,
     schema: StagingSchema | None = None,
 ) -> tuple[StateCount, ...]:
-    """Derive current counts for items whose provenance is one run."""
     return _state_counts(
         engine=engine,
         campaign_key=None,
@@ -88,7 +84,7 @@ def bulk_work_statuses(
     chunk_size: int = DEFAULT_BULK_STATUS_CHUNK_SIZE,
     schema: StagingSchema | None = None,
 ) -> BulkStatusResult:
-    """Read current statuses with exactly one SELECT per input chunk."""
+    """Execute exactly one SELECT per input chunk."""
     validate_positive_integer(chunk_size, label="bulk status chunk size")
     normalized_campaign = normalize_campaign_key(campaign_key)
     normalized_keys = tuple(
@@ -238,7 +234,6 @@ def _bulk_status_statement(
 
 
 def current_stage_indexes(schema: StagingSchema, work_item_ids: Select):
-    """Group stages only for one already-filtered work-item set."""
     executions = schema.stage_executions
     scoped_ids = work_item_ids.subquery()
     return (

@@ -3,7 +3,7 @@
 [![CI](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/dr-platform.svg)](https://pypi.org/project/dr-platform/)
 
-| [Repo Definitions](https://danielle-rothermel.github.io/dr-platform/) | [dr-serialize v0.1.0](https://github.com/danielle-rothermel/dr-serialize) |
+| [Repo Definitions](https://danielle-rothermel.github.io/dr-platform/) | [dr-serialize](https://github.com/danielle-rothermel/dr-serialize) |
 | --- | --- |
 
 **dr-platform durably moves application-owned work through staged pipelines.**
@@ -16,21 +16,22 @@ It is built on PostgreSQL and DBOS and organized into six functional areas:
   records streamed work in bounded chunks and organizes it into campaigns and
   runs with stable identities and replay-safe conflict detection.
 - **[Admission and controls](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/admission)**
-  select ready work fairly within stage and label-specific capacity, with pause
-  and resume controls that leave running work uninterrupted.
+  select ready work in stable randomized order within stage-wide and
+  label-specific capacity, with pause and resume controls that leave running
+  work uninterrupted.
 - **[Execution and handoff](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/execution)**
-  run admitted stages durably, recover interrupted workflows, record outcomes,
-  and create the next ready stage.
+  make admitted stages DBOS-durable, record outcomes, and create the next ready
+  stage transactionally.
 - **[Recovery and operator actions](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/recovery)**
   reconcile abandoned workflows and provide explicit retry and cancellation
   while preserving stage-attempt history.
 - **[Inspection](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/inspection)**
   exposes campaigns, runs, work items, stage and attempt history, current state
-  counts, and configured controls through bounded readers.
+  counts, and bulk work status without exposing persistence rows.
 - **Infra**
     - **[Shared core](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/_core)**
       owns nominal identities, immutable values, execution state, and the
-      persistence ledger shared by every functional area.
+      persistence ledger shared across functional areas.
     - **[Runtime](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/runtime)**
       validates PostgreSQL and DBOS colocation, initializes DBOS, schedules
       dispatch, and optionally configures telemetry.
@@ -94,11 +95,19 @@ it in bounded chunks. Reusing an existing identity is safe only when its
 immutable provenance matches the original submission.
 
 ```python
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class WorkInput:
     work_key: WorkKey
     input_reference: str
     labels: Mapping[str, str]
+
+    def __init__(
+        self,
+        *,
+        work_key: WorkKey | str,
+        input_reference: str,
+        labels: Mapping[str, str],
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,8 +133,8 @@ def submit(
 ### Admission and controls
 
 Admission supplies each selected stage with immutable work context and respects
-the most specific matching capacity control. Operators can change capacity or
-pause future admissions without preempting work that is already running.
+every matching capacity control. Operators can change capacity or pause future
+admissions without preempting work that is already running.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -166,6 +175,9 @@ read_controls(pipeline, stage_key, labels=None) -> tuple[StageControlRecord, ...
 Execution wraps application stage callables in package-owned DBOS workflows
 that record one terminal outcome and prepare the next stage transactionally.
 Stage bodies must tolerate at-least-once execution across workflow recovery.
+Crash recovery requires a worker with the matching executor and application
+version and with the workflows registered; cross-version recovery is not
+promised.
 
 ```python
 class StageExecutionState(StrEnum):
@@ -237,9 +249,9 @@ sweep_abandoned_stages(DBOS client) -> SweepSummary
 
 ### Inspection
 
-Inspection provides bounded, read-only projections over stable logical
-identities rather than exposing database rows. Readers cover both aggregate
-status and the complete stage-attempt history of an individual work item.
+Inspection provides read-only projections over stable logical identities rather
+than exposing database rows. Collection readers are bounded; direct work-item
+inspection returns its complete stage-attempt history.
 
 ```python
 @dataclass(frozen=True, slots=True)

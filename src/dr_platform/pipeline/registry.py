@@ -1,5 +1,3 @@
-"""Startup registry for immutable pipeline versions."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -12,8 +10,6 @@ if TYPE_CHECKING:
 
 
 class PipelineConflictError(RuntimeError):
-    """Raised when one pipeline identity has conflicting declarations."""
-
     def __init__(self, identity: PipelineIdentity) -> None:
         self.identity = identity
         super().__init__(
@@ -24,7 +20,7 @@ class PipelineConflictError(RuntimeError):
 
 
 class PipelineRegistry:
-    """In-memory registry populated from authoritative startup declarations."""
+    """Registry populated only from authoritative startup declarations."""
 
     def __init__(self) -> None:
         self._pipelines: dict[PipelineIdentity, PipelineDefinition] = {}
@@ -42,5 +38,4 @@ class PipelineRegistry:
         return self._pipelines[PipelineIdentity(key, version)]
 
     def pipelines(self) -> tuple[PipelineDefinition, ...]:
-        """Return every registered definition for wiring-time validation."""
         return tuple(self._pipelines.values())

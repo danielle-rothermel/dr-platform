@@ -1,5 +1,3 @@
-"""Validated identities shared across staged-work capabilities."""
-
 from __future__ import annotations
 
 import re
@@ -11,7 +9,6 @@ _KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*\Z")
 
 
 def validate_key_value(value: str, *, label: str) -> None:
-    """Validate one opaque key at its construction boundary."""
     if not isinstance(value, str):
         raise TypeError(f"{label} must be a string")
     if not value:
@@ -42,43 +39,31 @@ class _ValidatedKey:
 
 @dataclass(frozen=True, slots=True)
 class CampaignKey(_ValidatedKey):
-    """Application namespace for related logical work."""
-
     _label: ClassVar[str] = "campaign key"
 
 
 @dataclass(frozen=True, slots=True)
 class RunKey(_ValidatedKey):
-    """Identity of one immutable pipeline submission invocation."""
-
     _label: ClassVar[str] = "run key"
 
 
 @dataclass(frozen=True, slots=True)
 class WorkKey(_ValidatedKey):
-    """Opaque stable work identity within a campaign."""
-
     _label: ClassVar[str] = "work key"
 
 
 @dataclass(frozen=True, slots=True)
 class StageKey(_ValidatedKey):
-    """Identity of one position in a declared linear pipeline."""
-
     _label: ClassVar[str] = "stage key"
 
 
 @dataclass(frozen=True, slots=True)
 class PipelineKey(_ValidatedKey):
-    """Identity of one declared linear pipeline across its versions."""
-
     _label: ClassVar[str] = "pipeline key"
 
 
 @dataclass(frozen=True, slots=True)
 class CampaignWorkIdentity:
-    """The campaign-scoped uniqueness identity for logical work."""
-
     campaign_key: CampaignKey
     work_key: WorkKey
 

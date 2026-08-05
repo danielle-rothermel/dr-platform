@@ -1,5 +1,3 @@
-"""Tests for pipeline definitions and identities."""
-
 from __future__ import annotations
 
 from collections.abc import Callable

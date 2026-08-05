@@ -1,5 +1,3 @@
-"""High-leverage PostgreSQL migration and connection guarantees."""
-
 from __future__ import annotations
 
 from uuid import uuid4
@@ -29,15 +27,6 @@ def _quote_identifier(connection: Connection, value: str) -> str:
     return connection.dialect.identifier_preparer.quote(value)
 
 
-# --- Test-harness self-tests (not product contract) ---
-# The tests below exercise the conftest fixtures themselves: they reach into
-# conftest private helpers (_validate_test_database_url, _reset_test_database,
-# _verify_postgres_available) and monkeypatch conftest.create_engine by name.
-# That monkeypatch works only because conftest imports create_engine into its
-# own namespace. If conftest switches to qualified sqlalchemy.create_engine
-# calls, the by-name patch stops intercepting and these tests must change with
-# it. Everything from here down to the product-contract tests shares this
-# coupling.
 @pytest.mark.parametrize(
     "database_url",
     [
@@ -138,7 +127,6 @@ def test_local_connection_failure_skips_and_disposes_engine(
     assert engine.disposed
 
 
-# --- Product-contract tests (real engine, real migration) ---
 def test_password_dsn_survives_rendering_reconnection_and_migration(
     pg_engine: Engine,
 ) -> None:

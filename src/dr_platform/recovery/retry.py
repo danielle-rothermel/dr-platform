@@ -1,5 +1,3 @@
-"""Explicit retry of failed stage executions."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -43,11 +41,7 @@ def retry_stage(
     clock: Callable[[], datetime] = _utc_now,
     schema: StagingSchema | None = None,
 ) -> StageRetryResult:
-    """Prepare exactly one new attempt for a terminal FAILED stage.
-
-    CANCELLED and all other states are intentionally ineligible. Admission
-    later marks this prepared attempt admitted and enqueues its workflow.
-    """
+    """Only FAILED stages may prepare a new attempt for later admission."""
     selected_schema = schema or StagingSchema()
     retried_at = clock()
     with engine.begin() as connection:

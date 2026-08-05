@@ -1,5 +1,3 @@
-"""Fail-open behavior for optional telemetry initialization."""
-
 from __future__ import annotations
 
 from dr_platform.runtime.telemetry import initialize_telemetry_safely

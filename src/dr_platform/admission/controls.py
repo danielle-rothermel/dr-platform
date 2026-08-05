@@ -1,5 +1,3 @@
-"""Stage capacity-control records, persistence, and public operations."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -53,7 +51,7 @@ def set_stage_capacity(  # noqa: PLR0913 -- explicit operator dependencies
     clock: Callable[[], datetime] = _utc_now,
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
-    """Set the empty-selector capacity without changing pause state."""
+    """Set stage-wide capacity while preserving any existing pause flag."""
     return _set_capacity(
         pipeline=pipeline,
         stage_key=stage_key,
@@ -75,7 +73,7 @@ def set_selector_capacity(  # noqa: PLR0913 -- explicit operator dependencies
     clock: Callable[[], datetime] = _utc_now,
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
-    """Set one exact-label selector capacity without changing pause state."""
+    """Set selector capacity while preserving any existing pause flag."""
     return _set_capacity(
         pipeline=pipeline,
         stage_key=stage_key,
@@ -96,7 +94,6 @@ def pause(  # noqa: PLR0913 -- explicit operator dependencies
     clock: Callable[[], datetime] = _utc_now,
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
-    """Pause an existing exact-selector control; running work is untouched."""
     return _set_paused(
         pipeline=pipeline,
         stage_key=stage_key,
@@ -117,7 +114,6 @@ def resume(  # noqa: PLR0913 -- explicit operator dependencies
     clock: Callable[[], datetime] = _utc_now,
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
-    """Resume an existing exact-selector control."""
     return _set_paused(
         pipeline=pipeline,
         stage_key=stage_key,
@@ -137,7 +133,7 @@ def read_controls(
     labels: Mapping[str, str] | None = None,
     schema: StagingSchema | None = None,
 ) -> tuple[StageControlRecord, ...]:
-    """Read all controls, or only controls matching supplied work labels."""
+    """With work labels, return controls whose selectors they contain."""
     identity = validate_pipeline_identity(pipeline)
     selected_schema = schema or StagingSchema()
     with engine.connect() as connection:
@@ -163,7 +159,6 @@ def upsert_stage_control(  # noqa: PLR0913 -- explicit control facts
     updated_at: datetime,
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
-    """Create or replace one exact-selector stage control."""
     selected_schema = schema or StagingSchema()
     validate_key_value(pipeline_key, label="pipeline key")
     validate_positive_integer(pipeline_version, label="pipeline version")
@@ -261,7 +256,6 @@ def set_stage_control_capacity(  # noqa: PLR0913 -- explicit control facts
     updated_at: datetime,
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
-    """Set capacity while preserving an existing control's pause flag."""
     selected_schema = schema or StagingSchema()
     normalized_stage_key = (
         stage_key if isinstance(stage_key, StageKey) else StageKey(stage_key)
@@ -320,7 +314,6 @@ def set_stage_control_paused(  # noqa: PLR0913 -- explicit control identity
     updated_at: datetime,
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
-    """Change eligibility on an existing exact-selector control."""
     selected_schema = schema or StagingSchema()
     normalized_stage_key = (
         stage_key if isinstance(stage_key, StageKey) else StageKey(stage_key)
@@ -364,7 +357,6 @@ def list_stage_controls(  # noqa: PLR0913 -- explicit control identity
     labels: Mapping[str, str] | None = None,
     schema: StagingSchema | None = None,
 ) -> tuple[StageControlRecord, ...]:
-    """Read defaults and selectors contained by the supplied labels."""
     selected_schema = schema or StagingSchema()
     normalized_stage_key = (
         stage_key if isinstance(stage_key, StageKey) else StageKey(stage_key)

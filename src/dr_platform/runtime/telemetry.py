@@ -1,5 +1,3 @@
-"""Fail-open OTLP bootstrap."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -11,8 +9,6 @@ if TYPE_CHECKING:
 
 
 class TelemetryInitializationResult(BaseModel):
-    """Visible diagnostics for optional telemetry bootstrap."""
-
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: StrictBool

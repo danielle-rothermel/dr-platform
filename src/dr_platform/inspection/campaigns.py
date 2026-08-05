@@ -1,5 +1,3 @@
-"""Campaign and run inspection readers."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -51,7 +49,6 @@ def inspect_campaign(
     engine: Engine,
     schema: StagingSchema | None = None,
 ) -> CampaignSummary:
-    """Return one campaign's stable identity and aggregate counts."""
     selected_schema = schema or StagingSchema()
     normalized_campaign = normalize_campaign_key(campaign_key)
     statement = _campaign_summary_statement(selected_schema)
@@ -78,7 +75,6 @@ def list_campaigns(
     limit: int = DEFAULT_INSPECTION_LIMIT,
     schema: StagingSchema | None = None,
 ) -> tuple[CampaignSummary, ...]:
-    """Return a keyset page ordered by stable campaign identity."""
     validate_limit(limit)
     selected_schema = schema or StagingSchema()
     normalized_cursor = (
@@ -110,7 +106,6 @@ def list_runs(
     limit: int = DEFAULT_INSPECTION_LIMIT,
     schema: StagingSchema | None = None,
 ) -> tuple[RunSummary, ...]:
-    """Return a keyset page of immutable runs in one campaign."""
     validate_limit(limit)
     selected_schema = schema or StagingSchema()
     normalized_campaign = normalize_campaign_key(campaign_key)

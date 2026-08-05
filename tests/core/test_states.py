@@ -1,5 +1,3 @@
-"""Tests for persisted execution states."""
-
 from dr_platform._core.ledger.states import StageExecutionState
 
 

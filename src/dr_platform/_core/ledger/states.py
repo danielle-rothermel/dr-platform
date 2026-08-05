@@ -1,5 +1,3 @@
-"""Logical states shared by the staged-work ledger."""
-
 from __future__ import annotations
 
 from enum import StrEnum

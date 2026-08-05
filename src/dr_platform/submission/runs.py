@@ -1,5 +1,3 @@
-"""Immutable pipeline-run records and persistence operations."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,7 +25,7 @@ if TYPE_CHECKING:
 
 
 class PipelineRunConflictError(RuntimeError):
-    """A run key was reused with conflicting immutable provenance."""
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,12 +93,8 @@ def insert_pipeline_run(  # noqa: PLR0913 -- explicit persistence facts
             schema=selected_schema,
         )
         if existing is None:
-            # ON CONFLICT DO NOTHING fired, so a row for this run key was
-            # committed by another transaction. The read-back requires
-            # READ COMMITTED to observe it; under REPEATABLE READ this
-            # branch can be legitimately reached from a snapshot taken
-            # before that commit, which is a caller/isolation error, not a
-            # missing row.
+            # Concurrent inserts are visible on read-back only under the
+            # required READ COMMITTED isolation level.
             raise RuntimeError(
                 "pipeline run conflicted but no row was found on read-back "
                 f"(run_key={normalized_run_key.value!r}); this requires "
@@ -148,7 +142,7 @@ def mark_submission_completed(
     completed_at: datetime,
     schema: StagingSchema | None = None,
 ) -> PipelineRunRecord:
-    """Record the first normal completion of a run's item source."""
+    """Set completion once; replays return the stored row unchanged."""
     selected_schema = schema or StagingSchema()
     normalized_run_key = (
         run_key if isinstance(run_key, RunKey) else RunKey(run_key)

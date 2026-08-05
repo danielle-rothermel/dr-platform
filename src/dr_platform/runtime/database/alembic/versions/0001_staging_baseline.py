@@ -1,9 +1,3 @@
-"""Create the staged-work persistence baseline.
-
-Revision ID: 0001_staging_baseline
-Revises: None
-"""
-
 from __future__ import annotations
 
 import re

@@ -1,5 +1,3 @@
-"""Focused tests for startup pipeline registration."""
-
 from __future__ import annotations
 
 import pytest

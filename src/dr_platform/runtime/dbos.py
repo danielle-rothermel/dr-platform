@@ -1,10 +1,3 @@
-"""DBOS config/bootstrap helpers and pinned DBOS-private telemetry shims.
-
-DBOS does not expose its tracer configuration boundary, which is isolated
-here so optional exporter failure cannot swallow unrelated runtime startup
-failures.
-"""
-
 from __future__ import annotations
 
 import os
@@ -50,11 +43,7 @@ def normalize_postgresql_driver_url(database_url: str) -> str:
 
 
 class PlatformDbosConfig(BaseModel):
-    """Resolved URLs for the app DB and the DBOS system DB.
-
-    Queue names and concurrency stay app-side; the library never
-    registers queues on its own.
-    """
+    """Queue registration and concurrency remain application-owned."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -105,11 +94,7 @@ def _database_identity(
         "host",
         "port",
         "dbname",
-        # libpq resolves these independently of the URL's host/port/dbname
-        # components (hostaddr overrides address resolution outright;
-        # service pulls an entire connection profile from pg_service.conf),
-        # so colocation identity derived from the URL alone cannot be
-        # trusted while either is present.
+        # libpq hostaddr/service can override the URL's connection identity.
         "hostaddr",
         "service",
     }.intersection(url.query):
@@ -204,18 +189,17 @@ def initialize_dbos_runtime(
     runtime_initializer: Callable[[DBOSConfig], None] | None = None,
     telemetry_initializer: Callable[[DBOSConfig], None] | None = None,
 ) -> TelemetryInitializationResult:
-    """Construct DBOS and fail open only for enabled OTLP initialization.
+    """Only enabled OTLP initialization may fail open.
 
-    DBOS launch remains application-owned because workflows and queue listeners
-    must be registered between construction and launch. Its database and
-    migration failures are therefore outside this fail-open boundary.
+    The private DBOS config and tracer hooks are tied to the exact DBOS pin.
+    DBOS startup remains fatal; launch is application-owned so workflows and
+    queue listeners can be registered first.
     """
     initialize = runtime_initializer or _initialize_dbos_runtime
     initialize_telemetry = telemetry_initializer or _initialize_dbos_telemetry
     disabled = config.model_copy(update={"enable_otlp": False})
     disabled_dbos_config = build_dbos_config(disabled, app_name=app_name)
 
-    # DBOS construction and its config validation are never fail-open.
     initialize(disabled_dbos_config)
     if not config.enable_otlp:
         return TelemetryInitializationResult(enabled=False, healthy=True)
@@ -226,9 +210,7 @@ def initialize_dbos_runtime(
         initializer=lambda: initialize_telemetry(enabled_dbos_config),
     )
     if not result.healthy:
-        # Resetting the optional tracer is best-effort too.  Preserve the
-        # original stable degraded status even when the tracer implementation
-        # is unavailable for both enabled and disabled configurations.
+        # Preserve the degraded result if best-effort reset also fails.
         initialize_telemetry_safely(
             enabled=True,
             initializer=lambda: initialize_telemetry(disabled_dbos_config),

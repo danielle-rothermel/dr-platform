@@ -1,5 +1,3 @@
-"""Work-item and stage-history inspection readers."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -61,7 +59,6 @@ def list_work_items(  # noqa: PLR0913 -- explicit reader filters
     limit: int = DEFAULT_INSPECTION_LIMIT,
     schema: StagingSchema | None = None,
 ) -> tuple[WorkItemSummary, ...]:
-    """Return logical items once each, filtered by current stage state."""
     validate_limit(limit)
     if state is not None and not isinstance(state, StageExecutionState):
         raise TypeError("state must be a StageExecutionState")
@@ -129,7 +126,6 @@ def get_work_item_stages(
     engine: Engine,
     schema: StagingSchema | None = None,
 ) -> tuple[StageExecutionSummary, ...]:
-    """Return every logical stage and its ordered attempts."""
     validate_work_item_id(work_item_id)
     selected_schema = schema or StagingSchema()
     table = selected_schema.stage_executions

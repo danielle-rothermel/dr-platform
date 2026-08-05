@@ -1,5 +1,3 @@
-"""PostgreSQL behavior proofs for staged-work inspection."""
-
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
@@ -150,8 +148,6 @@ def _seed_reader_data(engine: Engine) -> None:
     )
 
 
-# This variant records only the enqueue options; the args-tracking
-# _RecordingClient in the admission/handoff suites is a distinct shape.
 class _RecordingClient:
     def __init__(self) -> None:
         self.enqueued: list[EnqueueOptions] = []
@@ -1070,13 +1066,6 @@ def test_current_state_readers_ignore_earlier_terminal_stages(
 def test_bulk_reader_scopes_current_stage_by_campaign_with_interleaved_ids(
     pg_engine: Engine,
 ) -> None:
-    """One campaign's bulk read must ignore another's interleaved rows.
-
-    Submitting alternately gives the two campaigns interleaved
-    ``work_item_id`` values, so a current-stage aggregation that forgot to
-    scope by campaign before grouping would leak the other campaign's rows
-    into this campaign's read.
-    """
     schema = _migrate(pg_engine)
     registry = _registry()
     _submit(

@@ -1,5 +1,3 @@
-"""Compatibility checks for the deliberately quarantined DBOS internals."""
-
 from __future__ import annotations
 
 

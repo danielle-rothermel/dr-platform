@@ -1,11 +1,3 @@
-"""Transactional admission of READY staged work into DBOS queues.
-
-``args_for`` receives one :class:`AdmissionPayload`.  This package-owned,
-frozen record contains only routing identity and immutable submission facts;
-applications remain responsible for turning those facts into workflow
-arguments, and the package never interprets the resulting domain payloads.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -62,9 +54,7 @@ def _utc_now() -> datetime:
 
 
 def _failure_message(error: Exception) -> str:
-    # ``__str__``/``__repr__`` of an application exception are boundary
-    # code: they run outside the savepoint, so they must not raise out of
-    # the failure handler and abort the shared pass.
+    # Broken application exception rendering must not abort the shared pass.
     try:
         return str(error)
     except Exception:  # noqa: BLE001 -- boundary
@@ -76,8 +66,6 @@ def _failure_message(error: Exception) -> str:
 
 @dataclass(frozen=True, slots=True)
 class AdmissionPayload:
-    """Minimal immutable context supplied to a stage's ``args_for``."""
-
     campaign_key: CampaignKey
     work_key: WorkKey
     run_key: RunKey
@@ -99,8 +87,6 @@ class StageAdmissionCount:
 
 @dataclass(frozen=True, slots=True)
 class StageIdentityRecord:
-    """A stage identity excluded from a pass without any admission."""
-
     pipeline_key: str
     pipeline_version: int
     stage_key: StageKey
@@ -108,8 +94,6 @@ class StageIdentityRecord:
 
 @dataclass(frozen=True, slots=True)
 class StageAdmissionFailure:
-    """The first args_for/enqueue failure recorded for a stage identity."""
-
     pipeline_key: str
     pipeline_version: int
     stage_key: StageKey
@@ -119,8 +103,6 @@ class StageAdmissionFailure:
 
 @dataclass(frozen=True, slots=True)
 class StageMismatch:
-    """A candidate whose persisted position drifted from the registry."""
-
     pipeline_key: str
     pipeline_version: int
     stage_key: StageKey
@@ -142,7 +124,7 @@ class AdmissionSummary:
 
 
 class PipelineStageMismatchError(RuntimeError):
-    """Persisted stage position disagrees with the registered pipeline."""
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,8 +157,6 @@ class _Control:
 
 @dataclass(slots=True)
 class _PassTally:
-    """Mutable accumulator for one admission pass's outcomes."""
-
     admitted: dict[_StageIdentity, int] = field(default_factory=dict)
     skipped_for_capacity: int = 0
     skipped_for_pause: int = 0
@@ -187,8 +167,6 @@ class _PassTally:
     mismatched: dict[_StageIdentity, StageMismatch] = field(
         default_factory=dict
     )
-    # ``stage_execution_id``s to drop from later pages: one poison candidate
-    # must not exclude its whole stage identity and starve same-stage rows.
     excluded_candidates: set[int] = field(default_factory=set)
 
     @property
@@ -197,8 +175,6 @@ class _PassTally:
 
     @property
     def excluded(self) -> set[_StageIdentity]:
-        # Stage-level exclusion is reserved for genuine misconfiguration;
-        # per-candidate failures exclude only the failing row.
         return set(self.unconfigured)
 
     def record_admitted(self, identity: _StageIdentity) -> None:
@@ -280,9 +256,7 @@ class _PassTally:
 class _Page:
     candidates: tuple[_Candidate, ...]
     controls_by_stage: dict[_StageIdentity, tuple[_Control, ...]]
-    # Page-scoped occupancy snapshot; mutated as admissions land this page.
     occupancy: dict[int, int]
-    # Identities in this page lacking an empty-selector capacity control.
     unconfigured: set[_StageIdentity]
 
 
@@ -310,21 +284,12 @@ def run_admission_pass(  # noqa: PLR0913 -- explicit admission dependencies
     clock: Callable[[], datetime] = _utc_now,
     schema: StagingSchema | None = None,
 ) -> AdmissionSummary:
-    """Run one bounded admission pass and commit it as one transaction.
+    """Own one transaction and admit at most ``batch_size`` candidates.
 
-    A supplied connection must be idle; this function begins and owns its
-    transaction just as it does when supplied an engine.  One pass considers
-    at most ``batch_size + MAX_CAPACITY_SKIPS_PER_PASS`` SQL-selected rows;
-    full controls exclude their matching backlog from later keyset pages.
-
-    A single unhealthy stage never aborts the pass.  Candidates whose stage
-    lacks an empty-selector control are excluded and reported through
-    :attr:`AdmissionSummary.unconfigured_stages`; candidates whose
-    ``args_for`` or enqueue raises are excluded only by their own
-    ``stage_execution_id`` and reported by stage identity through
-    :attr:`AdmissionSummary.failed_stages`; candidates whose persisted
-    position disagrees with the registered pipeline are reported through
-    :attr:`AdmissionSummary.mismatched_stages`.  All other admissions commit.
+    A supplied connection must be idle. At most
+    ``batch_size + MAX_CAPACITY_SKIPS_PER_PASS`` rows are examined. Missing
+    controls exclude a stage; application failures and registry drift exclude
+    only their candidate, without aborting other admissions.
     """
     validate_positive_integer(batch_size, label="admission batch size")
     selected_schema = schema or StagingSchema()
@@ -358,20 +323,6 @@ def _admit_in_transaction(  # noqa: PLR0912, PLR0913 -- pass evaluation loop
     clock: Callable[[], datetime],
     schema: StagingSchema,
 ) -> AdmissionSummary:
-    """Admit READY work on ``connection`` and report per-stage outcomes.
-
-    Failures never abort the pass.  A stage lacking an empty-selector
-    control is genuine stage-level misconfiguration: it is excluded by stage
-    identity and its remaining READY rows are filtered from later pages so a
-    large unhealthy backlog cannot exhaust the considered budget and starve
-    healthy stages.  An ``args_for`` or enqueue failure, or a persisted-
-    position mismatch, rolls back only that candidate through a savepoint and
-    excludes only its ``stage_execution_id`` from later pages; same-stage rows
-    ranked behind it still admit this pass.  The failing row stays READY and
-    is retried next pass -- bounded, since it costs one row's budget per pass
-    per poison candidate.  All other admissions commit with the surrounding
-    transaction.
-    """
     tally = _PassTally()
     admitted_at = clock()
     considered = 0
@@ -416,11 +367,8 @@ def _admit_in_transaction(  # noqa: PLR0912, PLR0913 -- pass evaluation loop
                     tally.record_capacity_skip()
                     full_control_ids.update(ids)
                 case _Admit(matching=matching):
-                    # ``args_for`` is the application boundary: any
-                    # exception it (or the enqueue) raises must isolate to
-                    # this candidate, not abort the shared pass.  A
-                    # ``PipelineStageMismatchError`` is registry/data drift,
-                    # not a boundary failure; it is reported separately.
+                    # Application failures roll back only this candidate;
+                    # registry drift is reported separately.
                     try:
                         with connection.begin_nested():
                             _admit_candidate(
@@ -693,9 +641,7 @@ def _lock_candidates(  # noqa: PLR0913 -- explicit paging predicates
         )
         statement = statement.where(~at_capacity)
     if excluded:
-        # Rows of excluded stages stay READY and ranks are stable, so
-        # without this predicate a large unhealthy backlog at the head of
-        # the rank order would consume the considered budget on every pass.
+        # Filter unhealthy backlogs so they cannot exhaust the pass budget.
         statement = statement.where(
             tuple_(
                 runs.c.pipeline_key,
@@ -704,8 +650,7 @@ def _lock_candidates(  # noqa: PLR0913 -- explicit paging predicates
             ).not_in(sorted(excluded))
         )
     if excluded_candidates:
-        # Per-candidate failures exclude only the failing row, not its whole
-        # stage identity, so same-stage rows ranked behind it still admit.
+        # Preserve eligibility for later rows from the same stage.
         statement = statement.where(
             executions.c.stage_execution_id.not_in(sorted(excluded_candidates))
         )
@@ -724,7 +669,6 @@ def _unconfigured_identities(
     identities: set[_StageIdentity],
     controls_by_stage: dict[_StageIdentity, list[_Control]],
 ) -> set[_StageIdentity]:
-    """Return identities lacking any empty-selector capacity control."""
     return {
         identity
         for identity in identities

@@ -1,5 +1,3 @@
-"""Logical stage-execution records and persistence operations."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -53,11 +51,11 @@ VALID_STAGE_TRANSITIONS = {
 
 
 class StageExecutionConflictError(RuntimeError):
-    """A work/stage identity was reused with a different stage index."""
+    pass
 
 
 class StageTransitionError(RuntimeError):
-    """The requested logical state transition is not valid."""
+    pass
 
 
 _OUTPUT_REFERENCE_UNSET = object()
@@ -72,7 +70,6 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
     created_at: datetime,
     schema: StagingSchema | None = None,
 ) -> StageExecutionRecord:
-    """Create the single logical execution for one work item stage."""
     selected_schema = schema or StagingSchema()
     normalized_stage_key = (
         stage_key if isinstance(stage_key, StageKey) else StageKey(stage_key)
@@ -130,12 +127,8 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
             schema=selected_schema,
         )
         if existing is None:
-            # ON CONFLICT DO NOTHING fired, so a row for this work item/stage
-            # was committed by another transaction. The read-back requires
-            # READ COMMITTED to observe it; under REPEATABLE READ this
-            # branch can be legitimately reached from a snapshot taken
-            # before that commit, which is a caller/isolation error, not a
-            # missing row.
+            # A concurrent insert is visible on read-back only under the
+            # required READ COMMITTED isolation level.
             raise RuntimeError(
                 "stage execution conflicted but no row was found on "
                 f"read-back (work_item_id={work_item_id!r}, "
@@ -204,11 +197,7 @@ def transition_stage_execution(  # noqa: PLR0913 -- explicit transition facts
     output_reference: str | object = _OUTPUT_REFERENCE_UNSET,
     schema: StagingSchema | None = None,
 ) -> StageExecutionRecord:
-    """Apply one validated logical state transition under a row lock.
-
-    A successful transition requires its application-owned output reference.
-    Other transitions reject that argument and preserve any stored value.
-    """
+    """Only SUCCEEDED accepts an output reference; all others preserve it."""
     selected_schema = schema or StagingSchema()
     if not isinstance(new_state, StageExecutionState):
         raise TypeError("new state must be a StageExecutionState")

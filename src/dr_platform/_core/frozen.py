@@ -1,5 +1,3 @@
-"""Immutable mapping helpers for persisted and boundary values."""
-
 from __future__ import annotations
 
 from collections.abc import Mapping

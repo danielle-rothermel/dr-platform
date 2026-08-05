@@ -1,10 +1,3 @@
-"""Structural guards for the platform's DBOS durability boundary.
-
-The platform source owns workflow and transaction wiring but no DBOS steps.
-These scans guard that declared structure; runtime recovery behavior is proven
-separately through an interrupted-worker integration test.
-"""
-
 from __future__ import annotations
 
 import ast
@@ -79,7 +72,6 @@ def _is_dbos_attribute(
 
 
 def _dbos_attribute_calls(tree: ast.AST) -> list[ast.Call]:
-    """Every imported DBOS attribute call in a parsed module."""
     direct_names, module_names = _dbos_import_bindings(tree)
     return [
         node
@@ -118,11 +110,6 @@ def test_dbos_call_scan_ignores_other_module_bindings() -> None:
 
 
 def test_platform_declares_no_dbos_steps() -> None:
-    """The platform leaves DBOS step and retry policy to applications.
-
-    Stage bodies are workflows and completions are transactions. Applications
-    may call their own DBOS steps, but the platform package declares none.
-    """
     step_usages: list[str] = []
     for path in _platform_source_files():
         tree = ast.parse(path.read_text())
@@ -136,7 +123,6 @@ def test_platform_declares_no_dbos_steps() -> None:
 
 
 def test_stage_wrapper_is_declared_as_dbos_workflow() -> None:
-    """The generated stage wrapper is structurally a DBOS workflow."""
     handoff_source = (_PACKAGE_ROOT / "execution" / "handoff.py").read_text()
     tree = ast.parse(handoff_source)
     direct_names, module_names = _dbos_import_bindings(tree)

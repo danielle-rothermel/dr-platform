@@ -1,16 +1,3 @@
-"""Package-owned DBOS workflows for linear stage execution and handoff.
-
-Applications declare a :class:`PipelineDefinition` with plain stage callables
-that return immutable output-reference strings.  ``wrap_pipeline_workflows``
-returns the declaration to register with :class:`PipelineRegistry`; its stage
-``workflow`` fields are DBOS-registered wrappers while ``args_for`` continues
-to produce only the application's positional arguments.
-
-The wrapper catches application exceptions and commits a logical FAILED
-outcome before returning normally.  Completion infrastructure errors are not
-swallowed: DBOS can recover and replay the checkpointed transaction.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -47,16 +34,11 @@ _WRAPPED_STAGE_MARKER = "_dr_platform_wrapped_stage"
 
 
 class StageHandoffMismatchError(RuntimeError):
-    """The running workflow does not match its persisted stage attempt."""
+    pass
 
 
 def is_pipeline_wrapped(pipeline: PipelineDefinition) -> bool:
-    """Report whether every stage callable is a package-owned wrapper.
-
-    Admission enqueues the registered ``workflow`` callables directly, so only
-    a fully wrapped definition runs the completion transaction; the execution
-    wiring uses this to reject definitions that would sit ADMITTED forever.
-    """
+    """Only wrapped definitions run completion; raw ones remain ADMITTED."""
     return all(
         getattr(stage.workflow, _WRAPPED_STAGE_MARKER, False)
         for stage in pipeline.stages
@@ -79,15 +61,11 @@ def wrap_pipeline_workflows(
     *,
     clock: Callable[[], datetime] = _utc_now,
 ) -> PipelineDefinition:
-    """Replace application stage callables with package-owned DBOS wrappers.
+    """Return a declaration whose stages use package-owned DBOS wrappers.
 
-    The input declaration remains unchanged.  Register and submit against the
-    returned declaration so admission enqueues the generated workflows.
-
-    Application stage callables may re-execute: if DBOS recovers a workflow
-    that crashed before its completion transaction checkpointed, the stage body
-    runs again.  Applications must tolerate at-least-once execution of stage
-    bodies; only the completion transaction itself commits exactly once.
+    Register and submit the returned declaration. DBOS recovery may re-execute
+    stage bodies; only completion commits exactly once, so bodies must tolerate
+    at-least-once execution.
     """
     wrapped_stages = tuple(
         StageDefinition(
@@ -141,8 +119,7 @@ def _wrap_stage_workflow(
         next_stage_key: str | None,
         next_stage_index: int | None,
     ) -> None:
-        # ``clock()`` is non-deterministic, so it must be read inside the
-        # checkpointed transaction rather than in the replayable workflow body.
+        # Read nondeterministic time only in the checkpointed transaction.
         _complete_stage_in_transaction(
             cast("Connection", DBOS.sql_session),
             workflow_id=workflow_id,
@@ -210,8 +187,7 @@ def _wrap_stage_workflow(
         )
         return output_reference
 
-    # Mark the callable so the execution wiring can reject a raw declaration
-    # registered in place of this wrapper's return value.
+    # Dispatcher rejects declarations lacking this package-owned marker.
     setattr(run_stage, _WRAPPED_STAGE_MARKER, True)
     return cast("WorkflowCallable", run_stage)
 
@@ -234,11 +210,7 @@ def _complete_stage_in_transaction(  # noqa: PLR0913
     before_next_stage: Callable[[], None] | None = None,
     schema: StagingSchema | None = None,
 ) -> None:
-    """Apply completion on an existing transaction.
-
-    ``before_next_stage`` is a test seam for proving rollback between the
-    current-stage update and successor insert; production callers omit it.
-    """
+    """``before_next_stage`` is a rollback-only test seam."""
     selected_schema = schema or StagingSchema()
     source = _lock_handoff_source(
         connection,
@@ -261,9 +233,7 @@ def _complete_stage_in_transaction(  # noqa: PLR0913
         source["state"] == StageExecutionState.CANCELLED.value
         and source["current_attempt"] == source["attempt_number"]
     ):
-        # Operator cancellation wins this row-lock race.  The application
-        # workflow may already have returned, but its late completion must
-        # neither rewrite terminal state nor create the next linear stage.
+        # Cancellation wins the row-lock race; late completion cannot rewrite.
         return
     if (
         source["state"] != StageExecutionState.ADMITTED.value
@@ -330,10 +300,7 @@ def _lock_handoff_source(
     workflow_id: str,
     schema: StagingSchema,
 ) -> RowMapping:
-    # Lock the execution row before the attempt row so this path shares the
-    # execution-then-attempt order the sweep projection uses; a single joined
-    # FOR UPDATE would lock the workflow_id-driven attempt row first and can
-    # deadlock against concurrent sweep projection of the same attempt.
+    # Preserve execution-then-attempt lock order to avoid sweep deadlocks.
     executions = schema.stage_executions
     attempts = schema.stage_attempts
     work_items = schema.work_items
@@ -376,8 +343,7 @@ def _lock_handoff_source(
         raise LookupError(
             f"stage attempt workflow does not exist: {workflow_id}"
         )
-    # Lock the attempt row second; its identity is fully resolved above, so
-    # record_stage_attempt_terminal re-locks the same row without inverting.
+    # The terminal write re-locks this same attempt without inverting order.
     connection.execute(
         select(attempts.c.stage_attempt_id)
         .where(
@@ -412,9 +378,7 @@ def _stage_workflow_name(
     stage_key: StageKey,
 ) -> str:
     identity = f"{pipeline_key.value}\0{pipeline_version}\0{stage_key.value}"
-    # This truncated digest only disambiguates the DBOS workflow *name* for
-    # display/routing; it is not an identity or content hash.  Attempt
-    # identity uses the full-length digest in the ledger's stage_workflow_id.
+    # Truncation affects routing names only; ledger identity uses full digest.
     name_slug = hashlib.sha256(identity.encode()).hexdigest()[:12]
     readable = re.sub(
         r"[^A-Za-z0-9_]", "_", f"{pipeline_key.value}_{stage_key.value}"

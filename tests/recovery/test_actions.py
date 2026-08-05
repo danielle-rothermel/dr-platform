@@ -1,5 +1,3 @@
-"""PostgreSQL behavior proofs for staged-work recovery actions."""
-
 from __future__ import annotations
 
 import time
@@ -120,8 +118,6 @@ def _submit(
     )
 
 
-# This variant records only the enqueue options; the args-tracking
-# _RecordingClient in the admission/handoff suites is a distinct shape.
 class _RecordingClient:
     def __init__(self) -> None:
         self.enqueued: list[EnqueueOptions] = []
@@ -152,7 +148,6 @@ class _RaisingCanceller:
 
 
 def _wait_until_row_locked(engine: Engine, stage_execution_id: int) -> None:
-    """Block until the source stage-execution row is FOR UPDATE locked."""
     schema = StagingSchema()
     table = schema.stage_executions
     deadline = time.monotonic() + 10.0
@@ -177,7 +172,6 @@ def _wait_until_blocked_on_lock(
     *,
     application_name: str,
 ) -> None:
-    """Block until the intended cancellation backend is waiting on a lock."""
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         with engine.connect() as probe:
@@ -217,7 +211,6 @@ def _admit_one(
     run_key: str,
     work_key: str,
 ) -> tuple[int, int]:
-    """Submit and admit a single work item, returning its stage/work ids."""
     _submit(engine, registry, run_key=run_key, work_keys=(work_key,))
     set_stage_capacity(
         pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
@@ -661,10 +654,7 @@ def test_live_dbos_cancellation_targets_only_the_admitted_workflow(
                     "workflow_id": workflow_id,
                 }
                 client.enqueue_in_transaction(connection, options)
-            # This writes into DBOS-internal schema (dbos.workflow_status) to
-            # forge a parent/child link the public API cannot express. It is
-            # tolerable only because dbos==2.27.0 is pinned exactly, so the
-            # column names cannot drift underneath us.
+            # This DBOS-internal schema write relies on the exact 2.27.0 pin.
             connection.execute(
                 text(
                     "UPDATE dbos.workflow_status "
@@ -906,7 +896,6 @@ def test_repeated_cancel_self_heals_a_lost_admitted_delegation(
             work_item_id=work_item_id,
             clock=lambda: NOW + timedelta(seconds=1),
         )
-    # Platform state committed before the failing post-commit delegation.
     assert len(raising.attempts) == 1
     assert _execution_rows(pg_engine, schema)[0][2] == (
         StageExecutionState.CANCELLED.value
@@ -946,11 +935,8 @@ def test_cancel_after_committed_handoff_cancels_the_successor(
     assert attempt is not None
     workflow_id = attempt.workflow_id
 
-    # A handoff commits the successor READY stage while cancel is blocked on
-    # the source row lock.  The background thread locks the source and inserts
-    # the successor, then commits only once the main connection is observed
-    # waiting on that lock; that forces the EvalPlanQual window the fix
-    # survives.
+    # Force the PostgreSQL EvalPlanQual window by committing handoff only after
+    # cancellation blocks on the source row.
     dsn = engine_dsn(pg_engine)
     holder = create_engine(dsn)
     cancellation_application_name = f"operations-cancel-{uuid4().hex}"
@@ -985,8 +971,6 @@ def test_cancel_after_committed_handoff_cancels_the_successor(
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(commit_handoff)
-            # Give the holder time to take the source lock before cancel reads
-            # the pre-handoff max stage and blocks acquiring it.
             _wait_until_row_locked(pg_engine, stage_execution_id)
             result = cancel_work(
                 engine=cancellation_engine,

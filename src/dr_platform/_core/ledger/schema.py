@@ -1,5 +1,3 @@
-"""SQLAlchemy schema for the staged-work ledger."""
-
 from __future__ import annotations
 
 import re
@@ -40,8 +38,6 @@ def _enum_check(column_name: str, enum_type: type[StrEnum]) -> str:
 
 
 class StagingSchema:
-    """The five staged-work tables."""
-
     def __init__(self, prefix: str = DEFAULT_PREFIX) -> None:
         if PREFIX_PATTERN.fullmatch(prefix) is None:
             raise ValueError(

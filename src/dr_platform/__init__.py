@@ -1,5 +1,3 @@
-"""Public staged-work contract for dr-platform."""
-
 from dr_platform._core.identities import (
     CampaignKey,
     PipelineKey,

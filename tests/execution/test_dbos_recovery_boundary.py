@@ -1,5 +1,3 @@
-"""Process-boundary proof of DBOS replay within one platform attempt."""
-
 from __future__ import annotations
 
 import os
@@ -26,16 +24,12 @@ from dr_platform.submission.stream import WorkInput, submit
 from tests.conftest import _args_for, dbos_config, initialize_dbos_schema
 
 _HARD_EXIT_CODE = 86
-# The worker polls for SUCCEEDED up to its own deadline; the parent joins with
-# a wider margin so terminate() cannot race in and destroy the worker's
-# diagnostic traceback exactly as it reports the timeout.
 _WORKER_TIMEOUT_SECONDS = 10
 _WORKER_JOIN_TIMEOUT_SECONDS = 20
 _PROBE_ROW_ID = 1
 
 
 def _recovery_probe_stage(database_url: str) -> str:
-    """Crash after the first durable body effect, then succeed on replay."""
     engine = create_engine(database_url)
     try:
         with engine.begin() as connection:

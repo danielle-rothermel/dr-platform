@@ -1,5 +1,3 @@
-"""PostgreSQL guarantees for transactional staged admission."""
-
 from __future__ import annotations
 
 from collections import Counter
@@ -288,8 +286,6 @@ class _EnqueueThenFail:
 
 
 class _EnqueueOnceThenFail:
-    """Enqueue the first candidate, then fail after enqueuing the second."""
-
     def __init__(self, client: DBOSClient) -> None:
         self._client = client
         self._calls = 0
@@ -308,7 +304,7 @@ class _EnqueueOnceThenFail:
             *args,
             **kwargs,
         )
-        if self._calls >= 2:  # second candidate
+        if self._calls >= 2:
             raise RuntimeError("failure after enqueue")
         return result
 
@@ -661,9 +657,7 @@ def test_selector_paused_after_candidate_selection_skips_admission(
             identities=identities,
         )
 
-    # Patching the private _lock_controls is the only deterministic seam to
-    # open the pause-after-selection window; nothing public lets a test pause a
-    # selector between candidate selection and the control lock.
+    # No public seam can pause between selection and the control lock.
     monkeypatch.setattr(
         "dr_platform.admission.runner._lock_controls",
         pause_before_control_lock,
@@ -738,8 +732,6 @@ def test_enqueue_failure_rolls_back_platform_and_dbos_rows(
             for _, state, _ in states
             if state == StageExecutionState.READY.value
         ]
-        # The pass no longer aborts: the healthy candidate commits while
-        # the failing candidate's platform and DBOS rows roll back.
         assert summary.admitted_total == 1
         assert len(admitted) == 1
         assert len(ready) == 1
@@ -1242,8 +1234,6 @@ def test_non_tuple_args_for_rolls_back_candidate_and_continues_same_stage(
 ) -> None:
     schema = _migrate(pg_engine)
     campaign_key = "campaign-1"
-    # The lower-ranked (locked-first) row is the poison one; its same-stage
-    # sibling ranked behind it must still admit in this pass.
     ranked = sorted(
         ("work-0", "work-1"),
         key=lambda work_key: stable_random_rank(
@@ -1319,9 +1309,6 @@ def test_pipeline_stage_mismatch_is_reported_and_other_stages_admit(
     pg_engine: Engine,
 ) -> None:
     schema = _migrate(pg_engine)
-    # Submit under a well-formed registry, then run admission under one whose
-    # pipeline-b stage key drifted from the persisted position: registry/data
-    # drift, not an application boundary failure.
     submit_registry = _starvation_registry()
     _submit_two_stage_backlog(pg_engine, submit_registry)
     _pipeline_control(pg_engine, suffix="a", capacity=5, paused=False)
@@ -1385,8 +1372,7 @@ def test_unconfigured_backlog_cannot_exhaust_considered_budget(
     pg_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A realistic starving backlog needs batch_size + 10_000 rows; shrinking
-    # the skip allowance exercises the same budget exhaustion with five.
+    # Shrink the 10,000-row production budget to exercise starvation cheaply.
     monkeypatch.setattr(
         "dr_platform.admission.runner.MAX_CAPACITY_SKIPS_PER_PASS", 2
     )
@@ -1509,9 +1495,6 @@ def test_paused_selector_only_stage_is_invisible_until_resume(
         clock=lambda: NOW,
     )
 
-    # While paused, the SQL pause exclusion filters the stage's rows before
-    # unconfigured-stage detection runs, so a stage with only a paused
-    # selector control and no empty-selector default appears nowhere.
     assert paused.admitted_total == 0
     assert paused.skipped_for_pause == 0
     assert paused.unconfigured_stages == ()
@@ -1569,8 +1552,6 @@ def test_two_passes_cannot_exceed_control_capacity(
             select(func.count()).select_from(schema.stage_attempts)
         ).scalar_one()
 
-    # Whichever pass acquires the control lock second must observe the
-    # winner's committed occupancy and skip as full.
     assert sum(item.admitted_total for item in summaries) == 1
     assert sum(item.skipped_for_capacity for item in summaries) == 1
     assert attempt_count == 1

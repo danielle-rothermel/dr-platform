@@ -1,5 +1,3 @@
-"""PostgreSQL guarantees for streaming staged submission."""
-
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -190,12 +188,7 @@ def test_interrupted_replay_fills_only_absent_keys(
 def test_completed_run_replay_does_not_restamp_completion(
     pg_engine: Engine,
 ) -> None:
-    """``mark_submission_completed``'s NULL guard is a real no-op replay.
-
-    Both calls here use distinct clocks so a re-stamp would move
-    ``submission_completed_at``; the constant clock used elsewhere in this
-    module can't distinguish a no-op from a rewrite.
-    """
+    """Distinct clocks distinguish a no-op replay from a restamp."""
     _migrate(pg_engine)
     registry, pipeline = _registry()
     later = datetime(2026, 7, 18, 12, tzinfo=UTC)
@@ -622,11 +615,6 @@ def test_cross_run_campaign_duplicates_converge(
     assert (work_count, stage_count, origin_run_key) == (1, 1, "run-1")
 
 
-# One structured, resolvable-looking typed Object Reference of the exact shape
-# whetstone/dr-store will carry: an encoded value embedding a declared schema
-# and a 64-char content_hash for one immutable Rollout Work Request.  The
-# embedded ``://`` and ``&`` are deliberate parse bait; dr-platform must never
-# interpret them.
 _TYPED_OBJECT_REFERENCE = (
     "objref://rollout-work-request/v3"
     "?schema=whetstone.rollout_work_request"
@@ -639,13 +627,6 @@ _TYPED_OBJECT_REFERENCE = (
 def test_input_reference_is_transported_opaquely_without_parsing(
     pg_engine: Engine,
 ) -> None:
-    """A typed Object Reference round-trips byte-for-byte, unparsed.
-
-    dr-platform validates ``input_reference`` only as a non-empty string and
-    never parses, resolves, normalizes, or decomposes its encoded schema or
-    ``content_hash``.  The exact submitted string must reappear verbatim in the
-    persisted ``work_items.input_reference`` column.
-    """
     schema = _migrate(pg_engine)
     registry, pipeline = _registry()
 
@@ -671,9 +652,6 @@ def test_input_reference_is_transported_opaquely_without_parsing(
             select(schema.work_items.c.input_reference)
         ).scalar_one()
 
-    # Byte-for-byte identity: the transport preserved every character,
-    # including the ``://``, query separators, and full content_hash, none of
-    # which dr-platform inspected.
     assert stored == _TYPED_OBJECT_REFERENCE
 
 
@@ -688,12 +666,6 @@ def test_input_reference_is_transported_opaquely_without_parsing(
     ],
 )
 def test_work_input_never_validates_reference_structure(opaque: str) -> None:
-    """The submission boundary accepts any non-empty reference string.
-
-    Opacity means dr-platform imposes no schema, scheme, delimiter, hash
-    length, or well-formedness requirement on the transported reference; the
-    accepted value is preserved unchanged.
-    """
     assert (
         WorkInput(
             work_key="work", input_reference=opaque, labels={}

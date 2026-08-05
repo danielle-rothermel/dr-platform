@@ -1,17 +1,3 @@
-"""DBOS scheduled wiring for admission and recovery dispatch.
-
-The registration hook constructs and owns one ``DBOSClient`` from the
-validated colocated system database URL.  Its returned registration handle
-keeps that client alive and provides explicit cleanup.  The scheduled
-workflow is deliberately only an adapter around ``run_admission_pass``.
-A pass never aborts for one unhealthy stage: stages lacking an empty-selector
-capacity control, and candidates whose ``args_for`` or enqueue raises, are
-skipped and reported on the returned :class:`AdmissionSummary`.  This adapter
-logs those signals as warnings so operators can act, and logs persisted-
-position mismatches (registry/data drift) at ERROR, while healthy admission
-still commits.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -52,13 +38,7 @@ ScheduledWorkflow = Callable[[datetime, datetime], None]
 
 
 class UnwrappedPipelineError(RuntimeError):
-    """A registry admitted from contains a pipeline that was not wrapped.
-
-    Admission enqueues the registered stage callables directly, so a declared
-    (unwrapped) definition never runs the completion transaction and its stage
-    sits ADMITTED forever.  Register ``wrap_pipeline_workflows(...)``'s return
-    value instead of the raw declaration.
-    """
+    """A raw pipeline would bypass completion and remain ADMITTED."""
 
     def __init__(self, *, pipeline_key: str, pipeline_version: int) -> None:
         self.pipeline_key = pipeline_key
@@ -81,11 +61,7 @@ def _require_wrapped_registry(registry: PipelineRegistry) -> None:
 
 @dataclass(frozen=True, slots=True)
 class DispatcherRegistration:
-    """Owned DBOS client and the registered scheduled workflows.
-
-    ``sweep_workflow`` is set only when a ``sweep_cron`` was supplied; both
-    workflows share the one owned client, so ``close`` tears down both.
-    """
+    """Owns the client shared by admission and optional sweep workflows."""
 
     client: DBOSClient
     workflow: ScheduledWorkflow
@@ -105,12 +81,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913 -- explicit wiring facts
     sweep_cron: str | None = None,
     sweep_batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
 ) -> DispatcherRegistration:
-    """Register the process's single scheduled admission workflow.
-
-    When ``sweep_cron`` is set, a second scheduled workflow projects DBOS
-    abandonment onto ADMITTED stages with the registration's own client;
-    scheduled workflow-ID dedup makes it a single sweeper by construction.
-    """
+    """Register admission and optional single-sweeper workflows."""
     validate_positive_integer(batch_size, label="admission batch size")
     if sweep_cron is not None:
         validate_positive_integer(sweep_batch_size, label="sweep batch size")
@@ -118,9 +89,6 @@ def register_scheduled_dispatcher(  # noqa: PLR0913 -- explicit wiring facts
         database_url=engine.url.render_as_string(hide_password=False),
         system_database_url=config.system_database_url,
     )
-    # Reject unwrapped pipelines here, at the execution wiring boundary: a raw
-    # declaration would be admitted without ever running the completion
-    # transaction.  Submission-only registries never reach this check.
     _require_wrapped_registry(registry)
     client = DBOSClient(system_database_url=config.system_database_url)
     sweep_workflow: ScheduledWorkflow | None = None
@@ -161,9 +129,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913 -- explicit wiring facts
                     ),
                 )
             if summary.mismatched_stages:
-                # A persisted position disagreeing with the registry is
-                # registry/data drift -- a deployment bug, not an application
-                # boundary failure -- so it is surfaced at ERROR.
+                # Registry/data drift is a deployment failure, not app failure.
                 logger.error(
                     "admission found registry/data drift for stages: %s",
                     ", ".join(

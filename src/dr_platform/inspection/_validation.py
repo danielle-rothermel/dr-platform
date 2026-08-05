@@ -1,5 +1,3 @@
-"""Shared validation for bounded inspection readers."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

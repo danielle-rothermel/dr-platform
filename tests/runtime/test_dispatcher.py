@@ -1,5 +1,3 @@
-"""Thin scheduled-dispatcher registration behavior."""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -117,8 +115,6 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
     assert calls[0] == ("client", config.system_database_url)
     assert ("cron", dispatcher.DEFAULT_DISPATCHER_CRON) in calls
     assert ("workflow", dispatcher.DISPATCHER_WORKFLOW_NAME) in calls
-    # The wrapper must forward the registration's own engine, client, and
-    # registry with the configured batch size -- not defaults or fresh objects.
     assert calls[-1] == (
         "pass",
         (
@@ -236,8 +232,6 @@ def test_registration_rejects_a_registry_with_an_unwrapped_pipeline(
 
     assert caught.value.pipeline_key == "evaluation"
     assert caught.value.pipeline_version == 1
-    # The client must never be constructed when validation rejects the
-    # registry; recording factory invocations proves the ordering.
     assert constructions == []
 
 
@@ -324,8 +318,6 @@ def test_sweep_cron_registers_a_second_scheduled_workflow(
 
     assert ("cron", "0 * * * * *") in calls
     assert ("workflow", dispatcher.SWEEP_WORKFLOW_NAME) in calls
-    # The sweep workflow must forward the registration's own client and the
-    # configured batch size.
     assert calls[-1] == (
         "sweep",
         (engine, {"client": client, "batch_size": 25}),

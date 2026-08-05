@@ -1,5 +1,3 @@
-"""Stage-attempt records, identities, and persistence operations."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -33,11 +31,7 @@ WORKFLOW_ID_DIGEST_LENGTH = 64
 
 @verify(UNIQUE)
 class WorkflowIdDigestField(StrEnum):
-    """Persisted payload keys used to derive stage-attempt workflow IDs.
-
-    Never edit a value or build a payload by iterating this enum. Each key is
-    spelled out at the hashing boundary so the wire format remains explicit.
-    """
+    """Persisted wire keys; spell them out at hashing sites, never iterate."""
 
     CAMPAIGN_KEY = "campaign_key"
     WORK_KEY = "work_key"
@@ -67,7 +61,6 @@ def stage_workflow_id(
     stage_key: StageKey,
     attempt_number: int,
 ) -> str:
-    """Derive the DBOS workflow ID for one immutable stage attempt."""
     if not isinstance(pipeline_key, PipelineKey):
         raise TypeError("pipeline_key must be a PipelineKey")
     validate_positive_integer(pipeline_version, label="pipeline version")
@@ -90,11 +83,11 @@ def stage_workflow_id(
 
 
 class StageAttemptSequenceError(RuntimeError):
-    """An attempt number did not append to the current sequence."""
+    pass
 
 
 class StageAttemptTerminalError(RuntimeError):
-    """An attempt was missing or had already reached a terminal outcome."""
+    pass
 
 
 def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
@@ -108,7 +101,7 @@ def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
     terminal_reference: str | None = None,
     schema: StagingSchema | None = None,
 ) -> StageAttemptRecord:
-    """Append the next attempt with its deterministic DBOS workflow ID."""
+    """Append the next attempt with a deterministic DBOS workflow ID."""
     selected_schema = schema or StagingSchema()
     executions = selected_schema.stage_executions
     work_items = selected_schema.work_items

@@ -1,5 +1,3 @@
-"""Exit evidence for the staged-work root contract."""
-
 from __future__ import annotations
 
 import time
@@ -162,8 +160,7 @@ def test_root_contract_defines_submits_executes_and_inspects(
             registry=registry,
         )
         DBOS.launch()
-        # DBOSClient enqueues versionless work, which only the latest-version
-        # worker dequeues.
+        # DBOSClient enqueues versionless work for the latest-version worker.
         DBOS.set_latest_application_version(DBOS.application_version)
         last_stage_index = len(pipeline.stages) - 1
         for stage_index in range(len(pipeline.stages)):
