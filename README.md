@@ -3,31 +3,43 @@
 [![CI](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/dr-platform.svg)](https://pypi.org/project/dr-platform/)
 
-`dr-platform` is an alpha staged-work funnel built on PostgreSQL and DBOS. It
-accepts application-owned work as a stream, moves each item through a linear
-pipeline, and exposes durable controls and inspection. The public API is under
-active development; there are no compatibility promises yet.
+| [Definitions](https://danielle-rothermel.github.io/dr-platform/) | [Terms source](https://github.com/danielle-rothermel/dr-platform/blob/main/.defs/terms.toml) | [Contracts source](https://github.com/danielle-rothermel/dr-platform/blob/main/.defs/contracts.toml) | [dr-serialize](https://github.com/danielle-rothermel/dr-serialize) |
+| --- | --- | --- | --- |
 
-The ownership boundary is deliberate:
+**dr-platform durably moves application-owned work through staged pipelines.**
+It is built on PostgreSQL and DBOS and organized into six functional areas:
 
-- `dr-platform` owns the funnel mouth and its gates: campaign and work
-  identity, streaming submission, stage state, randomized admission, capacity,
-  pause, retry, cancellation intent, and inspection.
-- DBOS owns the conveyor belt: durable workflow execution, queues, recovery,
-  and replay.
-- Applications own meaning: which work should exist, what input and output
-  references identify, how configuration is resolved, and what each stage
-  does.
+`dr-platform` is alpha software. The root `dr_platform` API is the intended
+application boundary, but compatibility is not yet promised.
 
-The package does not interpret application payloads or privilege a source
-transport. A database query, API iterator, generated sequence, or file reader
-can all yield the same `WorkInput` values.
-
-The [vocabulary sheet](https://danielle-rothermel.github.io/dr-platform/)
-(source: `.defs/vocab.html`) is the authoritative statement of the
-staged-work pipeline contract this repo implements: the terms, the
-guarantees, what is in and out of scope, and the mapping from each term to
-the exported names.
+- **[Pipeline definitions](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/pipeline)**
+  describe ordered, versioned stages while applications retain ownership of
+  stage behavior and the meaning of input and output references.
+- **[Submission](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/submission)**
+  records streamed work in bounded chunks and organizes it into campaigns and
+  runs with stable identities and replay-safe conflict detection.
+- **[Admission and controls](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/admission)**
+  select ready work in stable randomized order within stage-wide and
+  label-specific capacity, with pause and resume controls that leave running
+  work uninterrupted.
+- **[Execution and handoff](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/execution)**
+  make admitted stages DBOS-durable, record outcomes, and create the next ready
+  stage transactionally.
+- **[Recovery and operator actions](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/recovery)**
+  reconcile abandoned workflows and provide explicit retry and cancellation
+  while preserving stage-attempt history.
+- **[Inspection](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/inspection)**
+  exposes campaigns, runs, work items, stage and attempt history, current state
+  counts, and bulk work status without exposing persistence rows.
+- **Infra**
+    - **[Shared core](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/_core)**
+      owns nominal identities, immutable values, execution state, and the
+      persistence ledger shared across functional areas.
+    - **[Runtime](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/runtime)**
+      validates PostgreSQL and DBOS colocation, initializes DBOS, schedules
+      dispatch, and optionally configures telemetry.
+        - **[Database](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/runtime/database)**
+          owns the platform schema and migrations.
 
 ## Installation
 
@@ -39,321 +51,290 @@ pip install dr-platform
 uv add dr-platform
 ```
 
-`dr-platform` requires Python >= 3.12 and a PostgreSQL database. The library
-creates its schema in that database and colocates with the DBOS system schema;
-see [Operational preconditions](#operational-preconditions) for the colocation
-requirement and migration lineage.
+`dr-platform` requires Python 3.12 or newer and a PostgreSQL database. The
+package pins `dbos[otel]` to the exact release used to validate its recovery
+and sweep behavior.
 
-`dr-platform` pins its DBOS dependency to an exact version
-(`dbos[otel]==2.27.0`).
-The package couples to DBOS internals, and recovery and sweep behavior is
-validated against exactly this release, so each `dr-platform` release pins the
-DBOS version it was proven against. Consumers get the exact combination that
-was tested.
+## Functional Areas
 
-## Pipeline and execution model
+The following abbreviated shapes describe the intended application boundary,
+not exact call signatures. Application-facing names are exported from
+`dr_platform`; infrastructure-only defaults and collaborators are omitted where
+they do not clarify the boundary.
 
-A `PipelineDefinition` is an immutable, versioned, non-empty sequence of
-`StageDefinition` values. Each stage names an application-owned queue, a
-callable, and an `args_for` adapter. `wrap_pipeline_workflows` replaces those
-callables with package-owned DBOS workflows that commit stage outcome and
-create the next READY stage atomically. Register and submit the wrapped
-definition, not the original declaration.
+### Pipeline definitions
 
-Application stage callables return a non-empty immutable output reference.
-Stage execution is at-least-once, not exactly-once: if DBOS recovers a
-workflow that crashed before its completion transaction checkpointed, the
-whole stage body runs again, even effects the application considers already
-done. The platform's completion transaction itself commits exactly once.
-Put non-idempotent effects inside DBOS steps, or design the callable around
-immutable output references so re-execution is safe.
-
-Application exceptions become an in-band platform `FAILED` stage and the
-wrapper returns normally. This is intentional: DBOS can report `SUCCESS` for
-a workflow whose logical stage is `FAILED`. Platform inspection is
-authoritative for stage outcome. A failed stage stays terminal until an
-operator calls `retry_stage`; retry appends a new attempt and returns the same
-logical stage to READY for later admission.
-
-## Neutral end-to-end example
-
-This example submits a plain generator. The scheduled dispatcher repeatedly
-runs bounded admission passes; DBOS workers execute each admitted stage.
+Pipeline declarations are immutable, versioned, linear stage chains. A startup
+registry binds each identity to exactly one declaration for submission and
+runtime wiring.
 
 ```python
-import time
-
-from dbos import DBOS, Queue
-from sqlalchemy import create_engine
-
-from dr_platform import (
-    AdmissionPayload,
-    PipelineDefinition,
-    PipelineKey,
-    PipelineRegistry,
-    StageDefinition,
-    StageExecutionState,
-    StageKey,
-    WorkInput,
-    build_platform_dbos_config,
-    bulk_work_statuses,
-    initialize_dbos_runtime,
-    inspect_campaign,
-    register_scheduled_dispatcher,
-    set_stage_capacity,
-    submit,
-    upgrade_platform_schema,
-    wrap_pipeline_workflows,
-)
+@dataclass(frozen=True, slots=True)
+class PipelineIdentity:
+    key: PipelineKey
+    version: int
 
 
-def args_for(payload: AdmissionPayload) -> tuple[object, ...]:
-    return (payload.input_reference,)
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StageDefinition:
+    key: StageKey
+    queue_name: str
+    workflow: Callable[..., object]
+    args_for: Callable[..., tuple[object, ...]]
 
 
-def prepare(input_reference: str) -> str:
-    return f"prepared:{input_reference}"
-
-
-def execute(input_reference: str) -> str:
-    return f"executed:{input_reference}"
-
-
-def score(input_reference: str) -> str:
-    return f"scored:{input_reference}"
-
-
-config = build_platform_dbos_config(database_url=None)  # resolves DATABASE_URL
-engine = create_engine(config.database_url)
-upgrade_platform_schema(config.database_url)
-initialize_dbos_runtime(config, app_name="staged-work-example")
-
-declared = PipelineDefinition(
-    key=PipelineKey("generic-work"),
-    version=1,
-    stages=(
-        StageDefinition(
-            key=StageKey("prepare"),
-            queue_name="prepare",
-            workflow=prepare,
-            args_for=args_for,
-        ),
-        StageDefinition(
-            key=StageKey("execute"),
-            queue_name="execute",
-            workflow=execute,
-            args_for=args_for,
-        ),
-        StageDefinition(
-            key=StageKey("score"),
-            queue_name="score",
-            workflow=score,
-            args_for=args_for,
-        ),
-    ),
-)
-pipeline = wrap_pipeline_workflows(declared)
-registry = PipelineRegistry()
-registry.register(pipeline)
-
-# A stage-wide control is required for every stage before admission.
-for stage in pipeline.stages:
-    Queue(stage.queue_name)
-    set_stage_capacity(
-        pipeline=pipeline.identity,
-        stage_key=stage.key,
-        capacity=4,
-        engine=engine,
-    )
-
-dispatcher = register_scheduled_dispatcher(
-    config=config,
-    engine=engine,
-    registry=registry,
-)
-DBOS.launch()
-
-
-def work_inputs():
-    for index in range(10):
-        yield WorkInput(
-            work_key=f"work-{index}",
-            input_reference=f"input:{index}",
-            labels={"group": "example"},
-        )
-
-
-try:
-    receipt = submit(
-        campaign_key="campaign-1",
-        run_key="run-1",
-        pipeline=pipeline.identity,
-        execution_config_reference="config:1",
-        items=work_inputs(),
-        registry=registry,
-        engine=engine,
-    )
-
-    requested = [f"work-{index}" for index in range(10)]
-    deadline = time.monotonic() + 60
-    while True:
-        statuses = bulk_work_statuses(
-            "campaign-1", requested, engine=engine
-        ).statuses.values()
-        if all(
-            status.state is StageExecutionState.SUCCEEDED
-            for status in statuses
-        ):
-            break
-        if any(
-            status.state
-            in {StageExecutionState.FAILED, StageExecutionState.CANCELLED}
-            for status in statuses
-        ):
-            raise RuntimeError("work reached a terminal failure state")
-        if time.monotonic() >= deadline:
-            raise TimeoutError("work did not finish before the deadline")
-        time.sleep(0.25)
-
-    campaign = inspect_campaign("campaign-1", engine=engine)
-    print(receipt.inserted_count, campaign.work_item_count)
-finally:
-    dispatcher.close()
-    DBOS.destroy()
-    engine.dispose()
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PipelineDefinition:
+    key: PipelineKey
+    version: int
+    stages: tuple[StageDefinition, ...]
 ```
 
-## Submission and campaign idempotency
+```python
+class PipelineRegistry:
+    def register(
+        self,
+        pipeline: PipelineDefinition,
+    ) -> PipelineDefinition: ...
 
-`submit` consumes any iterable and commits bounded chunks before requesting
-the next values. A producer failure can therefore leave useful committed work
-and an incomplete run. Replaying the same run key with the same immutable
-campaign, pipeline version, and configuration reference resumes safely;
-changing those facts raises `PipelineRunConflictError`.
+    def get(
+        self,
+        *,
+        key: PipelineKey,
+        version: int,
+    ) -> PipelineDefinition: ...
+```
 
-Work identity is `(campaign_key, work_key)`. The first matching item fixes its
-input reference and labels. Replays and later runs in the same campaign count
-matching items as already existing; conflicting immutable facts raise
-`WorkItemConflictError`. The receipt reports only what this call actually
-committed: its run key, inserted count, and already-existing count.
+### Submission
 
-For top-ups, derive the desired work keys in the application, read them with
-`bulk_work_statuses`, submit only absent keys in a new run, leave READY or
-ADMITTED keys alone, and explicitly retry FAILED stage executions. CANCELLED
-keys are not reusable in that campaign; recover them with new work keys.
+Submission accepts an arbitrary iterable of immutable work inputs and commits
+it in bounded chunks. Reusing an existing identity is safe only when its
+immutable provenance matches the original submission.
 
-## Admission, capacity, and pause
+```python
+@dataclass(frozen=True, slots=True, init=False)
+class WorkInput:
+    work_key: WorkKey
+    input_reference: str
+    labels: Mapping[str, str]
 
-Admission considers READY work in a stable randomized order so repeated passes
-do not permanently favor submission order. Capacity is desired concurrent
-occupancy, not a worker count. `set_stage_capacity` creates the required `{}`
-stage-wide control; a stage admits nothing until that control exists. Creating
-one for every declared stage is part of pipeline setup.
+    def __init__(
+        self,
+        *,
+        work_key: WorkKey | str,
+        input_reference: str,
+        labels: Mapping[str, str],
+    ) -> None: ...
 
-`set_selector_capacity` adds an exact-label gate. `pause` and `resume` modify
-an existing control without changing its capacity or interrupting running
-work; they never create one. Pausing a label subset requires that exact
-selector control to already exist, created with `set_selector_capacity`.
-`pause` or `resume` on a selector that was never configured raises
-`LookupError`.
 
-Applications register one scheduled dispatcher per process configuration with
-`register_scheduled_dispatcher`. The dispatcher owns its DBOS client and runs
-bounded admission passes. Close its registration during shutdown.
-`register_scheduled_dispatcher` requires every pipeline in the registry to be
-the return value of `wrap_pipeline_workflows`; registering an unwrapped
-declaration raises `UnwrappedPipelineError`, since a raw declaration would
-admit work whose completion transaction never runs.
+@dataclass(frozen=True, slots=True)
+class SubmissionReceipt:
+    run_key: RunKey
+    inserted_count: int
+    already_existing_count: int
+```
 
-## Failure, sweep, retry, and cancellation
+```python
+def submit(
+    *,
+    campaign_key: CampaignKey | str,
+    run_key: RunKey | str,
+    pipeline: PipelineIdentity,
+    execution_config_reference: str,
+    items: Iterable[WorkInput],
+    registry: PipelineRegistry,
+    engine: Engine,
+) -> SubmissionReceipt: ...
+```
 
-Call `sweep_abandoned_stages` to lazily project DBOS `CANCELLED`, `ERROR`, or
-recovery-exhausted workflows that remain platform-ADMITTED into terminal
-platform state. The sweep does not retry or wait. Use `retry_stage` explicitly
-for FAILED stages.
+### Admission and controls
 
-Nothing releases ADMITTED capacity for an abandoned workflow automatically.
-Pass `sweep_cron` to `register_scheduled_dispatcher` to schedule
-`sweep_abandoned_stages` alongside admission, or call it manually on your own
-schedule; without one or the other, abandoned slots stay ADMITTED forever and
-starve real work of capacity. Set `sweep_cron` in production-like runs.
+Admission supplies each selected stage with immutable work context and respects
+every matching capacity control. Operators can change capacity or pause future
+admissions without preempting work that is already running.
 
-An application obtains a `WorkflowCanceller` by constructing a `DBOSClient`
-against `PlatformDbosConfig.system_database_url`, the colocated system
-database URL.
+```python
+@dataclass(frozen=True, slots=True)
+class AdmissionPayload:
+    campaign_key: CampaignKey
+    work_key: WorkKey
+    run_key: RunKey
+    input_reference: str
+    labels: Mapping[str, str]
+    pipeline_key: str
+    pipeline_version: int
+    stage_key: StageKey
+    attempt_number: int
 
-`cancel_work` makes platform state terminal before delegating cancellation of
-the exact admitted DBOS workflow. READY work has no workflow to delegate.
-FAILED work is cancellable too: the attempt is already terminal, so nothing is
-delegated, but the CANCELLED stage fences the item against a later
-`retry_stage`. Cancellation is non-recursive and has several important
-consequences:
 
-- CANCELLED work is permanently terminal within its campaign. Submit a new
-  work key to recover it.
-- A cancellation racing with a successful handoff targets whatever stage is
-  current once it holds the row lock, so it cancels the freshly created next
-  stage rather than misreporting already-terminal work.
-- If DBOS cancellation delegation fails after the platform commit, calling
-  `cancel_work` again re-issues the idempotent delegation for the recorded
-  attempt; repeated calls self-heal a lost delegation.
+@dataclass(frozen=True, slots=True)
+class StageControlRecord:
+    stage_control_id: int
+    pipeline_key: str
+    pipeline_version: int
+    stage_key: StageKey
+    selector: Mapping[str, str]
+    capacity: int
+    paused: bool
+    updated_at: datetime
+```
 
-## Inspection and operations
+```text
+set_stage_capacity(pipeline, stage_key, capacity) -> StageControlRecord
+set_selector_capacity(pipeline, stage_key, labels, capacity) -> StageControlRecord
+pause(pipeline, stage_key, labels=None) -> StageControlRecord
+resume(pipeline, stage_key, labels=None) -> StageControlRecord
+read_controls(pipeline, stage_key, labels=None) -> tuple[StageControlRecord, ...]
+```
 
-`inspect_campaign` returns one campaign summary. The bounded readers
-`list_campaigns`, `list_runs`, and `list_work_items` use stable cursors;
-`get_work_item_stages` exposes stage and attempt lineage. Current-state counts
-are available through `campaign_state_counts` and `run_state_counts`, controls
-through `read_controls`, and application-sized desired sets through the
-chunked `bulk_work_statuses` reader.
+### Execution and handoff
 
-These readers derive outcomes from platform tables. DBOS workflow status is
-execution evidence, not the source of truth for logical success or failure.
+Execution wraps application stage callables in package-owned DBOS workflows
+that record one terminal outcome and prepare the next stage transactionally.
+Stage bodies must tolerate at-least-once execution across workflow recovery.
+Crash recovery requires a worker with the matching executor and application
+version and with the workflows registered; cross-version recovery is not
+promised.
 
-Across the public API, a well-formed identity that does not exist raises
-`LookupError` (an unknown campaign, run, work item, or control selector);
-malformed input raises `ValueError`. `campaign_state_counts` and
-`run_state_counts` follow this too: an unknown campaign or run raises rather
-than returning an empty tuple, so a typo'd key is distinguishable from a
-drained one.
+```python
+class StageExecutionState(StrEnum):
+    READY = "ready"
+    ADMITTED = "admitted"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+```
+
+```python
+class StageHandoffMismatchError(RuntimeError): ...
+
+
+def wrap_pipeline_workflows(
+    pipeline: PipelineDefinition,
+) -> PipelineDefinition: ...
+```
+
+### Recovery and operator actions
+
+Recovery keeps platform state authoritative while delegating physical workflow
+cancellation through a narrow protocol. Retry creates a new attempt, while the
+sweeper only projects terminal DBOS abandonment onto admitted work.
+
+```python
+class WorkflowCanceller(Protocol):
+    def cancel_workflow(
+        self,
+        workflow_id: str,
+        *,
+        cancel_children: bool = False,
+    ) -> None: ...
+
+
+class CancellationDisposition(StrEnum):
+    CANCELLED_READY = "cancelled_ready"
+    CANCELLED_ADMITTED = "cancelled_admitted"
+    CANCELLED_FAILED = "cancelled_failed"
+    ALREADY_TERMINAL = "already_terminal"
+```
+
+```python
+@dataclass(frozen=True, slots=True)
+class WorkCancellationResult:
+    work_item_id: int
+    stage_execution: StageExecutionRecord
+    disposition: CancellationDisposition
+    delegated_workflow_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class StageRetryResult:
+    stage_execution: StageExecutionRecord
+    new_attempt: StageAttemptRecord
+
+
+@dataclass(frozen=True, slots=True)
+class SweepSummary:
+    projections: tuple[SweepProjection, ...]
+    inspected_count: int
+```
+
+```text
+cancel_work(work identity, canceller) -> WorkCancellationResult
+retry_stage(stage_execution_id) -> StageRetryResult
+sweep_abandoned_stages(DBOS client) -> SweepSummary
+```
+
+### Inspection
+
+Inspection provides read-only projections over stable logical identities rather
+than exposing database rows. Collection readers are bounded; direct work-item
+inspection returns its complete stage-attempt history.
+
+```python
+@dataclass(frozen=True, slots=True)
+class CampaignSummary:
+    campaign_key: CampaignKey
+    created_at: datetime
+    run_count: int
+    work_item_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkItemSummary:
+    work_item_id: int
+    campaign_key: CampaignKey
+    work_key: WorkKey
+    origin_run_key: RunKey
+    labels: Mapping[str, str]
+    current_stage_execution_id: int
+    current_stage_key: StageKey
+    current_stage_index: int
+    state: StageExecutionState
+
+
+@dataclass(frozen=True, slots=True)
+class StageExecutionSummary:
+    execution: StageExecutionRecord
+    attempts: tuple[StageAttemptRecord, ...]
+```
+
+```text
+inspect_campaign(campaign_key) -> CampaignSummary
+list_campaigns(cursor=None, limit=...) -> tuple[CampaignSummary, ...]
+list_runs(campaign_key, cursor=None, limit=...) -> tuple[RunSummary, ...]
+list_work_items(campaign_key, state=None, cursor=None, limit=...) -> tuple[WorkItemSummary, ...]
+get_work_item_stages(work_item_id) -> tuple[StageExecutionSummary, ...]
+campaign_state_counts(campaign_key) -> tuple[StateCount, ...]
+run_state_counts(run_key) -> tuple[StateCount, ...]
+bulk_work_statuses(campaign_key, work_keys) -> BulkStatusResult
+```
 
 ## Operational preconditions
 
 The platform tables and the DBOS system schema must share one PostgreSQL
-database. `PlatformDbosConfig`, runtime bootstrap, and dispatcher registration
-validate colocation and fail fast when the URLs identify different databases.
-The staging tables use the same `upgrade_platform_schema` Alembic chain as the
-rest of the package.
+database. Runtime initialization and dispatcher registration validate that
+colocation and fail when their URLs identify different databases.
 
-**Migration lineage.** `0001_staging_baseline` is the root of the supported
-Alembic chain. Apply the chain only to a database that has no platform schema.
-If a database already contains platform tables outside this lineage, archive
-it and initialize a replacement instead of attempting an in-place upgrade.
+`0001_staging_baseline` is the root of the supported Alembic chain. Apply it
+only to a database that does not already contain the platform schema. The
+baseline is deliberately irreversible: downgrade refuses to delete the
+recorded ledger.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher
 before `DBOS.launch()`. Keep the returned dispatcher registration alive while
-the runtime is active. Optional OTLP initialization is fail-open and reports a
-typed `TelemetryInitializationResult`; database, migration, workflow, and queue
-startup failures are not fail-open.
+the runtime is active. Production-like deployments must also schedule
+`sweep_abandoned_stages`, either through the dispatcher or independently, so
+abandoned workflows do not retain admission capacity indefinitely.
 
 ## Development
 
-Clone the repository and install the locked environment:
+The full suite requires a disposable PostgreSQL database. Create the default
+with `createdb dr_platform_test`, or set `DR_PLATFORM_TEST_DATABASE_URL` to a
+database whose name ends in `_test`. The suite refuses other database names and
+destructively recreates the `public` schema between tests.
+
+Run the local quality gates with:
 
 ```console
-git clone https://github.com/danielle-rothermel/dr-platform
-cd dr-platform
-uv sync
-uv run pre-commit install
-```
-
-The test suite needs a PostgreSQL database. Create the default with
-`createdb dr_platform_test`, or set `DR_PLATFORM_TEST_DATABASE_URL` to any
-PostgreSQL database whose name ends in `_test`; the suite refuses other names
-and resets the database destructively between tests. Then run the checks:
-
-```console
-uv run ruff check .
-uv run ty check
-uv run pytest
+./pre-check.sh
 ```

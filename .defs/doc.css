@@ -146,7 +146,6 @@ table { width: 100%; border: 1px solid var(--line); border-collapse: collapse; b
 th, td { padding: 8px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 th { background: #f1f4f9; color: var(--muted); font: 600 11.5px/1.4 var(--font-system); letter-spacing: .06em; text-transform: uppercase; }
 tr:last-child td { border-bottom: 0; }
-.table-wrap { overflow-x: auto; }
 
 code {
   padding: 0 5px;
@@ -167,8 +166,6 @@ code {
 
 /* Colophon: ALL process metadata (sources, provenance, ids, honest scope
    notes). Reader-relevant honesty stays in context above, in plain language. */
-.colophon { margin-top: 46px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
-.colophon code { background: var(--code-bg); }
 
 body.with-toc { display: grid; grid-template-columns: 270px minmax(0, 1fr); }
 nav.toc { position: sticky; top: 0; height: 100vh; overflow-y: auto; padding: 28px 20px; border-right: 1px solid var(--line); background: var(--surface); font-size: 14.5px; }

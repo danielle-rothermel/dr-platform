@@ -9,32 +9,24 @@ import pytest
 from dbos import DBOS, DBOSConfig
 from sqlalchemy import Engine, create_engine, make_url, text
 
-from dr_platform.db.migrate import upgrade_platform_schema
-from dr_platform.staging.schema import StagingSchema
+from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform.runtime.database.migrate import upgrade_platform_schema
 
 if TYPE_CHECKING:
     from dbos import DBOSClient
 
-    from dr_platform.staging.admission import AdmissionPayload
+    from dr_platform.admission.runner import AdmissionPayload
 
 TEST_DATABASE_URL = os.environ.get(
     "DR_PLATFORM_TEST_DATABASE_URL",
     "postgresql+psycopg:///dr_platform_test",
 )
 
-# Every persisted clock read pins to this instant so ordering assertions stay
-# deterministic across the staging suites.
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 
 
 def engine_dsn(engine: Engine) -> str:
-    """The engine's DSN with credentials intact.
-
-    ``str(URL)`` masks any password as the literal ``***``; a DSN
-    rebuilt that way still authenticates against trust-auth local sockets
-    but fails against password-authenticated servers such as the hosted CI
-    service container.
-    """
+    """Render credentials; ``str(URL)`` masks them and breaks password auth."""
     return engine.url.render_as_string(hide_password=False)
 
 
@@ -67,8 +59,7 @@ def _verify_postgres_available(database_url: str) -> None:
         with engine.connect():
             pass
     except Exception:
-        # Treat CI as active for any non-empty value that is not an explicit
-        # negation, so CI=1 fails loudly instead of silently skipping.
+        # Only explicit false values disable CI detection; CI=1 fails loudly.
         ci_value = os.environ.get("CI", "").lower()
         if ci_value and ci_value not in {"false", "0"}:
             raise
@@ -85,10 +76,7 @@ def _reset_test_database(database_url: str) -> None:
     engine = create_engine(database_url)
     try:
         with engine.begin() as connection:
-            # pgcrypto installs its functions in public. Dropping public
-            # without removing the extension leaves a catalog entry whose
-            # functions no longer exist, so recreate the extension after the
-            # schema reset.
+            # Dropping public strands pgcrypto's catalog entry.
             connection.execute(text("DROP EXTENSION IF EXISTS pgcrypto"))
             connection.execute(text("DROP SCHEMA public CASCADE"))
             connection.execute(text("CREATE SCHEMA public"))
@@ -105,7 +93,6 @@ def pg_url() -> str:
 
 @pytest.fixture
 def clean_pg(pg_url: str) -> str:
-    """A scratch database with pgcrypto restored after each schema reset."""
     _reset_test_database(pg_url)
     return pg_url
 
@@ -151,11 +138,7 @@ def dbos_config(
     application_database_url: str | None = None,
     notification_listener_polling_interval_sec: float | None = None,
 ) -> DBOSConfig:
-    """The DBOS runtime config shared across the staging boundary suites.
-
-    ``run_admin_server`` and ``use_listen_notify`` stay disabled so tests
-    never bind admin ports or race the background notification listener.
-    """
+    """Disable admin ports and background LISTEN/NOTIFY for isolation."""
     config: DBOSConfig = {
         "name": name,
         "system_database_url": system_database_url,
@@ -173,7 +156,6 @@ def dbos_config(
 
 
 def initialize_dbos_schema(config: DBOSConfig) -> None:
-    """Launch DBOS only to install its schema, then tear the registry down."""
     try:
         DBOS(config=config)
         DBOS.launch()

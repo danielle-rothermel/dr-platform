@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from sqlalchemy import and_, func, or_, select
+
+from dr_platform._core.identities import CampaignKey, RunKey
+from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform.inspection._validation import (
+    DEFAULT_INSPECTION_LIMIT,
+    normalize_campaign_key,
+    normalize_run_key,
+    require_campaign,
+    validate_campaign_cursor,
+    validate_limit,
+)
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from sqlalchemy import Engine
+    from sqlalchemy.engine import RowMapping
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignSummary:
+    campaign_key: CampaignKey
+    created_at: datetime
+    run_count: int
+    work_item_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class RunSummary:
+    run_key: RunKey
+    campaign_key: CampaignKey
+    pipeline_key: str
+    pipeline_version: int
+    execution_config_reference: str
+    created_at: datetime
+    submission_completed_at: datetime | None
+    originated_work_item_count: int
+
+
+def inspect_campaign(
+    campaign_key: CampaignKey | str,
+    *,
+    engine: Engine,
+    schema: StagingSchema | None = None,
+) -> CampaignSummary:
+    selected_schema = schema or StagingSchema()
+    normalized_campaign = normalize_campaign_key(campaign_key)
+    statement = _campaign_summary_statement(selected_schema)
+    with engine.connect() as connection:
+        row = (
+            connection.execute(
+                statement.where(
+                    statement.selected_columns.campaign_key
+                    == normalized_campaign.value
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+    if row is None:
+        raise LookupError(f"campaign is unknown: {normalized_campaign.value}")
+    return _decode_campaign_summary(row)
+
+
+def list_campaigns(
+    *,
+    engine: Engine,
+    cursor: CampaignKey | str | None = None,
+    limit: int = DEFAULT_INSPECTION_LIMIT,
+    schema: StagingSchema | None = None,
+) -> tuple[CampaignSummary, ...]:
+    validate_limit(limit)
+    selected_schema = schema or StagingSchema()
+    normalized_cursor = (
+        normalize_campaign_key(cursor) if cursor is not None else None
+    )
+    statement = _campaign_summary_statement(selected_schema).limit(limit)
+    with engine.connect() as connection:
+        if normalized_cursor is not None:
+            validate_campaign_cursor(
+                connection,
+                cursor=normalized_cursor,
+                schema=selected_schema,
+            )
+            statement = statement.where(
+                statement.selected_columns.campaign_key
+                > normalized_cursor.value
+            )
+        return tuple(
+            _decode_campaign_summary(row)
+            for row in connection.execute(statement).mappings()
+        )
+
+
+def list_runs(
+    campaign_key: CampaignKey | str,
+    *,
+    engine: Engine,
+    cursor: RunKey | str | None = None,
+    limit: int = DEFAULT_INSPECTION_LIMIT,
+    schema: StagingSchema | None = None,
+) -> tuple[RunSummary, ...]:
+    validate_limit(limit)
+    selected_schema = schema or StagingSchema()
+    normalized_campaign = normalize_campaign_key(campaign_key)
+    normalized_cursor = (
+        normalize_run_key(cursor) if cursor is not None else None
+    )
+    runs = selected_schema.pipeline_runs
+    items = selected_schema.work_items
+    statement = (
+        select(
+            *runs.c,
+            func.count(items.c.work_item_id).label("item_count"),
+        )
+        .select_from(
+            runs.outerjoin(
+                items,
+                runs.c.run_key == items.c.origin_run_key,
+            )
+        )
+        .where(runs.c.campaign_key == normalized_campaign.value)
+        .group_by(*runs.c)
+        .order_by(runs.c.created_at, runs.c.run_key)
+        .limit(limit)
+    )
+    with engine.connect() as connection:
+        require_campaign(
+            connection,
+            campaign_key=normalized_campaign,
+            schema=selected_schema,
+        )
+        if normalized_cursor is not None:
+            cursor_created_at = connection.execute(
+                select(runs.c.created_at).where(
+                    runs.c.campaign_key == normalized_campaign.value,
+                    runs.c.run_key == normalized_cursor.value,
+                )
+            ).scalar_one_or_none()
+            if cursor_created_at is None:
+                raise ValueError("run cursor is unknown in this campaign")
+            statement = statement.where(
+                or_(
+                    runs.c.created_at > cursor_created_at,
+                    and_(
+                        runs.c.created_at == cursor_created_at,
+                        runs.c.run_key > normalized_cursor.value,
+                    ),
+                )
+            )
+        return tuple(
+            _decode_run_summary(row)
+            for row in connection.execute(statement).mappings()
+        )
+
+
+def _campaign_summary_statement(schema: StagingSchema):
+    runs = schema.pipeline_runs
+    items = schema.work_items
+    run_agg = (
+        select(
+            runs.c.campaign_key,
+            func.min(runs.c.created_at).label("created_at"),
+            func.count().label("run_count"),
+        )
+        .group_by(runs.c.campaign_key)
+        .subquery()
+    )
+    item_agg = (
+        select(
+            items.c.campaign_key,
+            func.count().label("work_item_count"),
+        )
+        .group_by(items.c.campaign_key)
+        .subquery()
+    )
+    return (
+        select(
+            run_agg.c.campaign_key,
+            run_agg.c.created_at,
+            run_agg.c.run_count,
+            func.coalesce(item_agg.c.work_item_count, 0).label(
+                "work_item_count"
+            ),
+        )
+        .select_from(
+            run_agg.outerjoin(
+                item_agg,
+                run_agg.c.campaign_key == item_agg.c.campaign_key,
+            )
+        )
+        .order_by(run_agg.c.campaign_key)
+    )
+
+
+def _decode_campaign_summary(row: RowMapping) -> CampaignSummary:
+    return CampaignSummary(
+        campaign_key=CampaignKey(row["campaign_key"]),
+        created_at=row["created_at"],
+        run_count=row["run_count"],
+        work_item_count=row["work_item_count"],
+    )
+
+
+def _decode_run_summary(row: RowMapping) -> RunSummary:
+    return RunSummary(
+        run_key=RunKey(row["run_key"]),
+        campaign_key=CampaignKey(row["campaign_key"]),
+        pipeline_key=row["pipeline_key"],
+        pipeline_version=row["pipeline_version"],
+        execution_config_reference=row["execution_config_reference"],
+        created_at=row["created_at"],
+        submission_completed_at=row["submission_completed_at"],
+        originated_work_item_count=row["item_count"],
+    )
