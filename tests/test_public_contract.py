@@ -162,6 +162,9 @@ def test_root_contract_defines_submits_executes_and_inspects(
             registry=registry,
         )
         DBOS.launch()
+        # DBOSClient enqueues versionless work, which only the latest-version
+        # worker dequeues.
+        DBOS.set_latest_application_version(DBOS.application_version)
         last_stage_index = len(pipeline.stages) - 1
         for stage_index in range(len(pipeline.stages)):
             registration.workflow(_utc_now(), _utc_now())
