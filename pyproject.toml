@@ -46,7 +46,7 @@ dev = [
 only-include = ["src"]
 
 [tool.uv.sources]
-dr-serialize = { path = "../dr-serialize", editable = true, marker = "sys_platform == 'darwin'" }
+dr-serialize = { path = "../dr-serialize", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
