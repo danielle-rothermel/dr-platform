@@ -79,7 +79,6 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
     post-commit delegation; other terminal work is a no-op.
     """
     selected_schema = schema or StagingSchema()
-    cancelled_at = clock()
     with engine.begin() as connection:
         resolved_work_item_id = _resolve_work_item_id(
             connection,
@@ -98,6 +97,7 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
             StageExecutionState.ADMITTED,
             StageExecutionState.FAILED,
         }:
+            cancelled_at = clock()
             result = _cancel_current_stage(
                 connection,
                 current=current,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 from threading import Barrier
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -145,6 +145,30 @@ class _RaisingCanceller:
     ) -> None:
         self.attempts.append((workflow_id, cancel_children))
         raise RuntimeError("delegation exploded")
+
+
+def _clock_after_execution_lock(
+    engine: Engine,
+    *,
+    stage_execution_id: int,
+    timestamp: datetime,
+) -> Callable[[], datetime]:
+    table = StagingSchema().stage_executions
+
+    def clock() -> datetime:
+        with (
+            engine.connect() as probe,
+            pytest.raises(OperationalError) as captured,
+        ):
+            probe.execute(
+                select(table.c.stage_execution_id)
+                .where(table.c.stage_execution_id == stage_execution_id)
+                .with_for_update(nowait=True)
+            ).one()
+        assert isinstance(captured.value.orig, LockNotAvailable)
+        return timestamp
+
+    return clock
 
 
 def _wait_until_row_locked(engine: Engine, stage_execution_id: int) -> None:
@@ -395,6 +419,48 @@ def test_retry_preserves_lineage_and_readmits_prepared_attempt(
     assert attempts[1].admitted_at == NOW + timedelta(seconds=3)
     assert client.enqueued[-1].get("workflow_id") == attempts[1].workflow_id
     assert _execution_rows(pg_engine, schema)[0][2:] == ("admitted", 2)
+
+
+def test_retry_samples_timestamp_after_locking_failed_stage(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    stage_execution_id, _work_item_id = _admit_one(
+        pg_engine,
+        registry,
+        schema,
+        run_key="run-retry-lock-clock",
+        work_key="work-retry-lock-clock",
+    )
+    failed_at = NOW + timedelta(seconds=1)
+    with pg_engine.begin() as connection:
+        transition_stage_execution(
+            connection,
+            stage_execution_id=stage_execution_id,
+            new_state=StageExecutionState.FAILED,
+            updated_at=failed_at,
+        )
+        record_stage_attempt_terminal(
+            connection,
+            stage_execution_id=stage_execution_id,
+            attempt_number=1,
+            terminal_at=failed_at,
+            terminal_summary={"outcome": "failed"},
+        )
+
+    result = retry_stage(
+        stage_execution_id,
+        engine=pg_engine,
+        clock=_clock_after_execution_lock(
+            pg_engine,
+            stage_execution_id=stage_execution_id,
+            timestamp=NOW + timedelta(seconds=2),
+        ),
+    )
+
+    assert result.stage_execution.state is StageExecutionState.READY
+    assert result.new_attempt.attempt_number == 2
 
 
 def test_cancel_terminalizes_retry_prepared_attempt_without_delegation(
@@ -774,6 +840,36 @@ def test_cancel_resolves_work_by_campaign_and_work_keys(
     assert result.disposition is CancellationDisposition.CANCELLED_READY
     assert result.stage_execution.state is StageExecutionState.CANCELLED
     assert canceller.cancelled == []
+
+
+def test_cancel_samples_timestamp_after_locking_current_stage(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    _submit(
+        pg_engine,
+        registry,
+        run_key="run-cancel-lock-clock",
+        work_keys=("work-cancel-lock-clock",),
+    )
+    stage_execution_id, work_item_id, _state, _attempt = _execution_rows(
+        pg_engine, schema
+    )[0]
+
+    result = cancel_work(
+        engine=pg_engine,
+        client=_RecordingCanceller(),
+        work_item_id=work_item_id,
+        clock=_clock_after_execution_lock(
+            pg_engine,
+            stage_execution_id=stage_execution_id,
+            timestamp=NOW + timedelta(seconds=1),
+        ),
+    )
+
+    assert result.stage_execution.state is StageExecutionState.CANCELLED
+    assert result.disposition is CancellationDisposition.CANCELLED_READY
 
 
 def test_cancel_of_succeeded_work_is_idempotent(

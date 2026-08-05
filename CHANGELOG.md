@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bootstrap.
 - Settled a retry-prepared attempt when its READY stage is cancelled, without
   delegating cancellation for a workflow that was never admitted.
+- Sampled cancellation and retry timestamps only after locking the current
+  stage so a concurrent newer transition cannot make an operator action fail
+  with a stale timestamp.
 
 ## 0.1.0 - 2026-07-24
 

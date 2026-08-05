@@ -43,7 +43,6 @@ def retry_stage(
 ) -> StageRetryResult:
     """Only FAILED stages may prepare a new attempt for later admission."""
     selected_schema = schema or StagingSchema()
-    retried_at = clock()
     with engine.begin() as connection:
         table = selected_schema.stage_executions
         row = (
@@ -71,6 +70,7 @@ def retry_stage(
             raise RuntimeError(
                 "FAILED stage execution has no terminal current attempt"
             )
+        retried_at = clock()
         new_attempt = append_stage_attempt(
             connection,
             stage_execution_id=stage_execution_id,
