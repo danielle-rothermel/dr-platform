@@ -3,31 +3,41 @@
 [![CI](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/dr-platform.svg)](https://pypi.org/project/dr-platform/)
 
-`dr-platform` is an alpha staged-work funnel built on PostgreSQL and DBOS. It
+## At a Glance
+
+`dr-platform` is a durable staged-work funnel built on PostgreSQL and DBOS. It
 accepts application-owned work as a stream, moves each item through a linear
-pipeline, and exposes durable controls and inspection. The public API is under
-active development; there are no compatibility promises yet.
+pipeline, and provides durable controls and inspection.
 
-The ownership boundary is deliberate:
+- **Documentation:** [Staged-work pipeline contract](https://danielle-rothermel.github.io/dr-platform/)
+- **Personally owned repository dependencies:**
+  - [dr-serialize](https://github.com/danielle-rothermel/dr-serialize) —
+    requires `>=0.1.0`; locked at `0.1.0`
 
-- `dr-platform` owns the funnel mouth and its gates: campaign and work
-  identity, streaming submission, stage state, randomized admission, capacity,
-  pause, retry, cancellation intent, and inspection.
-- DBOS owns the conveyor belt: durable workflow execution, queues, recovery,
-  and replay.
-- Applications own meaning: which work should exist, what input and output
-  references identify, how configuration is resolved, and what each stage
-  does.
+## High-Level Design
 
-The package does not interpret application payloads or privilege a source
-transport. A database query, API iterator, generated sequence, or file reader
-can all yield the same `WorkInput` values.
+The library is divided into a small set of responsibilities:
 
-The [vocabulary sheet](https://danielle-rothermel.github.io/dr-platform/)
-(source: `.defs/vocab.html`) is the authoritative statement of the
-staged-work pipeline contract this repo implements: the terms, the
-guarantees, what is in and out of scope, and the mapping from each term to
-the exported names.
+- **Pipeline definition:** applications describe an ordered, versioned set of
+  stages while retaining ownership of each stage's domain behavior and the
+  meaning of its input and output references.
+- **Submission and identity:** streamed work is recorded in bounded chunks and
+  organized into campaigns and runs with stable identities and replay-safe
+  conflict detection.
+- **Admission and controls:** ready work is selected fairly within configured
+  stage and label-specific capacity, with pause and resume controls that do not
+  interrupt work already running.
+- **Durable execution and handoff:** DBOS runs admitted stages, recovers and
+  replays interrupted workflows, and coordinates each terminal stage outcome
+  with creation of the next ready stage.
+- **Recovery and operator actions:** sweeps reconcile abandoned workflows, and
+  explicit retry and cancellation operations preserve the recorded lifecycle
+  of each stage attempt.
+- **Inspection:** bounded readers expose campaigns, runs, work items, stage and
+  attempt history, current state counts, and configured controls.
+- **Runtime foundation:** database migrations, PostgreSQL and DBOS colocation
+  checks, runtime initialization, scheduled dispatch, and optional telemetry
+  provide the operational base for the funnel.
 
 ## Installation
 
