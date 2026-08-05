@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="doc.css">
+<title>dr-platform · Terms and contracts</title>
+<style>
+  /* Page-local tokens. Purple (--anchor) = binding statements (.must);
+     blue (--accent) = term links, matching doc.css link hue. */
+  .term-name { font-weight: 600; }
+  dfn.term-name { font-style: normal; }
+  .must { color: var(--anchor); font-weight: 600; margin: 0 0 6px; }
+  .defs-rationale { margin: 0; }
+  .defs-check { margin: 6px 0 0; font-size: 0.92em; }
+  .defs-symbols { margin-top: 6px; font-size: 0.92em; }
+  .defs-date { margin-top: 4px; font-size: 0.85em; opacity: 0.7; }
+  .defs-error { color: #b00020; }
+</style>
+</head>
+<body>
+<main class="wide">
+
+<h1>The dr-platform terms and contracts</h1>
+<p class="dek">The shared vocabulary and binding rules for interacting with this repo.</p>
+<div class="byline">dr-platform · .defs</div>
+
+<p><code>.defs/terms.toml</code> and <code>.defs/contracts.toml</code> are authoritative;
+this page is their client-side rendering for human readers. To view it locally, serve
+<code>.defs/</code> over HTTP with <code>python3 -m http.server</code> and open the
+reported local address.</p>
+
+<div class="section-head" id="terms"><h2>Terms</h2></div>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Term</th><th>Definition</th></tr></thead>
+  <tbody data-defs-file="terms.toml" data-defs-kind="terms"></tbody>
+</table>
+</div>
+
+<div class="section-head" id="contracts"><h2>Contracts</h2></div>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Contract</th><th>Statement and rationale</th></tr></thead>
+  <tbody data-defs-file="contracts.toml" data-defs-kind="contracts"></tbody>
+</table>
+</div>
+
+<script type="module" src="defs-render.js"></script>
+</main>
+</body>
+</html>

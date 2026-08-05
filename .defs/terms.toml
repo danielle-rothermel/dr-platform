@@ -1,0 +1,382 @@
+#:schema ./terms.schema.json
+
+# Shared vocabulary for dr-platform. Definitions name domain concepts; the
+# exported_symbols fields provide the separate mapping to the public API.
+
+[[terms]]
+name = "work"
+definition = """
+One application-owned unit of logical activity that the platform schedules \
+and tracks without interpreting its meaning."""
+
+[[terms]]
+name = "reference"
+definition = """
+An opaque immutable string that identifies caller-owned data. The platform \
+stores and transports it without interpreting or resolving it."""
+
+[[terms]]
+name = "queue"
+definition = """
+An application-owned scheduling channel named by a pipeline stage. The \
+platform sends the stage's durable workflow to it but does not configure or \
+operate the channel."""
+
+[[terms]]
+name = "workflow"
+definition = """
+A durable execution unit that runs a stage operation and may replay its body \
+after interruption. Its external effects must therefore tolerate \
+re-execution."""
+
+[[terms]]
+name = "attempt"
+definition = """
+One entry in an ordered sequence recording a single try at a durable \
+workflow. Each fresh try appends a new entry; identity and provenance remain \
+fixed while lifecycle fields may be filled once."""
+
+[[terms]]
+name = "control"
+definition = """
+A persisted admission rule for one stage, carrying an occupancy bound and a \
+paused flag."""
+
+[[terms]]
+name = "selector"
+definition = """
+An exact-label predicate that chooses which work items an admission control \
+governs. A match contains every selector pair exactly and may contain \
+additional labels; the empty selector matches every item at its stage."""
+part_of = ["control"]
+
+[[terms]]
+name = "capacity"
+definition = """
+The desired maximum number of concurrently admitted stage executions allowed \
+by a control. It is an occupancy bound, not a worker count, request rate, or \
+token limit."""
+part_of = ["control"]
+
+[[terms]]
+name = "terminal"
+definition = """
+A permanently settled state or record. A terminal attempt is immutable, and \
+a terminal stage does not reopen unless an eligible explicit operator action \
+creates the next allowed state."""
+
+[[terms]]
+name = "idempotent operation"
+definition = """
+An operation whose replay either performs no additional effect or repairs an \
+incomplete prior effect without duplicating the intended outcome."""
+
+[[terms]]
+name = "durability"
+definition = """
+The property that an interrupted stage body can resume under one fixed \
+attempt identity when a compatible worker has the workflow registered. \
+Recovery across incompatible application versions is not included."""
+
+[[terms]]
+name = "colocation"
+definition = """
+The platform ledger and durable-workflow system state sharing one \
+transactional database so a stage outcome and its successor can commit \
+together."""
+
+[[terms]]
+name = "pipeline definition"
+definition = """
+An immutable, versioned, non-empty ordered sequence of uniquely keyed stages \
+that declares a linear pipeline."""
+exported_symbols = ["PipelineDefinition"]
+
+[[terms]]
+name = "pipeline stage"
+definition = """
+One ordered scheduling and durability step in a linear pipeline. It names an \
+application-owned queue and operation plus the transformation from immutable \
+submission facts to operation arguments; it is not a graph node."""
+exported_symbols = ["StageDefinition"]
+part_of = ["pipeline definition"]
+
+[[terms]]
+name = "pipeline identity"
+definition = """
+The key and positive version pair that identifies one immutable pipeline \
+definition. It is a value identity, not a reference or content hash."""
+exported_symbols = ["PipelineIdentity", "PipelineKey"]
+part_of = ["pipeline definition"]
+
+[[terms]]
+name = "pipeline registry"
+definition = """
+An in-memory collection populated from authoritative startup declarations \
+that maps each pipeline identity to exactly one pipeline definition. A \
+differing definition cannot occupy an existing identity."""
+exported_symbols = ["PipelineRegistry", "PipelineConflictError"]
+
+[[terms]]
+name = "campaign"
+definition = """
+An application namespace grouping related work, and the platform's top-level \
+scope for submission and inspection."""
+exported_symbols = [
+  "CampaignKey",
+  "CampaignSummary",
+  "inspect_campaign",
+  "list_campaigns",
+  "campaign_state_counts",
+  "StateCount",
+]
+
+[[terms]]
+name = "submission run"
+definition = """
+Immutable submission provenance for one pipeline within a campaign, with \
+append-only work-item membership. Replaying its identity with the same facts \
+resumes safely, while conflicting facts are rejected."""
+exported_symbols = [
+  "RunKey",
+  "SubmissionReceipt",
+  "submit",
+  "RunSummary",
+  "list_runs",
+  "run_state_counts",
+  "PipelineRunConflictError",
+]
+part_of = ["campaign"]
+
+[[terms]]
+name = "input reference"
+definition = """
+The opaque reference identifying a caller's work request as it crosses the \
+submission boundary."""
+is_a = ["reference"]
+
+[[terms]]
+name = "output reference"
+definition = """
+A non-empty opaque reference returned by a successful stage and recorded as \
+its result evidence. A failed stage cannot carry one."""
+is_a = ["reference"]
+
+[[terms]]
+name = "label"
+definition = """
+An application-supplied string key and value attached to work and used only \
+for exact-match admission selection. The platform does not interpret its \
+meaning."""
+part_of = ["work input", "work item"]
+
+[[terms]]
+name = "work input"
+definition = """
+One validated immutable item at the submission boundary, carrying work \
+identity, a non-empty input reference, and labels independently of the source \
+transport."""
+exported_symbols = ["WorkInput", "WorkKey", "WorkItemConflictError"]
+
+[[terms]]
+name = "work item"
+definition = """
+One platform-scheduled unit of work, unique within a campaign by campaign and \
+work identity. Its first accepted submission fixes its immutable input \
+reference and labels."""
+exported_symbols = [
+  "WorkItemSummary",
+  "list_work_items",
+  "get_work_item_stages",
+  "BulkWorkStatus",
+  "BulkStatusResult",
+  "bulk_work_statuses",
+]
+is_a = ["work"]
+part_of = ["campaign"]
+
+[[terms]]
+name = "stage execution"
+definition = """
+One logical execution of one pipeline stage for one work item across one or \
+more attempts. It carries the current state, attempt position, stable \
+admission order, and optional output reference."""
+exported_symbols = [
+  "StageKey",
+  "StageExecutionSummary",
+  "StageExecutionRecord",
+]
+part_of = ["work item"]
+
+[[terms]]
+name = "stage attempt"
+definition = """
+One attempt in a stage execution's ordered history, identified by its \
+sequence number and durable workflow identity. Admission and terminal facts \
+are each recorded at most once."""
+exported_symbols = ["StageAttemptRecord"]
+is_a = ["attempt"]
+part_of = ["stage execution"]
+
+[[terms]]
+name = "stage execution state"
+definition = """
+The authoritative logical status of a stage execution: ready, admitted, \
+succeeded, failed, or cancelled. Durable-workflow runtime status is evidence \
+for transitions, not this logical state itself."""
+exported_symbols = ["StageExecutionState"]
+part_of = ["stage execution"]
+
+[[terms]]
+name = "admission"
+definition = """
+The transactional stage-entry pass that chooses ready work in stable \
+randomized order, applies every matching control, prepares an attempt, and \
+enqueues its workflow. Each pass is bounded and isolates a failing candidate \
+from other candidates."""
+
+[[terms]]
+name = "admission payload"
+definition = """
+The immutable routing identity and submission facts supplied when deriving a \
+stage operation's arguments. It excludes platform interpretation of those \
+derived arguments."""
+exported_symbols = ["AdmissionPayload"]
+
+[[terms]]
+name = "stage control"
+definition = """
+A persisted control for one identified pipeline stage and exact-label \
+selector, carrying capacity and pause state. Every stage requires an \
+empty-selector control before admission."""
+exported_symbols = [
+  "set_stage_capacity",
+  "set_selector_capacity",
+  "read_controls",
+  "StageControlRecord",
+]
+is_a = ["control"]
+
+[[terms]]
+name = "selector capacity"
+definition = """
+The admitted-occupancy bound applied to work matching one stage control's \
+exact-label selector."""
+is_a = ["capacity"]
+part_of = ["stage control"]
+
+[[terms]]
+name = "empty-selector capacity"
+definition = """
+The required stage-wide capacity whose selector is empty and therefore \
+matches every item at that stage. Without it, the stage remains \
+unconfigured and its work is not admitted."""
+is_a = ["selector capacity"]
+
+[[terms]]
+name = "pause"
+definition = """
+A control state that stops future admission through an existing selector \
+without changing its capacity or interrupting work already admitted."""
+exported_symbols = ["pause", "resume"]
+part_of = ["stage control"]
+
+[[terms]]
+name = "scheduled dispatcher"
+definition = """
+A process-local registration that owns its durable-workflow client and runs \
+bounded admission passes on a schedule, with an optional abandoned-stage \
+sweep. Its registration remains alive with the runtime."""
+exported_symbols = [
+  "register_scheduled_dispatcher",
+  "DispatcherRegistration",
+  "UnwrappedPipelineError",
+]
+
+[[terms]]
+name = "wrapped pipeline"
+definition = """
+A pipeline definition whose application stage operations are enclosed by \
+platform-owned durable workflows that record outcome and prepare the next \
+stage transactionally."""
+exported_symbols = ["wrap_pipeline_workflows"]
+is_a = ["pipeline definition"]
+
+[[terms]]
+name = "stage handoff"
+definition = """
+The single completion transaction that settles a successful attempt, marks \
+its stage succeeded, and creates the next linear stage as ready when one \
+exists. A completion \
+must identify the persisted current admitted attempt."""
+exported_symbols = ["StageHandoffMismatchError"]
+
+[[terms]]
+name = "retry"
+definition = """
+The operator action that returns a terminal failed stage execution to ready \
+with exactly one new attempt awaiting admission. No other state is eligible."""
+exported_symbols = ["retry_stage", "StageRetryResult"]
+
+[[terms]]
+name = "cancellation"
+definition = """
+The operator action that makes a work item's current logical stage cancelled, \
+settles its current nonterminal attempt, and requests cancellation of the \
+exact admitted workflow when one exists. Delegation is non-recursive and \
+logically cancelled work cannot be readmitted or advanced."""
+exported_symbols = [
+  "cancel_work",
+  "WorkCancellationResult",
+  "CancellationDisposition",
+  "WorkflowCanceller",
+]
+
+[[terms]]
+name = "sweep"
+definition = """
+The reconciliation pass that projects terminal workflow abandonment onto \
+currently admitted platform stages and reclaims their occupancy. It does not \
+retry, resume, replace, or wait for work."""
+exported_symbols = [
+  "sweep_abandoned_stages",
+  "SweepProjection",
+  "SweepSummary",
+]
+
+[[terms]]
+name = "capacity occupancy"
+definition = """
+The number of currently admitted stage executions matching a control's \
+selector, compared with that control's capacity during admission. Abandoned \
+work occupies a slot until reconciliation makes it terminal."""
+
+[[terms]]
+name = "platform runtime"
+definition = """
+The process-level configuration and initialization boundary that connects the \
+platform to its durable-workflow runtime while leaving queue registration and \
+launch ownership with the application."""
+exported_symbols = [
+  "PlatformDbosConfig",
+  "build_platform_dbos_config",
+  "initialize_dbos_runtime",
+]
+
+[[terms]]
+name = "platform schema"
+definition = """
+The prefix-configurable relational ledger of submission, execution, attempt, \
+and admission-control facts managed from an irreversible baseline migration."""
+exported_symbols = ["StagingSchema", "upgrade_platform_schema"]
+
+[[terms]]
+name = "telemetry initialization"
+definition = """
+Best-effort setup of optional execution telemetry whose failure is reported \
+as degraded observability without turning successful runtime initialization \
+into an application failure."""
+exported_symbols = [
+  "initialize_telemetry_safely",
+  "TelemetryInitializationResult",
+]

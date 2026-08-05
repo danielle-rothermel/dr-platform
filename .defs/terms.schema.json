@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": ".defs shared vocabulary",
+  "description": "The structural schema for a repository's .defs/terms.toml file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["terms"],
+  "properties": {
+    "terms": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/term"
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyUniqueStrings": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      }
+    },
+    "term": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "definition"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "The canonical term, lowercase unless it is a proper name."
+        },
+        "definition": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "A precise one-to-three-sentence definition."
+        },
+        "exported_symbols": {
+          "$ref": "#/$defs/nonEmptyUniqueStrings",
+          "description": "Public symbols, script entrypoints, or commands that implement the term."
+        },
+        "categories": {
+          "$ref": "#/$defs/nonEmptyUniqueStrings",
+          "description": "Non-exclusive subject areas used to group related terms."
+        },
+        "is_a": {
+          "$ref": "#/$defs/nonEmptyUniqueStrings",
+          "description": "Canonical terms that this term specializes."
+        },
+        "part_of": {
+          "$ref": "#/$defs/nonEmptyUniqueStrings",
+          "description": "Canonical terms of which this term is a structural part."
+        }
+      }
+    }
+  }
+}

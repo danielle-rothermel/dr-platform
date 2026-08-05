@@ -13,12 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root `dr_platform` public API.
 - Made the platform baseline migration irreversible so downgrade cannot delete
   the recorded ledger.
+- Refreshed the README and definitions reference around the current functional
+  boundaries, public vocabulary, and recovery limits.
+- Unified local hooks and Depot CI on `pre-check.sh`, expanded validation to
+  Python 3.12 through 3.14, and hardened tag-triggered trusted publishing with
+  provenance, changelog, artifact metadata, and digest checks.
+- Published the TOML-backed terms and contracts reference through GitHub Pages.
+- Declared Python 3.14 support and advanced the package metadata to version
+  0.1.1.
 
 ### Fixed
 
-- Forward the application database URL through the public DBOS runtime
+- Forwarded the application database URL through the public DBOS runtime
   bootstrap.
-- Settle a retry-prepared attempt when its READY stage is cancelled, without
+- Settled a retry-prepared attempt when its READY stage is cancelled, without
   delegating cancellation for a workflow that was never admitted.
 
 ## 0.1.0 - 2026-07-24

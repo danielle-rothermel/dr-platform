@@ -3,11 +3,14 @@
 [![CI](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/danielle-rothermel/dr-platform/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/dr-platform.svg)](https://pypi.org/project/dr-platform/)
 
-| [Repo Definitions](https://danielle-rothermel.github.io/dr-platform/) | [dr-serialize](https://github.com/danielle-rothermel/dr-serialize) |
-| --- | --- |
+| [Definitions](https://danielle-rothermel.github.io/dr-platform/) | [Terms source](https://github.com/danielle-rothermel/dr-platform/blob/main/.defs/terms.toml) | [Contracts source](https://github.com/danielle-rothermel/dr-platform/blob/main/.defs/contracts.toml) | [dr-serialize](https://github.com/danielle-rothermel/dr-serialize) |
+| --- | --- | --- | --- |
 
 **dr-platform durably moves application-owned work through staged pipelines.**
 It is built on PostgreSQL and DBOS and organized into six functional areas:
+
+`dr-platform` is alpha software. The root `dr_platform` API is the intended
+application boundary, but compatibility is not yet promised.
 
 - **[Pipeline definitions](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/pipeline)**
   describe ordered, versioned stages while applications retain ownership of
@@ -38,10 +41,24 @@ It is built on PostgreSQL and DBOS and organized into six functional areas:
         - **[Database](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/runtime/database)**
           owns the platform schema and migrations.
 
+## Installation
+
+```console
+pip install dr-platform
+```
+
+```console
+uv add dr-platform
+```
+
+`dr-platform` requires Python 3.12 or newer and a PostgreSQL database. The
+package pins `dbos[otel]` to the exact release used to validate its recovery
+and sweep behavior.
+
 ## Functional Areas
 
-The following abbreviated shapes emphasize stable contracts rather than
-implementation details. Application-facing names are exported from
+The following abbreviated shapes describe the intended application boundary,
+not exact call signatures. Application-facing names are exported from
 `dr_platform`; infrastructure-only defaults and collaborators are omitted where
 they do not clarify the boundary.
 
@@ -290,4 +307,34 @@ get_work_item_stages(work_item_id) -> tuple[StageExecutionSummary, ...]
 campaign_state_counts(campaign_key) -> tuple[StateCount, ...]
 run_state_counts(run_key) -> tuple[StateCount, ...]
 bulk_work_statuses(campaign_key, work_keys) -> BulkStatusResult
+```
+
+## Operational preconditions
+
+The platform tables and the DBOS system schema must share one PostgreSQL
+database. Runtime initialization and dispatcher registration validate that
+colocation and fail when their URLs identify different databases.
+
+`0001_staging_baseline` is the root of the supported Alembic chain. Apply it
+only to a database that does not already contain the platform schema. The
+baseline is deliberately irreversible: downgrade refuses to delete the
+recorded ledger.
+
+Register wrapped workflows, application queues, and the scheduled dispatcher
+before `DBOS.launch()`. Keep the returned dispatcher registration alive while
+the runtime is active. Production-like deployments must also schedule
+`sweep_abandoned_stages`, either through the dispatcher or independently, so
+abandoned workflows do not retain admission capacity indefinitely.
+
+## Development
+
+The full suite requires a disposable PostgreSQL database. Create the default
+with `createdb dr_platform_test`, or set `DR_PLATFORM_TEST_DATABASE_URL` to a
+database whose name ends in `_test`. The suite refuses other database names and
+destructively recreates the `public` schema between tests.
+
+Run the local quality gates with:
+
+```console
+./pre-check.sh
 ```

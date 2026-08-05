@@ -1,0 +1,252 @@
+# Binding contracts for dr-platform. Statements are standing rules; checks
+# name the focused executable evidence for each rule.
+
+[[contracts]]
+title = "Platform state owns logical outcome"
+statement = """
+The platform ledger is authoritative for a stage execution's logical state; \
+durable-workflow status is evidence used by recovery and never replaces that \
+state."""
+rationale = """
+External workflow status may lag or race with a committed platform transition. \
+Keeping one logical authority lets completion, cancellation, and sweep races \
+converge on one terminal outcome."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/execution/test_handoff.py -k 'sweep_race'"
+
+[[contracts]]
+title = "Pipeline declarations are immutable and linear"
+statement = """
+A pipeline definition contains a non-empty ordered sequence of uniquely keyed \
+stages and a positive version; one registry binds each pipeline identity to \
+exactly one definition and rejects a differing definition at that identity."""
+rationale = """
+A closed linear order gives submission, admission, and handoff one stable \
+interpretation. Mutable or graph-shaped declarations would make persisted \
+stage positions and replayed identities ambiguous."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/pipeline/test_definitions.py tests/pipeline/test_registry.py"
+
+[[contracts]]
+title = "Execution wiring requires wrapped pipelines"
+statement = """
+Dispatcher registration accepts only registries whose pipeline definitions \
+are fully wrapped in platform-owned durable workflows; unwrapped declarations \
+remain valid for submission-only registries."""
+rationale = """
+Only the wrapped operation owns the atomic completion transaction. Rejecting \
+unwrapped execution wiring prevents an application callable from bypassing \
+attempt settlement and successor creation while preserving a smaller \
+submission-only use case."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/runtime/test_dispatcher.py -k 'wrapped_pipeline'"
+
+[[contracts]]
+title = "Submission identities bind immutable provenance"
+statement = """
+Replaying a submission run with identical campaign, pipeline, version, and \
+configuration provenance resumes it, while conflicting provenance raises; \
+the first accepted campaign-and-work identity fixes its input reference, \
+labels, stable rank, and origin provenance."""
+rationale = """
+Streaming submission commits bounded chunks and may be interrupted, so exact \
+replay must fill absent work without mutating facts already accepted. Treating \
+identity reuse as replacement would make recovery rewrite provenance."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/submission/test_stream.py"
+
+[[contracts]]
+title = "References remain opaque"
+statement = """
+The platform validates references only as non-empty strings, stores and \
+transports them without interpretation or resolution, and records an output \
+reference only for a successful stage."""
+rationale = """
+Payload and artifact meaning belongs to the application. Parsing references \
+inside the platform would couple durable orchestration to one storage or \
+domain scheme and would blur success evidence with failure diagnostics."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/submission/test_stream.py::test_input_reference_is_transported_opaquely_without_parsing tests/execution/test_handoff.py::test_output_reference_is_transported_opaquely_without_parsing tests/core/test_ledger.py::test_output_reference_is_required_only_for_success_and_preserved"
+
+[[contracts]]
+title = "Attempts are append-only lifecycle records"
+statement = """
+Each fresh stage try appends the next numbered attempt with fixed identity and \
+provenance; admission and terminal fields are filled in place at most once, \
+and a terminal attempt is immutable."""
+rationale = """
+Append-only try history preserves auditability while allowing one row to move \
+through its lifecycle. Reusing or overwriting an attempt would erase the \
+distinction between workflow recovery and an explicit retry."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/core/test_ledger.py::test_stage_attempt_lifecycle_fills_one_row_once tests/core/test_workflow_ids.py"
+
+[[contracts]]
+title = "Admission requires every matching control"
+statement = """
+A stage without an empty-selector control remains unadmitted, and every \
+candidate admitted by a pass remains within the capacity of every matching \
+stage control."""
+rationale = """
+The empty selector is the explicit stage-wide enablement and labeled controls \
+are simultaneous constraints, not alternatives. This fail-closed rule avoids \
+unconfigured work and prevents a specific selector from bypassing the \
+stage-wide occupancy bound."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/admission/test_runner.py -k 'unconfigured_stage or two_passes_cannot_exceed_control_capacity or selector_capacity_only_constrains_matching_labels'"
+
+[[contracts]]
+title = "Admission passes are bounded and failure-isolated"
+statement = """
+An admission pass selects ready work in stable randomized order, admits at \
+most its configured batch size, examines only its bounded candidate budget, \
+and rolls back a failing candidate without aborting unrelated candidates."""
+rationale = """
+A shared dispatcher must make deterministic progress without letting one \
+unhealthy stage, malformed argument adapter, or repeatedly failing item stop \
+the rest of the pass."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/admission/test_runner.py -k 'stable_rank or isolates_to_its_stage or rolls_back_candidate_and_continues_same_stage or backlog_cannot_exhaust'"
+
+[[contracts]]
+title = "Pause controls future admission only"
+statement = """
+Pausing an existing exact selector stops matching future admissions without \
+changing capacity or preempting admitted work; pause and resume reject a \
+selector that has never been configured."""
+rationale = """
+Pause is an admission control, not cancellation. Keeping it separate from \
+running-work intervention makes operator intent explicit and preserves the \
+attempt lifecycle."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/recovery/test_actions.py -k 'pause or lowering_capacity'"
+
+[[contracts]]
+title = "Stage handoff is one guarded transaction"
+statement = """
+A successful handoff settles the current attempt, marks its stage succeeded, \
+and creates the next linear stage as ready when one exists, in one transaction \
+and at most once. A completion whose workflow is not the persisted current \
+admitted attempt is rejected, except that a late completion from the current \
+attempt of a cancelled stage is discarded without advancing work."""
+rationale = """
+Separating outcome from successor creation permits half-completed pipelines, \
+while accepting stale completion permits an older attempt to overwrite newer \
+operator intent. The cancelled-current exception makes logical cancellation \
+win its race without turning a harmless late return into a retryable failure."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/execution/test_handoff.py -k 'completion_and_next_ready_insert_roll_back_together or completion_identity_mismatch or operator_cancellation'"
+
+[[contracts]]
+title = "Retry creates one fresh attempt"
+statement = """
+Only a terminal failed stage is eligible for retry, and one successful retry \
+atomically appends exactly one fresh attempt and returns the stage to ready; \
+cancelled and all other states remain ineligible."""
+rationale = """
+An explicit new attempt preserves failed history and gives later admission a \
+new durable-workflow identity. Reopening the old attempt would erase lineage, \
+and retrying cancelled work would contradict cancellation's terminal fence."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/recovery/test_actions.py -k 'retry'"
+
+[[contracts]]
+title = "Cancellation commits logical intent before delegation"
+statement = """
+Cancellation first commits the current logical stage as cancelled and settles \
+its current nonterminal attempt. It delegates only the exact current admitted \
+workflow, never requests child cancellation, and a repeated call on that \
+cancelled stage may reissue the same stored workflow identity to repair a lost \
+post-commit request; the workflow-canceller boundary does not promise \
+universal idempotence."""
+rationale = """
+The database transaction cannot be atomic with an external cancellation call, \
+so durable logical intent comes first and a narrow repair path covers the \
+post-commit gap. General replay safety depends on the concrete workflow \
+runtime's terminal-status guards and is not a property established by the \
+structural cancellation protocol alone."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/recovery/test_actions.py -k 'cancel or cancellation'"
+
+[[contracts]]
+title = "Sweep only projects abandonment"
+statement = """
+The abandoned-stage sweep visits admitted current attempts and projects only \
+cancelled, errored, or recovery-exhausted workflow evidence into terminal \
+platform state. It never retries, resumes, replaces, or waits for work, and a \
+concurrent platform terminal outcome wins."""
+rationale = """
+The sweep reconciles external execution evidence; it is not a retry scheduler. \
+Keeping it projection-only prevents automatic policy from overriding explicit \
+operator action or a completion transaction."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/execution/test_handoff.py -k 'sweep'"
+
+[[contracts]]
+title = "Recovery preserves one attempt identity"
+statement = """
+After process interruption, durable-workflow recovery resumes the registered \
+stage body under the same platform attempt and workflow identity when a worker \
+with the matching executor and application version starts; cross-version \
+recovery is not promised."""
+rationale = """
+Runtime replay and operator retry are distinct: replay continues one attempt, \
+while retry appends another. Matching registrations and application version \
+are required by the underlying runtime, so the contract does not claim \
+recovery outside that boundary."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/execution/test_dbos_recovery_boundary.py::test_dbos_recovery_reuses_the_platform_stage_attempt"
+
+[[contracts]]
+title = "Platform and workflow state are colocated"
+statement = """
+Runtime configuration and dispatcher registration require the platform ledger \
+and durable-workflow system schema to identify the same PostgreSQL database, \
+and reject split or ambiguously routed database URLs."""
+rationale = """
+Stage completion and successor creation rely on one transaction spanning both \
+systems. Separate databases cannot provide that atomic boundary, and query \
+routing parameters can silently defeat an apparent URL match."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/runtime/test_dbos.py -k 'colocated or split or query_routing' tests/runtime/test_dispatcher.py::test_registration_owns_colocated_client_and_wrapper_is_thin"
+
+[[contracts]]
+title = "The platform baseline is irreversible"
+statement = """
+The root platform schema migration only upgrades: its downgrade entrypoint \
+always refuses and no supported migration command deletes the ledger created \
+by that baseline."""
+rationale = """
+The ledger contains run provenance, work identity, attempts, outcomes, and \
+operator controls. A reset-style downgrade is rejected because schema rollback \
+must not silently destroy recorded platform data; replacement requires an \
+explicit data-preserving migration."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/core/test_ledger.py::test_baseline_downgrade_is_irreversible"
+
+[[contracts]]
+title = "Only telemetry initialization fails open"
+statement = """
+Disabled telemetry performs no initialization, enabled telemetry reports a \
+degraded result instead of failing runtime startup, and database or durable-\
+workflow runtime initialization failures remain fatal."""
+rationale = """
+Observability is optional and must not prevent useful execution, but treating \
+core runtime failure as telemetry degradation would report a healthy platform \
+that cannot run work."""
+date = "2026-08-05"
+check = "uv run pytest -q tests/runtime/test_telemetry.py tests/runtime/test_dbos.py -k 'telemetry or initialization_failure'"
+
+[[contracts]]
+title = "Application semantics stay outside the platform"
+statement = """
+Applications own payload meaning, reference resolution, stage-result storage, \
+queue configuration, worker pools, and domain policies; the platform owns only \
+the durable linear scheduling, ledger, controls, recovery actions, and \
+inspection boundaries declared by its public API."""
+rationale = """
+Keeping application semantics outside the platform preserves a domain-neutral \
+orchestration boundary. Adding graph, provider, rollout, artifact, or worker-\
+pool policy would make the persistence model and recovery rules depend on one \
+consumer."""
+date = "2026-08-05"
