@@ -5,7 +5,7 @@ All notable changes to `dr-platform` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.1.1 - 2026-08-05
 
 ### Changed
 
@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Python 3.12 through 3.14, and hardened tag-triggered trusted publishing with
   provenance, changelog, artifact metadata, and digest checks.
 - Published the TOML-backed terms and contracts reference through GitHub Pages.
+- Pinned the serialization boundary to the published `dr-serialize` 0.1.2
+  release.
 - Declared Python 3.14 support and advanced the package metadata to version
   0.1.1.
 

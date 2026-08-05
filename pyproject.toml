@@ -21,7 +21,7 @@ classifiers = [
 dependencies = [
     "alembic>=1.16.2",
     "dbos[otel]==2.27.0",
-    "dr-serialize>=0.1.0",
+    "dr-serialize==0.1.2",
     "pydantic>=2.13.4",
     "sqlalchemy>=2.0.0",
 ]
@@ -45,9 +45,6 @@ dev = [
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src"]
-
-[tool.uv.sources]
-dr-serialize = { path = "../dr-serialize", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
