@@ -45,6 +45,9 @@ dev = [
 [tool.hatch.build.targets.sdist]
 only-include = ["src"]
 
+[tool.uv.sources]
+dr-serialize = { path = "../dr-serialize", editable = true }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
