@@ -1,0 +1,745 @@
+"""PostgreSQL guarantees for streaming staged submission."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from threading import Barrier
+
+import pytest
+from sqlalchemy import Engine, create_engine, func, select
+
+from dr_platform._core.identities import PipelineKey, StageKey
+from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform.pipeline.definitions import (
+    PipelineDefinition,
+    StageDefinition,
+)
+from dr_platform.pipeline.registry import PipelineRegistry
+from dr_platform.submission.runs import (
+    PipelineRunConflictError,
+    get_pipeline_run,
+)
+from dr_platform.submission.stream import (
+    SubmissionReceipt,
+    WorkInput,
+    submit,
+)
+from dr_platform.submission.work_items import WorkItemConflictError
+from tests.conftest import NOW, _migrate, engine_dsn
+
+
+def _workflow(*args: object) -> object:
+    return args
+
+
+def _args_for(*args: object) -> tuple[object, ...]:
+    return args
+
+
+def _registry() -> tuple[PipelineRegistry, PipelineDefinition]:
+    pipeline = PipelineDefinition(
+        key=PipelineKey("evaluation"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("prepare"),
+                queue_name="prepare",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name="execute",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    return registry, pipeline
+
+
+def _item(index: int) -> WorkInput:
+    return WorkInput(
+        work_key=f"work-{index}",
+        input_reference=f"input:{index}",
+        labels={"cohort": "blue"},
+    )
+
+
+def _submit_after_barrier(
+    *,
+    engine: Engine,
+    registry: PipelineRegistry,
+    pipeline: PipelineDefinition,
+    barrier: Barrier,
+    item: WorkInput,
+) -> SubmissionReceipt:
+    def synchronized_items() -> Iterator[WorkInput]:
+        barrier.wait(timeout=10)
+        yield item
+
+    return submit(
+        campaign_key="campaign-1",
+        run_key="run-concurrent",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=synchronized_items(),
+        registry=registry,
+        engine=engine,
+        clock=lambda: NOW,
+    )
+
+
+def test_source_commits_before_it_is_exhausted(pg_engine: Engine) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+    observed_counts: list[int] = []
+
+    def items() -> Iterator[WorkInput]:
+        yield _item(0)
+        yield _item(1)
+        with pg_engine.connect() as connection:
+            observed_counts.append(
+                connection.execute(
+                    select(func.count()).select_from(schema.work_items)
+                ).scalar_one()
+            )
+        yield _item(2)
+
+    receipt = submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=items(),
+        registry=registry,
+        engine=pg_engine,
+        chunk_size=2,
+        clock=lambda: NOW,
+    )
+
+    assert observed_counts == [2]
+    assert receipt.inserted_count == 3
+    assert receipt.already_existing_count == 0
+
+
+def test_interrupted_replay_fills_only_absent_keys(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+
+    def interrupted_items() -> Iterator[WorkInput]:
+        yield _item(0)
+        yield _item(1)
+        yield _item(2)
+        raise RuntimeError("producer interrupted")
+
+    with pytest.raises(RuntimeError, match="producer interrupted"):
+        submit(
+            campaign_key="campaign-1",
+            run_key="run-1",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:1",
+            items=interrupted_items(),
+            registry=registry,
+            engine=pg_engine,
+            chunk_size=2,
+            clock=lambda: NOW,
+        )
+
+    with pg_engine.connect() as connection:
+        interrupted_run = get_pipeline_run(connection, run_key="run-1")
+        committed_count = connection.execute(
+            select(func.count()).select_from(schema.work_items)
+        ).scalar_one()
+
+    assert interrupted_run is not None
+    assert interrupted_run.submission_completed_at is None
+    assert committed_count == 2
+
+    receipt = submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=(_item(index) for index in range(4)),
+        registry=registry,
+        engine=pg_engine,
+        chunk_size=2,
+        clock=lambda: NOW,
+    )
+
+    with pg_engine.connect() as connection:
+        completed_run = get_pipeline_run(connection, run_key="run-1")
+        final_count = connection.execute(
+            select(func.count()).select_from(schema.work_items)
+        ).scalar_one()
+
+    assert receipt.inserted_count == 2
+    assert receipt.already_existing_count == 2
+    assert completed_run is not None
+    assert completed_run.submission_completed_at == NOW
+    assert final_count == 4
+
+
+def test_completed_run_replay_does_not_restamp_completion(
+    pg_engine: Engine,
+) -> None:
+    """``mark_submission_completed``'s NULL guard is a real no-op replay.
+
+    Both calls here use distinct clocks so a re-stamp would move
+    ``submission_completed_at``; the constant clock used elsewhere in this
+    module can't distinguish a no-op from a rewrite.
+    """
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    later = datetime(2026, 7, 18, 12, tzinfo=UTC)
+
+    first = submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=(_item(0),),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    replay = submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=(_item(0),),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: later,
+    )
+
+    with pg_engine.connect() as connection:
+        run_after_replay = get_pipeline_run(connection, run_key="run-1")
+
+    assert run_after_replay is not None
+    assert run_after_replay.submission_completed_at == NOW
+    assert run_after_replay.submission_completed_at != later
+    assert (first.inserted_count, first.already_existing_count) == (1, 0)
+    assert (replay.inserted_count, replay.already_existing_count) == (0, 1)
+
+
+def test_config_mismatched_resume_is_rejected(pg_engine: Engine) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=(),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(PipelineRunConflictError):
+        submit(
+            campaign_key="campaign-1",
+            run_key="run-1",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:other",
+            items=(),
+            registry=registry,
+            engine=pg_engine,
+            clock=lambda: NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("campaign_key", "pipeline_key", "pipeline_version"),
+    [
+        ("campaign-other", PipelineKey("evaluation"), 1),
+        ("campaign-1", PipelineKey("evaluation-other"), 1),
+        ("campaign-1", PipelineKey("evaluation"), 2),
+    ],
+    ids=["campaign", "pipeline-key", "pipeline-version"],
+)
+def test_run_key_rejects_campaign_and_pipeline_provenance_changes(
+    pg_engine: Engine,
+    campaign_key: str,
+    pipeline_key: PipelineKey,
+    pipeline_version: int,
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=(),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    conflicting_pipeline = pipeline
+    if pipeline_key != pipeline.key or pipeline_version != pipeline.version:
+        conflicting_pipeline = PipelineDefinition(
+            key=pipeline_key,
+            version=pipeline_version,
+            stages=pipeline.stages,
+        )
+        registry.register(conflicting_pipeline)
+
+    with pytest.raises(PipelineRunConflictError):
+        submit(
+            campaign_key=campaign_key,
+            run_key="run-1",
+            pipeline=conflicting_pipeline.identity,
+            execution_config_reference="config:1",
+            items=(),
+            registry=registry,
+            engine=pg_engine,
+            clock=lambda: NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("input_reference", "labels"),
+    [
+        ("input:changed", {"cohort": "blue"}),
+        ("input:0", {"cohort": "red"}),
+    ],
+    ids=["input-reference", "labels"],
+)
+def test_reused_campaign_work_key_rejects_changed_immutable_facts(
+    pg_engine: Engine,
+    input_reference: str,
+    labels: dict[str, str],
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=(_item(0),),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(WorkItemConflictError):
+        submit(
+            campaign_key="campaign-1",
+            run_key="run-1",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:1",
+            items=(
+                WorkInput(
+                    work_key="work-0",
+                    input_reference=input_reference,
+                    labels=labels,
+                ),
+            ),
+            registry=registry,
+            engine=pg_engine,
+            clock=lambda: NOW,
+        )
+
+
+def test_matching_concurrent_submissions_converge(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+    barrier = Barrier(2)
+    engines = (
+        create_engine(engine_dsn(pg_engine)),
+        create_engine(engine_dsn(pg_engine)),
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = tuple(
+                executor.submit(
+                    _submit_after_barrier,
+                    engine=engine,
+                    registry=registry,
+                    pipeline=pipeline,
+                    barrier=barrier,
+                    item=_item(0),
+                )
+                for engine in engines
+            )
+            receipts = tuple(future.result() for future in futures)
+    finally:
+        for engine in engines:
+            engine.dispose()
+
+    with pg_engine.connect() as connection:
+        work_count = connection.execute(
+            select(func.count()).select_from(schema.work_items)
+        ).scalar_one()
+        stage_count = connection.execute(
+            select(func.count()).select_from(schema.stage_executions)
+        ).scalar_one()
+
+    assert sorted(
+        (receipt.inserted_count, receipt.already_existing_count)
+        for receipt in receipts
+    ) == [(0, 1), (1, 0)]
+    assert (work_count, stage_count) == (1, 1)
+
+
+def test_conflicting_concurrent_submissions_have_one_winner(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+    barrier = Barrier(2)
+    engines = (
+        create_engine(engine_dsn(pg_engine)),
+        create_engine(engine_dsn(pg_engine)),
+    )
+    items = (
+        _item(0),
+        WorkInput(
+            work_key="work-0",
+            input_reference="input:changed",
+            labels={"cohort": "blue"},
+        ),
+    )
+    receipts: list[SubmissionReceipt] = []
+    conflicts: list[WorkItemConflictError] = []
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = tuple(
+                executor.submit(
+                    _submit_after_barrier,
+                    engine=engine,
+                    registry=registry,
+                    pipeline=pipeline,
+                    barrier=barrier,
+                    item=item,
+                )
+                for engine, item in zip(engines, items, strict=True)
+            )
+            for future in futures:
+                try:
+                    receipts.append(future.result())
+                except WorkItemConflictError as error:
+                    conflicts.append(error)
+    finally:
+        for engine in engines:
+            engine.dispose()
+
+    with pg_engine.connect() as connection:
+        stored_references = (
+            connection.execute(select(schema.work_items.c.input_reference))
+            .scalars()
+            .all()
+        )
+        stage_count = connection.execute(
+            select(func.count()).select_from(schema.stage_executions)
+        ).scalar_one()
+
+    assert len(receipts) == 1
+    assert len(conflicts) == 1
+    assert (
+        receipts[0].inserted_count,
+        receipts[0].already_existing_count,
+    ) == (1, 0)
+    assert stored_references in [["input:0"], ["input:changed"]]
+    assert stage_count == 1
+
+
+def test_conflict_rolls_back_only_its_multi_item_chunk(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+    submit(
+        campaign_key="campaign-1",
+        run_key="run-seed",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:seed",
+        items=(
+            WorkInput(
+                work_key="work-conflict",
+                input_reference="input:original",
+                labels={"cohort": "blue"},
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(WorkItemConflictError):
+        submit(
+            campaign_key="campaign-1",
+            run_key="run-failing",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:failing",
+            items=(
+                _item(0),
+                _item(1),
+                _item(2),
+                WorkInput(
+                    work_key="work-conflict",
+                    input_reference="input:changed",
+                    labels={"cohort": "blue"},
+                ),
+            ),
+            registry=registry,
+            engine=pg_engine,
+            chunk_size=2,
+            clock=lambda: NOW,
+        )
+
+    with pg_engine.connect() as connection:
+        work_keys = (
+            connection.execute(
+                select(schema.work_items.c.work_key).order_by(
+                    schema.work_items.c.work_key
+                )
+            )
+            .scalars()
+            .all()
+        )
+        stage_count = connection.execute(
+            select(func.count()).select_from(schema.stage_executions)
+        ).scalar_one()
+        failed_run = get_pipeline_run(
+            connection,
+            run_key="run-failing",
+        )
+
+    assert work_keys == ["work-0", "work-1", "work-conflict"]
+    assert stage_count == 3
+    assert failed_run is not None
+    assert failed_run.submission_completed_at is None
+
+
+def test_new_items_have_only_the_first_stage_ready(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+    observed_while_streaming: list[tuple[str, int, str]] = []
+
+    def items() -> Iterator[WorkInput]:
+        yield _item(0)
+        yield _item(1)
+        with pg_engine.connect() as connection:
+            observed_while_streaming.extend(
+                connection.execute(
+                    select(
+                        schema.stage_executions.c.stage_key,
+                        schema.stage_executions.c.stage_index,
+                        schema.stage_executions.c.state,
+                    ).order_by(schema.stage_executions.c.stage_execution_id)
+                ).tuples()
+            )
+        yield _item(2)
+
+    submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=items(),
+        registry=registry,
+        engine=pg_engine,
+        chunk_size=2,
+        clock=lambda: NOW,
+    )
+
+    with pg_engine.connect() as connection:
+        rows = connection.execute(
+            select(
+                schema.stage_executions.c.stage_key,
+                schema.stage_executions.c.stage_index,
+                schema.stage_executions.c.state,
+            ).order_by(schema.stage_executions.c.stage_execution_id)
+        ).all()
+
+    expected_committed_rows = [
+        ("prepare", 0, StageExecutionState.READY.value),
+        ("prepare", 0, StageExecutionState.READY.value),
+    ]
+    assert observed_while_streaming == expected_committed_rows
+    assert rows == [
+        *expected_committed_rows,
+        ("prepare", 0, StageExecutionState.READY.value),
+    ]
+
+
+def test_cross_run_campaign_duplicates_converge(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+    first = submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=(_item(0),),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    second = submit(
+        campaign_key="campaign-1",
+        run_key="run-2",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:2",
+        items=(_item(0),),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    with pg_engine.connect() as connection:
+        work_count = connection.execute(
+            select(func.count()).select_from(schema.work_items)
+        ).scalar_one()
+        stage_count = connection.execute(
+            select(func.count()).select_from(schema.stage_executions)
+        ).scalar_one()
+        origin_run_key = connection.execute(
+            select(schema.work_items.c.origin_run_key)
+        ).scalar_one()
+
+    assert (first.inserted_count, first.already_existing_count) == (1, 0)
+    assert (second.inserted_count, second.already_existing_count) == (0, 1)
+    assert (work_count, stage_count, origin_run_key) == (1, 1, "run-1")
+
+
+# One structured, resolvable-looking typed Object Reference of the exact shape
+# whetstone/dr-store will carry: an encoded value embedding a declared schema
+# and a 64-char content_hash for one immutable Rollout Work Request.  The
+# embedded ``://`` and ``&`` are deliberate parse bait; dr-platform must never
+# interpret them.
+_TYPED_OBJECT_REFERENCE = (
+    "objref://rollout-work-request/v3"
+    "?schema=whetstone.rollout_work_request"
+    "&schema_version=7"
+    "&content_hash="
+    "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+)
+
+
+def test_input_reference_is_transported_opaquely_without_parsing(
+    pg_engine: Engine,
+) -> None:
+    """A typed Object Reference round-trips byte-for-byte, unparsed.
+
+    dr-platform validates ``input_reference`` only as a non-empty string and
+    never parses, resolves, normalizes, or decomposes its encoded schema or
+    ``content_hash``.  The exact submitted string must reappear verbatim in the
+    persisted ``work_items.input_reference`` column.
+    """
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+
+    submit(
+        campaign_key="campaign-1",
+        run_key="run-1",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=(
+            WorkInput(
+                work_key="work-opaque",
+                input_reference=_TYPED_OBJECT_REFERENCE,
+                labels={},
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    with pg_engine.connect() as connection:
+        stored = connection.execute(
+            select(schema.work_items.c.input_reference)
+        ).scalar_one()
+
+    # Byte-for-byte identity: the transport preserved every character,
+    # including the ``://``, query separators, and full content_hash, none of
+    # which dr-platform inspected.
+    assert stored == _TYPED_OBJECT_REFERENCE
+
+
+@pytest.mark.parametrize(
+    "opaque",
+    [
+        "x",
+        _TYPED_OBJECT_REFERENCE,
+        "not-a-reference-at-all",
+        "objref://missing-content-hash",
+        '{"looks":"like json","but":"is not parsed"}',
+    ],
+)
+def test_work_input_never_validates_reference_structure(opaque: str) -> None:
+    """The submission boundary accepts any non-empty reference string.
+
+    Opacity means dr-platform imposes no schema, scheme, delimiter, hash
+    length, or well-formedness requirement on the transported reference; the
+    accepted value is preserved unchanged.
+    """
+    assert (
+        WorkInput(
+            work_key="work", input_reference=opaque, labels={}
+        ).input_reference
+        == opaque
+    )
+
+
+def test_work_input_rejects_an_empty_reference() -> None:
+    with pytest.raises(ValueError, match="input reference"):
+        WorkInput(work_key="work", input_reference="", labels={})
+
+
+def test_submit_rejects_a_non_integer_chunk_size(pg_engine: Engine) -> None:
+    registry, pipeline = _registry()
+
+    with pytest.raises(TypeError, match="chunk size must be an integer"):
+        submit(
+            campaign_key="campaign-1",
+            run_key="run-1",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:1",
+            items=(_item(0),),
+            registry=registry,
+            engine=pg_engine,
+            chunk_size=True,
+            clock=lambda: NOW,
+        )
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_submit_rejects_a_non_positive_chunk_size(
+    pg_engine: Engine,
+    chunk_size: int,
+) -> None:
+    registry, pipeline = _registry()
+
+    with pytest.raises(ValueError, match="chunk size must be positive"):
+        submit(
+            campaign_key="campaign-1",
+            run_key="run-1",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:1",
+            items=(_item(0),),
+            registry=registry,
+            engine=pg_engine,
+            chunk_size=chunk_size,
+            clock=lambda: NOW,
+        )

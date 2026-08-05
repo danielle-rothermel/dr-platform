@@ -9,13 +9,13 @@ import pytest
 from dbos import DBOS, DBOSConfig
 from sqlalchemy import Engine, create_engine, make_url, text
 
-from dr_platform.db.migrate import upgrade_platform_schema
-from dr_platform.staging.schema import StagingSchema
+from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform.runtime.database.migrate import upgrade_platform_schema
 
 if TYPE_CHECKING:
     from dbos import DBOSClient
 
-    from dr_platform.staging.admission import AdmissionPayload
+    from dr_platform.admission.runner import AdmissionPayload
 
 TEST_DATABASE_URL = os.environ.get(
     "DR_PLATFORM_TEST_DATABASE_URL",
