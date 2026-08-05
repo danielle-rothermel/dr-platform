@@ -314,22 +314,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    prefix = _prefix()
-    provenance_guard = _name(prefix, "guard_pipeline_run_provenance")
-    _execute(
-        f"DROP TRIGGER {provenance_guard} ON {_name(prefix, 'pipeline_runs')}"
-    )
-    _execute(f"DROP FUNCTION {provenance_guard}()")
-    op.drop_table(_name(prefix, "stage_controls"))
-    op.drop_table(_name(prefix, "stage_attempts"))
-    op.drop_index(
-        _name(prefix, "ix_stage_executions_ready_admission"),
-        table_name=_name(prefix, "stage_executions"),
-    )
-    op.drop_table(_name(prefix, "stage_executions"))
-    op.drop_index(
-        _name(prefix, "ix_work_items_labels"),
-        table_name=_name(prefix, "work_items"),
-    )
-    op.drop_table(_name(prefix, "work_items"))
-    op.drop_table(_name(prefix, "pipeline_runs"))
+    raise NotImplementedError("platform baseline migration is irreversible")

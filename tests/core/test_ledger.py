@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import cast
 
 import pytest
+from alembic import command
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -44,9 +45,11 @@ from dr_platform._core.ledger.executions import (
 )
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform.admission.controls import upsert_stage_control
 from dr_platform.runtime.database.migrate import (
     PLATFORM_BASELINE_REVISION,
     PLATFORM_HEAD_REVISION,
+    _alembic_config,
     upgrade_platform_schema,
 )
 from dr_platform.submission.runs import (
@@ -353,6 +356,38 @@ def _create_stage_execution(
     )
 
 
+def _snapshot_recorded_ledger_rows(
+    connection: Connection,
+) -> tuple[object, ...]:
+    return tuple(
+        connection.execute(
+            text(
+                """
+                SELECT
+                    to_jsonb(pipeline_run),
+                    to_jsonb(work_item),
+                    to_jsonb(execution),
+                    to_jsonb(attempt),
+                    to_jsonb(control)
+                FROM platform_pipeline_runs AS pipeline_run
+                JOIN platform_work_items AS work_item
+                    ON work_item.origin_run_key = pipeline_run.run_key
+                JOIN platform_stage_executions AS execution
+                    ON execution.work_item_id = work_item.work_item_id
+                JOIN platform_stage_attempts AS attempt
+                    ON attempt.stage_execution_id =
+                        execution.stage_execution_id
+                JOIN platform_stage_controls AS control
+                    ON control.pipeline_key = pipeline_run.pipeline_key
+                    AND control.pipeline_version =
+                        pipeline_run.pipeline_version
+                    AND control.stage_key = execution.stage_key
+                """
+            )
+        ).one()
+    )
+
+
 def test_fresh_baseline_creates_only_the_staged_work_schema(
     pg_engine: Engine,
 ) -> None:
@@ -367,6 +402,55 @@ def test_fresh_baseline_creates_only_the_staged_work_schema(
     assert PLATFORM_BASELINE_REVISION == PLATFORM_HEAD_REVISION
     assert installed_revision == PLATFORM_HEAD_REVISION
     assert tables == STAGING_TABLES | {"platform_platform_alembic_version"}
+
+
+def test_baseline_downgrade_is_irreversible(pg_engine: Engine) -> None:
+    _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        execution = _create_stage_execution(connection)
+        append_stage_attempt(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+            created_at=NOW,
+        )
+        upsert_stage_control(
+            connection,
+            pipeline_key="pipeline",
+            pipeline_version=1,
+            stage_key="execute",
+            selector={"cohort": "blue"},
+            capacity=1,
+            paused=False,
+            updated_at=NOW,
+        )
+
+    tables_before = set(inspect(pg_engine).get_table_names())
+    with pg_engine.connect() as connection:
+        installed_revision_before = connection.execute(
+            text("SELECT version_num FROM platform_platform_alembic_version")
+        ).scalar_one()
+        seeded_rows_before = _snapshot_recorded_ledger_rows(connection)
+
+    with pytest.raises(
+        NotImplementedError,
+        match="baseline migration is irreversible",
+    ):
+        command.downgrade(
+            _alembic_config(engine_dsn(pg_engine), "platform"),
+            "base",
+        )
+
+    assert set(inspect(pg_engine).get_table_names()) == tables_before
+    with pg_engine.connect() as connection:
+        assert (
+            connection.execute(
+                text(
+                    "SELECT version_num FROM platform_platform_alembic_version"
+                )
+            ).scalar_one()
+            == installed_revision_before
+        )
+        assert _snapshot_recorded_ledger_rows(connection) == seeded_rows_before
 
 
 def test_custom_prefix_upgrade_matches_runtime_names_and_is_idempotent(
