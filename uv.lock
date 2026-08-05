@@ -4,10 +4,12 @@ requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "python_full_version >= '3.14' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version < '3.14' and sys_platform == 'win32'",
     "python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.14' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
 [[package]]
@@ -170,7 +172,8 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "dbos", extra = ["otel"] },
-    { name = "dr-serialize" },
+    { name = "dr-serialize", version = "0.1.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin'" },
+    { name = "dr-serialize", version = "0.1.1", source = { editable = "../dr-serialize" }, marker = "sys_platform == 'darwin'" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
 ]
@@ -188,7 +191,8 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.16.2" },
     { name = "dbos", extras = ["otel"], specifier = "==2.27.0" },
-    { name = "dr-serialize", editable = "../dr-serialize" },
+    { name = "dr-serialize", marker = "sys_platform != 'darwin'", specifier = ">=0.1.0" },
+    { name = "dr-serialize", marker = "sys_platform == 'darwin'", editable = "../dr-serialize" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
 ]
@@ -205,7 +209,31 @@ dev = [
 [[package]]
 name = "dr-serialize"
 version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.14' and sys_platform == 'win32'",
+    "python_full_version < '3.14' and sys_platform == 'emscripten'",
+    "python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+]
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/83/ef/973bda063b26269fcac29906a83ae02808bcc4a01ad5eb3a970b8ba2adf4/dr_serialize-0.1.1.tar.gz", hash = "sha256:4c718347a948023ceba5c1928db868616bd36254ae5d53d587eeb43304960cbd", size = 22095, upload-time = "2026-08-05T05:58:29.888Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/3d/e4e82f30daec9f137fbe9349f66d271e6a919f07613b2e9dcd162f6d7e38/dr_serialize-0.1.1-py3-none-any.whl", hash = "sha256:3b9569cb6a304cde65b0a6c511a388229366b226b4110886c9fcef07993185ff", size = 27075, upload-time = "2026-08-05T05:58:28.558Z" },
+]
+
+[[package]]
+name = "dr-serialize"
+version = "0.1.1"
 source = { editable = "../dr-serialize" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and sys_platform == 'darwin'",
+]
 dependencies = [
     { name = "pydantic" },
 ]
