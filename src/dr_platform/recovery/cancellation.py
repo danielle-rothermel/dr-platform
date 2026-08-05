@@ -80,7 +80,8 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
 ) -> WorkCancellationResult:
     """Cancel the current logical stage and delegate admitted cancellation.
 
-    READY work has no physical workflow and is only marked CANCELLED.  For an
+    READY work has no admitted physical workflow, so the execution and any
+    retry-prepared attempt are marked CANCELLED without delegation.  For an
     ADMITTED attempt, platform state and its terminal record are committed
     first, then DBOS is asked to cancel that exact workflow with child
     cancellation disabled.  A FAILED attempt is already terminal, so cancelling
@@ -263,7 +264,10 @@ def _cancel_current_stage(
         updated_at=cancelled_at,
         schema=schema,
     )
-    if workflow_id is not None:
+    if workflow_id is not None or (
+        current.state is StageExecutionState.READY
+        and current.current_attempt > 0
+    ):
         record_stage_attempt_terminal(
             connection,
             stage_execution_id=current.stage_execution_id,

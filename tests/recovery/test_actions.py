@@ -404,6 +404,78 @@ def test_retry_preserves_lineage_and_readmits_prepared_attempt(
     assert _execution_rows(pg_engine, schema)[0][2:] == ("admitted", 2)
 
 
+def test_cancel_terminalizes_retry_prepared_attempt_without_delegation(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    stage_execution_id, work_item_id = _admit_one(
+        pg_engine,
+        registry,
+        schema,
+        run_key="run-retry-cancel",
+        work_key="work-retry-cancel",
+    )
+    with pg_engine.connect() as connection:
+        first_attempt = get_stage_attempt(
+            connection,
+            stage_execution_id=stage_execution_id,
+            attempt_number=1,
+        )
+    assert first_attempt is not None
+    with pg_engine.begin() as connection:
+        _complete_stage_in_transaction(
+            connection,
+            workflow_id=first_attempt.workflow_id,
+            pipeline_key="evaluation",
+            pipeline_version=1,
+            stage_key="execute",
+            stage_index=0,
+            succeeded=False,
+            output_reference=None,
+            terminal_summary={"outcome": "failed"},
+            terminal_reference=None,
+            next_stage_key=None,
+            next_stage_index=None,
+            completed_at=NOW + timedelta(seconds=1),
+        )
+
+    retried = retry_stage(
+        stage_execution_id,
+        engine=pg_engine,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    canceller = _RecordingCanceller()
+    cancelled_at = NOW + timedelta(seconds=3)
+
+    result = cancel_work(
+        engine=pg_engine,
+        client=canceller,
+        work_item_id=work_item_id,
+        clock=lambda: cancelled_at,
+    )
+
+    assert retried.stage_execution.state is StageExecutionState.READY
+    assert result.stage_execution.state is StageExecutionState.CANCELLED
+    assert result.disposition is CancellationDisposition.CANCELLED_READY
+    assert result.delegated_workflow_id is None
+    assert canceller.cancelled == []
+    with pg_engine.connect() as connection:
+        second_attempt = get_stage_attempt(
+            connection,
+            stage_execution_id=stage_execution_id,
+            attempt_number=2,
+        )
+    assert second_attempt is not None
+    assert second_attempt.admitted_at is None
+    assert second_attempt.terminal_at == cancelled_at
+    assert second_attempt.terminal_summary == {
+        "outcome": "cancelled",
+        "reason": "operator_requested",
+    }
+    assert second_attempt.terminal_reference is None
+
+
 def test_concurrent_retry_prepares_exactly_one_new_attempt(
     pg_engine: Engine,
 ) -> None:
