@@ -99,6 +99,53 @@ The run completed at `2026-08-09T20:43:38.216653+00:00` on branch
 `08-08-async-stages-and-run-fan-in-plan`. Both `git_status_at_start` and
 `git_status_before_result` were empty.
 
+## Did real sibling resources survive the durable workflow paths?
+
+Yes. A separate clean-tip qualification exercised the local tagged
+`dr-store`, `dr-providers`, and `dr-exec` packages through two overlapping
+stage workflows and the run-completion workflow. The authoritative
+[cross-package result](cross-package-async-resources-results.json) records two
+successful stage outcomes, two provider calls, two process-executor calls, and
+one successful completion whose exact aggregate consumed both stage artifacts.
+Its release facts were two succeeded, zero failed, and zero cancelled members.
+
+The async SQLite object store opened, served both stage workflows and run
+completion, and closed on one reused workflow event loop. Both stages entered
+before their explicit release gate (`peak_active_stages` was 2). The
+application-owned bridge serialized provider access with its own lock, handled
+all synchronous provider, executor, status, and DBOS-result calls, and reported
+a completed shutdown. The runner's owned temporary artifact root was also
+removed.
+
+The qualification ran at `2026-08-09T21:22:49.698300+00:00` from clean
+dr-platform tip `381a1aeffeb8d89546bba2e1f8d80350397e9860`; both source-status
+snapshots were empty. Its exact sibling provenance was:
+
+| Package | Tag | Commit | Imported module |
+|---|---|---|---|
+| `dr-store` | `v0.2.0` | `9787e72190c7fe1b2d3579c0179cae7d00a396d5` | `/Users/daniellerothermel/drotherm/repos/dr-store/src/dr_store/__init__.py` |
+| `dr-providers` | `v0.3.0` | `f4931d71c3a2cec4c03caae03b02ccb8188000c6` | `/Users/daniellerothermel/drotherm/repos/dr-providers/src/dr_providers/__init__.py` |
+| `dr-exec` | `v0.1.7` | `c06b45796b741dd2cac3c87955b8f3f239a7991e` | `/Users/daniellerothermel/drotherm/repos/dr-exec/src/dr_exec/__init__.py` |
+
+Each sibling tree was clean, and each editable installation pointed to the
+listed local repository. The redacted command shape was:
+
+```console
+uv run --offline \
+  --with-editable /Users/daniellerothermel/drotherm/repos/dr-store \
+  --with-editable /Users/daniellerothermel/drotherm/repos/dr-providers \
+  --with-editable /Users/daniellerothermel/drotherm/repos/dr-exec \
+  python qualification/cross_package_async_resources.py \
+  --database-url 'postgresql+psycopg://drp_qual_b8d14d33c31e:REDACTED@127.0.0.1:5432/drp_qual_b8d14d33c31e_test' \
+  --reset-test-database
+```
+
+The database setup independently verified a password-authenticated TCP
+connection as the dedicated role `drp_qual_b8d14d33c31e` to its owned database
+`drp_qual_b8d14d33c31e_test`. After success, cleanup revalidated the exact role
+OID, database OID, login flag, database name, and ownership before dropping
+them; final catalog checks found neither object.
+
 ## Why are there earlier failed measurements?
 
 Two precursor runs established causes but are not qualification results. The

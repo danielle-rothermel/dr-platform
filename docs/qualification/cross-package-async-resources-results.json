@@ -1,0 +1,141 @@
+{
+  "assertions": {
+    "aggregate": {
+      "consumed": [
+        {
+          "artifact": {
+            "exec_stdout": "executed:input:0",
+            "exit_code": 0,
+            "input_reference": "input:0",
+            "provider_text": "scripted qualification response",
+            "schema": "dr_platform.qualification_stage_result.v1"
+          },
+          "output_reference": "dr_platform.qualification_stage_result.v1:b24d56a9282faf51a1cc93c20df01a725db3f1d3d8283846d4d99ba6cc5a989e",
+          "state": "succeeded",
+          "work_key": "work-0"
+        },
+        {
+          "artifact": {
+            "exec_stdout": "executed:input:1",
+            "exit_code": 0,
+            "input_reference": "input:1",
+            "provider_text": "scripted qualification response",
+            "schema": "dr_platform.qualification_stage_result.v1"
+          },
+          "output_reference": "dr_platform.qualification_stage_result.v1:1f1de79e9770ad334ef90b55a28bafaf1b17af8f0da77e3a7a8665e4ef5dee85",
+          "state": "succeeded",
+          "work_key": "work-1"
+        }
+      ],
+      "manifest_reference": "dr_platform.qualification_manifest.v1:8b4dcb390fa770e43465f4222e0e33884bcdb05abcd6543f4fe83257195b219a",
+      "membership_digest": "f4e204efade37fe9e8ceea948429d25d3dc206ff769c191f72c4befdbcfae71e",
+      "release_terminal_state_counts": [
+        {
+          "count": 2,
+          "state": "succeeded"
+        },
+        {
+          "count": 0,
+          "state": "failed"
+        },
+        {
+          "count": 0,
+          "state": "cancelled"
+        }
+      ],
+      "run_key": "cross-package-run",
+      "schema": "dr_platform.qualification_aggregate.v1"
+    },
+    "aggregate_exact": true,
+    "completion_output_reference": "dr_platform.qualification_aggregate.v1:31e46c0fdb43d36334951ddaf4090e6028dc8ca782b78b61ba5735d9260c0642",
+    "completion_succeeded": true,
+    "exec_calls": 2,
+    "manifest_reference": "dr_platform.qualification_manifest.v1:8b4dcb390fa770e43465f4222e0e33884bcdb05abcd6543f4fe83257195b219a",
+    "membership_digest": "f4e204efade37fe9e8ceea948429d25d3dc206ff769c191f72c4befdbcfae71e",
+    "provider_calls": 2,
+    "stage_results": [
+      "dr_platform.qualification_stage_result.v1:b24d56a9282faf51a1cc93c20df01a725db3f1d3d8283846d4d99ba6cc5a989e",
+      "dr_platform.qualification_stage_result.v1:1f1de79e9770ad334ef90b55a28bafaf1b17af8f0da77e3a7a8665e4ef5dee85"
+    ],
+    "stage_terminal_outcomes": [
+      {
+        "output_reference": "dr_platform.qualification_stage_result.v1:b24d56a9282faf51a1cc93c20df01a725db3f1d3d8283846d4d99ba6cc5a989e",
+        "state": "succeeded",
+        "work_key": "work-0"
+      },
+      {
+        "output_reference": "dr_platform.qualification_stage_result.v1:1f1de79e9770ad334ef90b55a28bafaf1b17af8f0da77e3a7a8665e4ef5dee85",
+        "state": "succeeded",
+        "work_key": "work-1"
+      }
+    ],
+    "stage_workflow_count": 2
+  },
+  "bridge": {
+    "application_owned_executor": true,
+    "calls": {
+      "dbos_result": 5,
+      "exec": 2,
+      "platform_status": 1,
+      "provider": 2
+    },
+    "provider_invoke_lock_owned_by_application": true,
+    "shutdown": true
+  },
+  "packages": {
+    "dr-exec": {
+      "commit": "c06b45796b741dd2cac3c87955b8f3f239a7991e",
+      "git_status": [],
+      "installed_source": "/Users/daniellerothermel/drotherm/repos/dr-exec",
+      "module_file": "/Users/daniellerothermel/drotherm/repos/dr-exec/src/dr_exec/__init__.py",
+      "repository": "/Users/daniellerothermel/drotherm/repos/dr-exec",
+      "tag": "v0.1.7",
+      "version": "0.1.7"
+    },
+    "dr-providers": {
+      "commit": "f4931d71c3a2cec4c03caae03b02ccb8188000c6",
+      "git_status": [],
+      "installed_source": "/Users/daniellerothermel/drotherm/repos/dr-providers",
+      "module_file": "/Users/daniellerothermel/drotherm/repos/dr-providers/src/dr_providers/__init__.py",
+      "repository": "/Users/daniellerothermel/drotherm/repos/dr-providers",
+      "tag": "v0.3.0",
+      "version": "0.3.0"
+    },
+    "dr-store": {
+      "commit": "9787e72190c7fe1b2d3579c0179cae7d00a396d5",
+      "git_status": [],
+      "installed_source": "/Users/daniellerothermel/drotherm/repos/dr-store",
+      "module_file": "/Users/daniellerothermel/drotherm/repos/dr-store/src/dr_store/__init__.py",
+      "repository": "/Users/daniellerothermel/drotherm/repos/dr-store",
+      "tag": "v0.2.0",
+      "version": "0.2.0"
+    }
+  },
+  "platform_git": {
+    "clean": true,
+    "commit": "381a1aeffeb8d89546bba2e1f8d80350397e9860",
+    "module_file": "/Users/daniellerothermel/drotherm/repos/dr-platform/src/dr_platform/__init__.py",
+    "status_at_start": [],
+    "status_before_result": []
+  },
+  "qualified": true,
+  "resource": {
+    "close_loop_id": 4489043344,
+    "entered_stages": [
+      "input:0",
+      "input:1"
+    ],
+    "one_loop_reused": true,
+    "open_loop_id": 4489043344,
+    "peak_active_stages": 2,
+    "workflow_loop_ids": [
+      4489043344
+    ]
+  },
+  "run_at": "2026-08-09T21:22:49.698300+00:00",
+  "schema_version": 1,
+  "temporary_paths": {
+    "cleaned": true,
+    "owned_root": "/var/folders/xl/gvq5r20d2y3dn66xpfls2khh0000gn/T/dr-platform-cross-package-mqnag5ce"
+  }
+}
