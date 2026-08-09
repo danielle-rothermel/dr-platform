@@ -1,0 +1,112 @@
+# Async stages and run fan-in are qualified
+
+**Outcome: qualified.** On clean Git tip
+`0387e0ea14829b47422770e27363b03d0809b929`, the declared admission and run
+completion schedules retained 44% configured headroom, the representative
+200-workflow burst completed with cancellation fencing intact, and both
+planner checks used their intended bounded/indexed paths.
+
+The machine-readable [qualification result](async-stages-and-run-fan-in-results.json)
+is authoritative. All numeric bounds here are qualification-only acceptance
+bounds, not standing service-level objectives.
+
+## What did the representative burst prove?
+
+The run admitted 200 stage workflows and released 20 run completion workflows.
+All 220 synchronous checkpoint transactions ran through the dispatcher-owned
+dedicated executor: 200 stage submissions, 20 completion submissions, and zero
+unknown submissions. The executor had a 200-worker limit and reached 179 active
+workers.
+
+The persisted stage population ended at 180 successful handoffs and 20 logical
+cancellations. For every cancelled work item, the platform delegated the exact
+persisted DBOS workflow identity and DBOS recorded `CANCELLED`. All 20
+process-local coroutines remained active and none cleaned before the release
+gate. After release, all 20 returned and attempted their stage checkpoint;
+late-return fencing preserved the 180 succeeded / 20 cancelled terminal split.
+
+The state-gated handoff took **1.731838 seconds**, below the **7.2-second
+rate-equivalent bound** for 100,000 admissions per hour. Cleanup completed for
+all workflows. Cancellation-request-to-cleanup was 21.315 ms minimum, 192.147
+ms p50, 559.272 ms p95, and 676.299 ms maximum. Release-to-cleanup for the 20
+cancelled coroutines was 8.686 ms minimum, 14.994 ms p50, 435.974 ms p95, and
+446.924 ms maximum.
+
+Runtime shutdown also cleaned the deliberately still-active cancellation probe
+in **0.366908 seconds**.
+
+## What contention and loop behavior were measured?
+
+| Measurement | Samples | Minimum | p50 | p95 | p99 | Maximum |
+|---|---:|---:|---:|---:|---:|---:|
+| Dedicated checkpoint queue delay | 220 | 0.017 ms | 0.069 ms | 5.089 ms | 52.743 ms | 69.934 ms |
+| Stage checkpoint application-pool wait | 200 | 0.000 ms | 246.671 ms | 781.323 ms | 1063.608 ms | 1209.325 ms |
+| Completion checkpoint application-pool wait | 20 | 0.001 ms | 0.002 ms | 0.002 ms | 0.009 ms | 0.009 ms |
+| Event-loop lag | 99 | 0.029 ms | 0.397 ms | 33.501 ms | 1015.377 ms | 1015.377 ms |
+
+The SQLAlchemy application pool had 20 connections and no overflow. Each known
+checkpoint produced one aggregate pool-wait observation, summing any connection
+acquisitions made during that checkpoint; there were no unknown checkpoint
+submissions or pool-wait observations.
+
+The event-loop result is not characterized as low: its maximum lag was
+**1015.377 ms**. It remained below the qualification-only five-second component
+bound while the probe continued through all completion workflows and their
+checkpoints.
+
+## Did the declared schedules retain headroom?
+
+| Schedule | Declared workload | Configuration | Configured capacity | Headroom | Measured pass |
+|---|---:|---|---:|---:|---:|
+| Admission | 100,000/hour | 200 every 5 seconds | 144,000/hour | 44% | 0.584660 s |
+| Run barrier | 10,000/hour | 20 every 5 seconds | 14,400/hour | 44% | 0.108227 s |
+
+Both passes completed inside their five-second schedule intervals. The measured
+single-pass rates are observations from this run, not promised sustained
+throughput.
+
+## Did the planner retain bounded indexed behavior?
+
+The barrier planner retained 10,000 released historical runs, 10,000 unrelated
+nonterminal candidate runs, and one large nonterminal run with 2,000
+memberships. It returned only `planner-zz-eligible` in **12.703 ms** under normal
+planner settings. The plan used:
+
+- `platform_ix_pipeline_runs_completion_candidates`;
+- `platform_ix_stage_executions_nonterminal_work`; and
+- `platform_run_memberships_pkey`.
+
+The observed plan visited 10,002 pipeline-run rows, 12,200 membership rows, and
+12,200 stage-execution rows. This is the expected scan through the deliberately
+nonterminal candidate population, including the 2,000-member run, without the
+10,000 released-history rows becoming candidates.
+
+The `list_runs()` planner retained 10,000 historical runs and 250,000 historical
+memberships. It selected 20 runs and their 40 memberships in **0.142 ms**, using
+`platform_ix_pipeline_runs_campaign_cursor` and
+`platform_uq_run_memberships_run_work`; the observed plan visited exactly 20
+run rows and 40 membership rows.
+
+## What environment produced the authoritative result?
+
+The qualification ran on password-authenticated PostgreSQL 17.9 with a clean
+tree at both recorded Git-status checks. The database URL includes a generated
+credential and a dedicated `_test` database; the result masks the password.
+The host was arm64 macOS 26.5.2 with Python 3.12.5, DBOS 2.27.0, SQLAlchemy
+2.0.51, and psycopg 3.3.4. PostgreSQL reported 1,000 maximum connections.
+
+The run completed at `2026-08-09T20:43:38.216653+00:00` on branch
+`08-08-async-stages-and-run-fan-in-plan`. Both `git_status_at_start` and
+`git_status_before_result` were empty.
+
+## Why are there earlier failed measurements?
+
+Two precursor runs established causes but are not qualification results. The
+first measured the default executor and failed because shared-pool contention
+starved checkpoint progress. After checkpoint work moved to the dedicated
+dispatcher-owned executor, the next rerun failed only because `SERIALIZABLE`
+checkpoint retries amplified contention. Explicit `READ COMMITTED`, row-locked
+checkpoint transactions removed that retry amplification.
+
+The clean-tip result linked above measures the resulting dedicated-executor
+design and is the sole authoritative qualification result.

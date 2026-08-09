@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../../.defs/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../../.defs/doc.css">
+<title>Async stages and run fan-in are qualified</title>
+<style>
+  .status {
+    margin: 18px 0;
+    padding: 14px 18px;
+    border: 1px solid var(--green);
+    border-radius: 10px;
+    background: var(--green-soft);
+  }
+  .status strong { color: var(--green); }
+  .table-wrap { overflow-x: auto; margin: 14px 0 18px; }
+  .metric { white-space: nowrap; }
+  .provenance { overflow-wrap: anywhere; }
+  ul.evidence { margin: 8px 0 16px; padding-left: 22px; }
+  ul.evidence li { margin-bottom: 6px; }
+  .colophon {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Async stages and run fan-in are qualified</h1>
+<p class="dek">Clean-tip evidence for schedules, checkpoint contention, cancellation fencing, and planner bounds.</p>
+<div class="byline">dr-platform · 2026-08-09</div>
+
+<div class="status">
+  <strong>Qualified.</strong> On clean Git tip
+  <code>0387e0ea14829b47422770e27363b03d0809b929</code>, both schedules retained
+  44% configured headroom, the representative burst preserved cancellation
+  fencing, and both planner checks used their intended bounded/indexed paths.
+</div>
+
+<p>The machine-readable <a href="async-stages-and-run-fan-in-results.json">qualification result</a>
+is authoritative. Every numeric bound on this page is a qualification-only
+acceptance bound, not a standing service-level objective.</p>
+
+<div class="section-head" id="burst">
+  <h2>What did the representative burst prove?</h2>
+  <span class="tag">Burst</span>
+</div>
+
+<p>The run admitted <span class="key">200 stage workflows</span> and released
+<span class="key">20 run completion workflows</span>. All 220 synchronous
+checkpoint transactions ran through the dispatcher-owned dedicated executor:
+200 stage submissions, 20 completion submissions, and zero unknown
+submissions. The executor had a 200-worker limit and reached 179 active
+workers.</p>
+
+<p>The persisted stage population ended at <span class="key">180 successful
+handoffs</span> and <span class="key">20 logical cancellations</span>. For every
+cancelled work item, the platform delegated the exact persisted DBOS workflow
+identity and DBOS recorded <code>CANCELLED</code>. All 20 process-local
+coroutines remained active and none cleaned before the release gate.</p>
+
+<p>After release, all 20 cancelled coroutines returned and attempted their stage
+checkpoint. <span class="key">Late-return fencing</span> preserved the 180
+succeeded / 20 cancelled terminal split. Cleanup completed for all workflows.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Gate or measurement</th><th>Observed</th><th>Qualification evidence</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>State-gated handoff</td><td class="metric">1.731838 s</td><td>Below the 7.2-second rate-equivalent bound for 100,000 admissions/hour</td></tr>
+    <tr><td>Cancellation request → cleanup</td><td class="metric">20 samples</td><td>21.315 ms min · 192.147 ms p50 · 559.272 ms p95 · 676.299 ms max</td></tr>
+    <tr><td>Release → cancelled cleanup</td><td class="metric">20 samples</td><td>8.686 ms min · 14.994 ms p50 · 435.974 ms p95 · 446.924 ms max</td></tr>
+    <tr><td>Runtime shutdown cleanup</td><td class="metric">0.366908 s</td><td>Cleaned the deliberately still-active cancellation probe</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="section-head" id="contention">
+  <h2>What contention and loop behavior were measured?</h2>
+  <span class="tag">Instrumentation</span>
+</div>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Measurement</th><th>Samples</th><th>Minimum</th><th>p50</th><th>p95</th><th>p99</th><th>Maximum</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Dedicated checkpoint queue delay</td><td>220</td><td>0.017 ms</td><td>0.069 ms</td><td>5.089 ms</td><td>52.743 ms</td><td>69.934 ms</td></tr>
+    <tr><td>Stage checkpoint application-pool wait</td><td>200</td><td>0.000 ms</td><td>246.671 ms</td><td>781.323 ms</td><td>1063.608 ms</td><td>1209.325 ms</td></tr>
+    <tr><td>Completion checkpoint application-pool wait</td><td>20</td><td>0.001 ms</td><td>0.002 ms</td><td>0.002 ms</td><td>0.009 ms</td><td>0.009 ms</td></tr>
+    <tr><td>Event-loop lag</td><td>99</td><td>0.029 ms</td><td>0.397 ms</td><td>33.501 ms</td><td>1015.377 ms</td><td>1015.377 ms</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The SQLAlchemy application pool had 20 connections and no overflow. Each
+known checkpoint produced one aggregate pool-wait observation, summing any
+connection acquisitions made during that checkpoint; there were no unknown
+checkpoint submissions or pool-wait observations.</p>
+
+<div class="callout">The event-loop result is <strong>not characterized as low</strong>:
+its maximum lag was 1015.377 ms. It remained below the qualification-only
+five-second component bound while the probe continued through all completion
+workflows and their checkpoints.</div>
+
+<div class="section-head" id="schedules">
+  <h2>Did the declared schedules retain headroom?</h2>
+  <span class="tag">Schedules</span>
+</div>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Schedule</th><th>Declared workload</th><th>Configuration</th><th>Configured capacity</th><th>Headroom</th><th>Measured pass</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Admission</td><td>100,000/hour</td><td>200 every 5 seconds</td><td>144,000/hour</td><td>44%</td><td>0.584660 s</td></tr>
+    <tr><td>Run barrier</td><td>10,000/hour</td><td>20 every 5 seconds</td><td>14,400/hour</td><td>44%</td><td>0.108227 s</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Both passes completed inside their five-second schedule intervals. The
+measured single-pass rates are observations from this run, not promised
+sustained throughput.</p>
+
+<div class="section-head" id="planner">
+  <h2>Did the planner retain bounded indexed behavior?</h2>
+  <span class="tag">PostgreSQL</span>
+</div>
+
+<h3>Run barrier</h3>
+<p>The barrier planner retained 10,000 released historical runs, 10,000
+unrelated nonterminal candidate runs, and one large nonterminal run with 2,000
+memberships. It returned only <code>planner-zz-eligible</code> in
+<span class="key">12.703 ms</span> under normal planner settings.</p>
+
+<ul class="evidence">
+  <li><code>platform_ix_pipeline_runs_completion_candidates</code></li>
+  <li><code>platform_ix_stage_executions_nonterminal_work</code></li>
+  <li><code>platform_run_memberships_pkey</code></li>
+</ul>
+
+<p>The observed plan visited 10,002 pipeline-run rows, 12,200 membership rows,
+and 12,200 stage-execution rows. This is the expected scan through the
+deliberately nonterminal candidate population, including the 2,000-member run,
+without the 10,000 released-history rows becoming candidates.</p>
+
+<h3><code>list_runs()</code></h3>
+<p>The inspection planner retained 10,000 historical runs and 250,000
+historical memberships. It selected 20 runs and their 40 memberships in
+<span class="key">0.142 ms</span>, using
+<code>platform_ix_pipeline_runs_campaign_cursor</code> and
+<code>platform_uq_run_memberships_run_work</code>. The observed plan visited
+exactly 20 run rows and 40 membership rows.</p>
+
+<div class="section-head" id="environment">
+  <h2>What environment produced the authoritative result?</h2>
+  <span class="tag">Provenance</span>
+</div>
+
+<p>The qualification ran on <span class="key">password-authenticated PostgreSQL
+17.9</span> with a clean tree at both recorded Git-status checks. The database
+URL includes a generated credential and a dedicated <code>_test</code> database;
+the result masks the password.</p>
+
+<div class="table-wrap provenance">
+<table>
+  <tbody>
+    <tr><th>Git tip</th><td><code>0387e0ea14829b47422770e27363b03d0809b929</code></td></tr>
+    <tr><th>Branch</th><td><code>08-08-async-stages-and-run-fan-in-plan</code></td></tr>
+    <tr><th>Git status</th><td>Empty at start and immediately before result construction</td></tr>
+    <tr><th>Runtime</th><td>arm64 macOS 26.5.2 · Python 3.12.5 · DBOS 2.27.0</td></tr>
+    <tr><th>Database stack</th><td>PostgreSQL 17.9 (Homebrew) · SQLAlchemy 2.0.51 · psycopg 3.3.4</td></tr>
+    <tr><th>Database capacity</th><td>1,000 maximum connections</td></tr>
+    <tr><th>Completed</th><td><code>2026-08-09T20:43:38.216653+00:00</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="section-head" id="precursors">
+  <h2>Why are there earlier failed measurements?</h2>
+  <span class="tag">Causal provenance</span>
+</div>
+
+<p>Two precursor runs established causes but are not qualification results. The
+first measured the default executor and failed because shared-pool contention
+starved checkpoint progress. After checkpoint work moved to the dedicated
+dispatcher-owned executor, the next rerun failed only because
+<code>SERIALIZABLE</code> checkpoint retries amplified contention. Explicit
+<code>READ COMMITTED</code>, row-locked checkpoint transactions removed that
+retry amplification.</p>
+
+<p>The clean-tip result is the sole authoritative qualification result.</p>
+
+<div class="colophon">
+  Companion rendering of the
+  <a href="async-stages-and-run-fan-in.md">Markdown report</a>.
+  Contract context: <a href="../plans/async-stages-and-run-fan-in/plan.md">async
+  stages and run fan-in plan</a>. Source data:
+  <a href="async-stages-and-run-fan-in-results.json">schema-version 3 JSON</a>.
+</div>
+
+</main>
+</body>
+</html>

@@ -115,8 +115,8 @@ The wrapped application workflow for a pipeline stage becomes `async def` and:
 2. calls `args_for` and validates its tuple result;
 3. awaits the application workflow;
 4. validates one non-empty output reference;
-5. invokes the existing synchronous stage handoff transaction through
-   `asyncio.to_thread`;
+5. invokes the synchronous stage handoff transaction through the
+   dispatcher-owned dedicated checkpoint executor;
 6. records an `args_for` or workflow non-cancellation exception as that stage
    execution's application failure;
 7. preserves mismatch, late cancellation, and successor-creation behavior;
@@ -133,11 +133,17 @@ lifecycle-aware async bridges around synchronous `dr-providers` or `dr-exec`
 calls, but those adapters and their resource shutdown remain outside this
 package.
 
-Keep `asyncio.to_thread` for the first implementation. Qualification must prove
-that concurrent async application workflows can reuse one loop-affine test
-resource and measure event-loop lag, default-executor queue delay, ledger-pool
-wait, handoff throughput, and cancellation cleanup under an expected burst.
-Add a limiter or dedicated executor only if that evidence shows contention.
+Synchronous stage and run-completion checkpoint transactions run through one
+dispatcher-owned dedicated executor. Their explicit `READ COMMITTED`,
+row-locked transactions avoid the `SERIALIZABLE` retry amplification observed
+during qualification. Initial measurement through the shared default executor
+also showed checkpoint starvation from default-pool contention.
+
+Qualification proves that concurrent async application workflows can reuse one
+loop-affine test resource and measures dedicated-executor queue delay,
+event-loop lag, ledger-pool wait, handoff throughput, and cancellation cleanup
+under an expected burst. Its numeric bounds remain qualification-only evidence,
+not standing service-level objectives.
 
 ## 2. Run registration and membership
 
@@ -545,9 +551,8 @@ move large member sets or outputs into platform rows or DBOS workflow arguments.
 - Recover the same async DBOS stage attempt after interruption.
 - Reuse one loop-affine async test resource across concurrent application
   workflows.
-- Under expected burst concurrency, measure event-loop lag, executor queue
-  delay, ledger-pool wait, handoff throughput, and cancellation cleanup while
-  retaining `asyncio.to_thread`.
+- Under expected burst concurrency, measure event-loop lag, dedicated-executor
+  queue delay, ledger-pool wait, handoff throughput, and cancellation cleanup.
 
 ### Registration and membership
 
@@ -611,7 +616,19 @@ move large member sets or outputs into platform rows or DBOS workflow arguments.
 - Verify reconciliation query and candidate budgets are page-bounded.
 - Run the canonical pre-check and built-wheel public-API checks.
 
-## 9. Implementation sequence
+## 9. Future options (not current scope)
+
+- Detect decorated async callables beyond
+  `inspect.iscoroutinefunction` when a concrete caller requires that broader
+  declaration boundary.
+- Add independently tunable or multiple checkpoint pools, or change
+  application-pool sizing, only if future evidence requires it.
+- Interrupt process-local workflow coroutines when cancellation is delegated.
+- Add admission payload and label byte limits.
+- Choose between enforcing ordinal arrival order and using weaker
+  committed-prefix terminology for resumable registration.
+
+## 10. Implementation sequence
 
 1. **Planning vocabulary and contracts**
    - apply the documentation changes below;
@@ -683,8 +700,8 @@ This effort is complete when:
   references it consumed;
 - completion inspection truthfully distinguishes a recorded application
   outcome from durable submission alone;
-- burst qualification justifies retaining `asyncio.to_thread` without new
-  executor lifecycle machinery;
+- burst qualification proves the dispatcher-owned dedicated executor's queue,
+  pool, loop, handoff, and cleanup behavior under the declared configuration;
 - the fresh schema baseline contains no historical backfill or compatibility
   path; and
 - focused concurrency, replay, PostgreSQL, query-bound, and built-wheel checks
