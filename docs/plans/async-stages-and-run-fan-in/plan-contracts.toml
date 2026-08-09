@@ -1,12 +1,12 @@
-# Proposed additions for the async-stages-and-run-fan-in plan. These contracts
-# are discussion artifacts and are not yet binding repository contracts.
+# Selected additions for the async-stages-and-run-fan-in plan. These contracts
+# are not yet binding repository contracts.
 
 [[contracts]]
 title = "Application workflows are async"
 statement = """
-Platform-managed item-stage and run-completion workflows are async and awaited \
-by platform wrappers. Argument derivation remains synchronous and must not \
-perform external I/O; ledger mutation remains synchronous, and coroutine \
+Platform-managed pipeline stage and run completion workflows are async and \
+awaited by platform wrappers. Argument derivation remains synchronous and must \
+not perform external I/O; ledger mutation remains synchronous, and coroutine \
 cancellation is not an application failure."""
 rationale = """
 One async application boundary permits loop-affine resources and async storage \
@@ -29,15 +29,19 @@ check = "planned: uv run pytest -q tests/execution/test_async_workflow.py -k 're
 [[contracts]]
 title = "Registration closes ordered membership"
 statement = """
-Before registration, a run declares its expected member count and opaque \
-manifest reference. Bounded idempotent registration closes only when \
-membership has that count, contiguous ordinals, and unique work items; closure \
-freezes membership."""
+Before registration, a submission run declares its expected member count. A \
+run with completion also declares its manifest reference and membership \
+digest; a run without completion supplies both or neither. Bounded idempotent \
+registration closes after normal stream exhaustion only when persisted \
+membership has the declared count, contiguous ordinals, unique work items, \
+and any declared digest; closure freezes membership while exact replay remains \
+idempotent."""
 rationale = """
-This rejects truncation and duplication without a shared whole-set identity \
-protocol."""
+Normal exhaustion and full validation distinguish a complete stream from a \
+partial prefix. The digest binds closed membership to the application manifest \
+without a member listing API or per-member outcome snapshot."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'registration or ordinal or duplicate'"
+check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'registration or digest or replay'"
 
 [[contracts]]
 title = "Membership is distinct from origin"
@@ -47,11 +51,11 @@ compatible work items created by another run. Origin records creation \
 provenance only; it neither substitutes for membership nor authorizes inferred \
 historical membership."""
 rationale = """
-Overlapping runs need independent complete member sets and correct run-scoped \
-counts, while creation provenance must remain immutable and unavailable \
-historical relationships must not be invented."""
+Overlapping runs need independent complete member sets and correct counts for \
+each submission run, while creation provenance must remain immutable and must \
+not be reinterpreted as membership."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'overlapping or origin or migration'"
+check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'overlapping or origin'"
 
 [[contracts]]
 title = "Work reuse preserves execution provenance"
@@ -61,7 +65,7 @@ key, pipeline version, and execution-configuration reference exactly match the \
 work item's origin run. Different execution-defining facts require a different \
 work identity."""
 rationale = """
-One work item has one item-stage execution history. Reusing that history under \
+One work item has one stage execution history. Reusing that history under \
 different execution facts would make its outcome ambiguous and allow a later \
 run to silently reinterpret earlier work."""
 date = "2026-08-08"
@@ -70,9 +74,9 @@ check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'c
 [[contracts]]
 title = "Run inspection follows membership"
 statement = """
-Run counts, status queries, and completion eligibility derive through run \
-membership rather than work origin. These reads remain bounded or aggregate \
-without promising a general member-listing API."""
+Counts, status queries, and completion eligibility for a submission run derive \
+through run membership rather than work origin. These reads remain bounded or \
+aggregate without promising a general member listing API."""
 rationale = """
 Membership is the authoritative run scope, including for reused work. Keeping \
 the first inspection surface narrow avoids embedding complete result sets in \
@@ -83,23 +87,25 @@ check = "planned: uv run pytest -q tests/inspection/test_run_membership.py"
 [[contracts]]
 title = "Run barrier releases completion once"
 statement = """
-A registration-complete run that declares completion becomes eligible when \
-every member's current stage is succeeded, failed, or cancelled. Reconciliation \
-is bounded, and persisted uniqueness prevents duplicate completion executions."""
+A closed submission run that declares completion releases once when every \
+member's current stage execution is succeeded, failed, or cancelled. Release \
+time and terminal state counts are immutable; later member transitions neither \
+invalidate release nor create another completion execution."""
 rationale = """
 Terminality is durable platform evidence, while experiment acceptance remains \
-application policy. A bounded idempotent projection avoids polling races, \
-duplicate aggregate launch, and unrelated-backlog scans."""
+application policy. Immutable edge-triggered release avoids cross-run retry \
+fences, duplicate aggregate launch, and unrelated-backlog scans."""
 date = "2026-08-08"
 check = "planned: uv run pytest -q tests/completion/test_run_barrier.py"
 
 [[contracts]]
 title = "Run completion is outside item pipelines"
 statement = """
-Run completion is one optional run-scoped execution after the members \
-settle, not an item stage or graph edge. Its payload contains compact immutable \
-run facts; applications use their manifest and application-owned data to \
-resolve member results and own aggregate and acceptance semantics."""
+Run completion is one optional execution for a submission run after the \
+members settle, not a pipeline stage or graph edge. Its payload contains the \
+manifest reference, membership digest, and compact immutable release facts; \
+applications resolve member results and own aggregate and acceptance \
+semantics."""
 rationale = """
 Keeping fan-in beside the linear item pipeline adds a reusable completeness \
 primitive without turning the platform into a graph engine or importing \
@@ -108,13 +114,29 @@ date = "2026-08-08"
 check = "planned: uv run pytest -q tests/pipeline/test_definitions.py tests/completion/test_run_payload.py"
 
 [[contracts]]
+title = "Aggregate artifacts preserve consumed provenance"
+statement = """
+Before aggregation, the application validates that its immutable manifest \
+contains the run completion payload's membership digest. Its immutable \
+aggregate artifact records the exact member outcomes and output references \
+consumed."""
+rationale = """
+Release facts can remain a compact edge-triggered snapshot while the aggregate \
+stays reproducible after later member transitions, without platform-owned \
+per-member snapshots or result listing."""
+date = "2026-08-08"
+check = "planned: uv run pytest -q tests/qualification/test_run_completion_artifact.py"
+
+[[contracts]]
 title = "Run completion records one outcome"
 statement = """
-Run completion uses one stable workflow identity and records at most one \
-terminal success or application failure. Success requires a non-empty output \
-reference; replay preserves identity."""
+Run completion uses one stable workflow identity. Enqueued means durably \
+submitted without a recorded application outcome, not necessarily active; it \
+may record at most one success or application failure. Success requires a \
+non-empty output reference, failure means application failure only, and replay \
+preserves identity."""
 rationale = """
-This provides durable fan-in without retry, cancellation, controls, sweep, or \
-attempt-history guarantees."""
+This provides truthful durable fan-in without retry, cancellation, controls, \
+sweep, attempt history, or workflow runtime state projection."""
 date = "2026-08-08"
 check = "planned: uv run pytest -q tests/completion/test_run_execution.py"

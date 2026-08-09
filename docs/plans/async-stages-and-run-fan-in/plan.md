@@ -1,22 +1,28 @@
 # Async stages and run fan-in
 
-Status: draft for discussion
+Status: draft implementation plan
 
-## Purpose
+## Planning vocabulary and contracts
+
+The proposed vocabulary in [plan-terms.toml](plan-terms.toml) and standing
+rules in [plan-contracts.toml](plan-contracts.toml) hold definitions and rules
+for this planning stage. This document applies them rather than repeating them.
+
+The selected planning vocabulary and contracts must be promoted into `.defs/`
+during implementation.
+
+## Purpose and scope
 
 Prepare `dr-platform` to orchestrate high-concurrency research workflows whose
-application effects are implemented by async storage and synchronous provider
-or process clients. At the same time, add an exact run-membership and run-level
-fan-in primitive so applications do not repeatedly implement polling,
-completeness checks, and one-time aggregate launch around the platform.
+application effects use async storage and synchronous provider or process
+clients. Add persisted run membership and a run barrier so an application can
+declare one run completion without implementing polling, completeness checks,
+or duplicate-launch fencing.
 
-This plan intentionally keeps application pipelines linear per work item.
-Fan-in is a separate run-level completion execution, not a graph edge or a
-special provider/evaluation feature.
+Item pipelines remain linear. Run completion stays outside the item pipeline,
+and application semantics and reference resolution stay outside the platform.
 
-## Foundation versions reviewed
-
-The initial plan assumes these published foundations:
+The reviewed foundation versions are:
 
 - `dr-store==0.2.0`
 - `dr-providers==0.3.0`
@@ -24,117 +30,66 @@ The initial plan assumes these published foundations:
 - `dr-platform==0.1.1` as the starting point
 - DBOS `2.27.0`, already pinned by `dr-platform`
 
-The packages co-install under Python 3.12 and newer. The relevant foundation
-contracts are already present:
+The packages co-install under Python 3.12 and newer. This work adds no runtime
+dependency from `dr-platform` to `dr-store`, `dr-providers`, or `dr-exec`.
 
-- `dr-store` supplies async object storage, an async PostgreSQL backend, batch
-  operations, and run/result-granularity artifact bundles.
-- `dr-providers` supplies serializable provider-call state, deterministic
-  retry transitions, terminal results, and one-invocation evidence.
-- `dr-exec` supplies synchronous single-job execution, async bounded pooling,
-  importable JSON jobs, and opaque run-record references.
+### Current gaps
 
-No provider, execution, artifact, reward, experiment, or analysis semantics
-should move into `dr-platform` as part of this work.
+- The platform-owned workflow wrapper is synchronous and does not await an
+  async application workflow.
+- A work item records its origin run, but a submission run does not persist its
+  own membership. Reused work is therefore absent from reads for later
+  submission runs.
+- No durable platform primitive observes a closed run membership, releases one
+  run completion after all members settle, and records its outcome.
 
-## Current gaps
+### Goals
 
-### Application stages are synchronous
+1. Hard-cut platform-managed application workflows to async.
+2. Preserve synchronous argument derivation and ledger transactions.
+3. Persist each submission run's ordered membership, including reused work.
+4. Bind that membership to an application manifest with one canonical digest.
+5. Close registration only after the complete declared membership validates.
+6. Release one run completion after the run barrier is satisfied.
+7. Preserve immutable release facts even if a member later changes state.
+8. Record one run completion outcome under one stable workflow identity.
+9. Keep registration writes, dispatcher passes, and inspection reads bounded;
+   full-membership validation may stream only the declared run's indexed
+   membership.
 
-`StageDefinition.workflow` currently accepts any callable, and the
-platform-owned DBOS wrapper is a synchronous function that calls the
-application workflow directly. A coroutine therefore becomes an invalid
-output rather than being awaited.
-
-This prevents a stage from naturally sharing a loop-affine `asyncpg` pool and
-awaiting `dr-store`. It also pushes applications toward per-call event loops or
-other resource-lifecycle workarounds.
-
-DBOS 2.27 supports coroutine workflows and durable async sleep, so the current
-restriction is in `dr-platform`, not DBOS.
-
-### Run membership is not represented
-
-The vocabulary describes a submission run as having append-only work-item
-membership. The schema instead stores one `origin_run_key` on each work item.
-When the same campaign/work identity is submitted by a later run, the work item
-and stage execution are reused, but the later run has no persisted membership
-edge.
-
-Consequences include:
-
-- run counts and statuses describe only origin work;
-- a run cannot prove its exact intended member set;
-- interrupted submission can be resumed with a truncated or reordered input
-  stream without a complete-set identity check; and
-- run-level fan-in cannot determine completeness for overlapping runs.
-
-### There is no platform-owned fan-in
-
-The platform can report per-work state, but no durable primitive waits for a
-closed run membership set, releases exactly once after all members become
-terminal, and records an aggregate execution result. Each consumer would have
-to implement its own polling, race handling, and one-time publication trigger.
-
-## Goals
-
-1. Make platform-managed application stage workflows async-only.
-2. Preserve synchronous, transaction-safe argument derivation and ledger
-   mutation where those operations are currently correct.
-3. Represent exact append-only membership between runs and work items,
-   including work reused across runs.
-4. Close each run only after its persisted ordered membership has the declared
-   count and contiguous ordinals, then keep that membership immutable.
-5. Release at most one run-completion execution when registration is complete
-   and every declared member is terminal.
-6. Record one durable run-completion outcome under one stable workflow
-   identity without duplicating the item-stage operator lifecycle.
-7. Preserve opaque references and keep payload resolution application-owned.
-8. Keep all scans, registration writes, reconciliation passes, and inspection
-   reads bounded or aggregate.
-
-## Non-goals
+### Non-goals
 
 - General DAG pipelines or arbitrary dependency graphs.
-- Provider-specific retry, rate-limit, model, or credential policy.
-- A `dr-exec` worker pool, process fleet, or batch envelope in the platform.
-- Reward, experiment acceptance, statistical aggregation, or evaluation
-  semantics.
-- Resolving `dr-store`, `dr-exec`, or other references inside the platform.
-- Distributed blob storage or a portable `dr-exec` run-record backend.
-- Exactly-once external provider or process effects.
-- A platform-verified identity of the caller's complete original member set.
-- Run-completion operator retry, cancellation, admission controls, abandoned-
-  workflow sweep, or attempt-history inspection in the first version.
-- A general run-member listing or result-pagination API.
-- Sync and async variants of every platform API.
-- Changing admission, inspection, and migration APIs to async without a
-  demonstrated async caller requirement.
+- Provider, execution, artifact, reward, acceptance, or analysis policy.
+- Reference resolution inside the platform.
+- Exactly-once external effects.
+- Platform storage of every member outcome selected by run completion.
+- Run completion retry, cancellation, controls, abandoned workflow projection,
+  or attempt history.
+- A general member listing or result pagination API.
+- Sync and async variants of application workflows.
+- Async admission, inspection, or schema APIs without a concrete caller.
+- Multi-call run registration.
+- In-place migration or historical membership reconstruction from the current
+  development schema.
 
-## Proposed architecture
+## Proposed flow
 
 ```text
-caller-prepared run declaration
+run registration declaration
   -> bounded registration of ordered run members
+  -> validated membership digest and registration closure
   -> ordinary linear item pipelines
-  -> terminal member states
-  -> bounded run-barrier reconciliation
-  -> one async run-completion execution
+  -> run barrier release with immutable release facts
+  -> one async run completion execution
   -> opaque aggregate output reference
 ```
 
-The platform remains responsible for durable orchestration facts. Applications
-remain responsible for storing and resolving inputs, provider-call state,
-execution evidence, detailed outputs, and aggregate results.
+## 1. Async application workflow boundary
 
-## 1. Async application stage boundary
+### Declarations
 
-### Public contract
-
-Hard-cut `StageDefinition.workflow` to an async callable. Do not retain a sync
-workflow compatibility branch while the package is alpha.
-
-The conceptual public shapes are:
+Hard-cut `StageDefinition.workflow` to an async callable:
 
 ```python
 type AsyncWorkflowCallable = Callable[..., Awaitable[str]]
@@ -149,87 +104,70 @@ class StageDefinition:
     args_for: ArgumentsCallable
 ```
 
-`args_for` remains synchronous because admission calls it inside the
-transaction that prepares and enqueues an attempt. It must derive serializable
-workflow arguments from `AdmissionPayload` without external I/O. This plan does
-not introduce async work inside that transaction.
-
-Validate the coroutine-function requirement when constructing a stage. A
-synchronous callable fails before registration or submission rather than at
-workflow execution time.
+Validate the coroutine-function requirement when constructing a pipeline
+stage. `args_for` remains synchronous, derives serializable arguments from the
+admission payload, and performs no external I/O.
 
 ### Platform-owned wrapper
 
-The wrapped workflow becomes `async def` and:
+The wrapped application workflow for a pipeline stage becomes `async def` and:
 
 1. awaits the application workflow;
-2. validates one non-empty output-reference string;
-3. invokes the existing checkpointed synchronous completion transaction via
+2. validates one non-empty output reference;
+3. invokes the existing synchronous stage handoff transaction through
    `asyncio.to_thread`;
-4. preserves the existing success/failure and successor-creation transaction;
-5. does not translate `asyncio.CancelledError` into an application failure;
-6. retains current mismatch and late-cancellation fencing; and
-7. remains safe under DBOS replay of the same platform attempt.
+4. preserves success, application failure, mismatch, late cancellation, and
+   successor-creation behavior;
+5. lets `asyncio.CancelledError` follow DBOS cancellation handling; and
+6. remains replay-safe under the same stage attempt and workflow identity.
 
-The transaction itself should remain synchronous SQLAlchemy code. Do not add a
-second async ledger implementation.
+The SQLAlchemy ledger path remains synchronous. Applications may build
+lifecycle-aware async bridges around synchronous `dr-providers` or `dr-exec`
+calls, but those adapters and their resource shutdown remain outside this
+package.
 
-### Application resource guidance
+Qualification must prove that concurrent async application workflows can reuse
+one loop-affine test resource and that the synchronous handoff does not block
+the event loop.
 
-Resource creation and shutdown remain application concerns, not platform
-lifecycle guarantees:
+## 2. Run registration and membership
 
-- applications create and close the resources supplied to their workflows;
-- loop-affine resources such as `asyncpg.Pool` must be created on a compatible
-  event loop as required by that resource;
-- the platform neither constructs nor closes provider, store, or executor
-  clients; and
-- applications coordinate their own shutdown order around platform startup and
-  shutdown without a platform promise to stop admission and drain resources.
+### Declaration and manifest binding
 
-Add an integration test proving that two async DBOS stage invocations can reuse
-one loop-affine async resource. Use a small test capability rather than making
-`dr-store` a runtime dependency of `dr-platform`.
-
-### Synchronous dependency bridges
-
-Do not change `dr-exec` or `dr-providers` merely to make platform stages async.
-Applications may supply small async bridges around their synchronous calls.
-Those bridges must be lifecycle-aware:
-
-- use a named bounded executor rather than the event loop's incidental default
-  pool when concurrency is material;
-- size the provider bridge consistently with `HttpProvider` connection limits;
-- on coroutine cancellation, signal the provider cancellation event or
-  `dr-exec.CancelToken`;
-- await cleanup and evidence finalization instead of abandoning the underlying
-  thread; and
-- return or persist the foundation's typed result without reclassifying it as
-  platform success or failure.
-
-These bridges belong in the consuming application or a future focused adapter
-package. They are not part of this platform change.
-
-## 2. Immutable run registration and membership
-
-### Caller-prepared declaration
-
-Require the caller to declare the expected member count before run registration
-begins. The caller may still stream the ordered members in bounded chunks.
-
-Introduce an immutable declaration carrying at least:
+Introduce an immutable run registration declaration:
 
 ```python
 @dataclass(frozen=True, slots=True)
 class RunRegistrationDeclaration:
     expected_member_count: int
-    manifest_reference: str
+    manifest_reference: str | None = None
+    membership_digest: str | None = None
 ```
 
-The manifest reference remains opaque. The platform does not resolve it or
-compare the manifest's contents with registered members.
+A pipeline with run completion requires a non-empty manifest reference and
+membership digest when the submission run is declared. Reject either missing
+value before the first work item or membership write. An item-only pipeline may
+omit both or supply both, but cannot supply an unbound manifest or digest.
 
-Each submitted member has an explicit zero-based ordinal:
+The membership digest uses one pinned canonical representation containing:
+
+```text
+schema/version tag
+expected member count
+ordered entries of (ordinal, work key, input reference)
+```
+
+Use the repository's canonical serialization and hashing path, and pin the
+schema tag and field literals with a golden test. The application records the
+same digest inside its immutable manifest.
+
+The platform treats the manifest reference as opaque. At closure it computes
+the digest from persisted run membership and compares it with the declaration;
+it does not load the manifest. Before aggregation, the application loads the
+manifest and validates that its recorded digest equals the run completion
+payload's digest.
+
+Each submitted member carries its explicit zero-based ordinal:
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -238,15 +176,12 @@ class RunMemberInput:
     work: WorkInput
 ```
 
-Registration proves the exact persisted membership at closure, not the
-caller's original uncommitted intent. A resumed caller may supply a different
-not-yet-committed suffix as long as it satisfies the stored declaration and
-does not conflict with committed ordinals. This limitation avoids a second
-whole-set identity protocol between callers and the platform.
+Reject booleans and negative values for counts and ordinals. A nonempty
+registration must use contiguous ordinals beginning at zero.
 
 ### Persistence
 
-Extend `pipeline_runs` with the immutable registration declaration and add a
+Add the declaration and registration closure facts to `pipeline_runs`. Add a
 membership table conceptually shaped as:
 
 ```text
@@ -259,78 +194,74 @@ run_memberships
   UNIQUE (run_key, work_item_id)
 ```
 
-Keep `origin_run_key` as immutable provenance for the run that first created a
-work item, unless the implementation plan deliberately replaces it with an
-equivalent creation-provenance record. Membership and origin are different
-facts.
+Keep each work item's origin run as immutable creation provenance. Origin does
+not substitute for membership.
 
-Indexes must support:
+Indexes must support ordered membership and counts for one run, all runs
+containing one work item, and barrier eligibility without scanning unrelated
+campaigns.
 
-- ordered members for one run;
-- all runs containing one work item;
-- membership counts for one run; and
-- barrier eligibility without scanning unrelated campaigns.
+Every registration and closure transaction locks the submission run row before
+reading or changing membership. Database enforcement prevents changed or new
+membership after closure.
 
-### Registration behavior
+### Bounded submission and automatic closure
 
-For each bounded submission chunk, one transaction:
+The existing `submit` operation accepts one complete logical member stream and
+commits bounded chunks. For each chunk, one transaction:
 
-1. validates the run declaration against the stored immutable declaration;
-2. inserts or resolves the campaign/work item;
-3. inserts or resolves its run membership at the declared ordinal;
-4. rejects a different member at an occupied ordinal;
-5. rejects the same work item at a second ordinal in the run;
-6. creates the first stage only when the work item itself is new; and
+1. validates the declaration against its persisted value;
+2. inserts or resolves the work item;
+3. inserts or resolves membership at the declared ordinal;
+4. rejects an occupied ordinal bound to different work;
+5. rejects the same work at another ordinal in the submission run;
+6. creates the first stage execution only for a new work item; and
 7. commits before consuming the next chunk.
 
-A reused work item still creates an idempotent membership for the current run.
-It does not create another item-stage execution.
+Reuse adds membership but no duplicate stage execution history. It is permitted
+only when pipeline key, pipeline version, and execution-configuration reference
+match the work item's origin run exactly.
 
-Reusing work across runs must not silently change its execution provenance.
-The implementation should permit membership reuse only when the new run's
-pipeline key, pipeline version, and execution-configuration reference exactly
-match the work item's origin run. A caller that changes any execution-defining
-fact must select a different work identity. This is a deliberate hardening of
-the current behavior, which can reuse one work item across differing run
-configurations.
+Registration closes automatically only when:
 
-Submission completion must atomically verify:
+1. the iterable exhausts normally;
+2. the persisted member count equals the declaration;
+3. ordinals are contiguous from zero;
+4. work items are unique within the submission run; and
+5. when a digest was declared, the persisted membership digest equals it.
 
-- exactly `expected_member_count` membership rows exist;
-- ordinals are contiguous from zero;
-- the run has not already completed with different facts.
+A generator failure or closure validation failure leaves registration open.
+Earlier committed chunks remain an exact resumable prefix. Exact replay of
+committed chunks and of an identical completed stream is idempotent, including
+after closure; any changed declaration or membership is rejected.
 
-Only then set the existing completion timestamp. A truncated stream cannot
-close the run. A different member at a committed ordinal and duplicate work at
-different ordinals fail visibly. Exact replay of any committed prefix and the
-complete stream is idempotent, and completion freezes further membership
-writes.
+Multi-call ingestion is unsupported. A future caller requiring it must justify
+a separate explicit closure operation.
 
-Preserve the currently valid empty-run case: a declaration with zero members
-may complete registration. If it declares run completion, its barrier is
-immediately eligible after registration.
+An empty declaration with a digest uses the canonical empty membership digest.
+If its pipeline declares run completion, its run barrier is immediately
+eligible after closure.
 
-Revise `SubmissionReceipt` so it does not conflate work creation with run
-membership. It should report new/existing work items and new/existing
-memberships separately.
+`SubmissionReceipt` reports new and existing work items separately from new
+and existing memberships.
 
-### Run-scoped inspection
+### Inspection by submission run
 
-Run-scoped counts, status queries, and completion eligibility must join through
-membership rather than `origin_run_key`. Do not add a general member-listing or
-result-pagination API in the first version; applications use their opaque
-manifest and application-owned storage when they need ordered member results.
+Counts and status queries for a submission run, and run barrier eligibility,
+join through membership rather than origin. They remain aggregate or bounded;
+applications use their manifest and application-owned storage for ordered
+results.
 
-## 3. Run barrier and completion execution
+## 3. Run barrier and run completion
 
-### Keep item pipelines linear
+### Pipeline declaration
 
-Add an optional run-completion declaration beside the item-stage sequence:
+Declare optional run completion beside the pipeline stage sequence:
 
 ```python
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RunCompletionDefinition:
-    key: StageKey
+    key: RunCompletionKey
     queue_name: str
     workflow: AsyncWorkflowCallable
     args_for: Callable[[RunCompletionPayload], tuple[object, ...]]
@@ -344,54 +275,44 @@ class PipelineDefinition:
     run_completion: RunCompletionDefinition | None = None
 ```
 
-The exact final name is an owner decision. Whatever name is selected, the
-definitions must state that this is one run-scoped execution after the item
-pipeline, not another item stage and not a graph node.
+`RunCompletionKey` is nominally distinct from `StageKey`. Adding, removing, or
+changing run completion requires a new pipeline version. Registry equality,
+conflict checks, wrapping, and dispatcher validation include the entire run
+completion definition.
 
-Completion keys must not collide with item-stage keys in one pipeline version.
-The registry must include completion definitions in equality and conflict
-checks. Wrapping and dispatcher validation must require the completion
-workflow to use the package-owned wrapper.
+A run completion key's underlying value cannot collide with a pipeline stage
+key in the same pipeline identity.
 
-### Barrier eligibility
+### Barrier reconciliation and release
 
-A run is eligible for completion when:
+After the ordinary admission pass, the scheduled dispatcher runs a separately
+bounded run barrier reconciliation page. It:
 
-1. submission/registration is completed;
-2. it declares a run-completion definition;
-3. every member has a terminal current item stage; and
-4. no completion execution already exists for the run.
+1. selects closed, completion-enabled submission runs in stable order;
+2. proves with indexed anti-joins that no member's current stage execution is
+   outside `SUCCEEDED`, `FAILED`, or `CANCELLED`;
+3. records immutable `released_at` and release terminal state counts;
+4. creates and enqueues one run completion execution in the same transaction;
+   and
+5. relies on persisted uniqueness to make concurrent passes converge.
 
-Terminal means `SUCCEEDED`, `FAILED`, or `CANCELLED`. The platform releases the
-completion execution for mixed terminal outcomes. Whether those outcomes make
-an experiment acceptable is application policy and must not be embedded in
-the barrier.
+Release is edge-triggered. Later retry or cancellation of a member changes
+neither the stored release facts nor the existing run completion execution and
+does not launch another one. A revised aggregate requires a new submission run.
 
-This distinction is important: platform execution completeness is not domain
-acceptance.
+Release terminal state counts include `SUCCEEDED`, `FAILED`, and `CANCELLED`
+in canonical order, including zeros, and sum to the member count. They describe
+the barrier observation; they do not promise that those are the outcomes the
+application later consumes.
 
-### Bounded reconciliation
+The reconciliation batch size bounds enqueue work, not completion occupancy.
+The application-owned queue controls run completion concurrency. A candidate
+failure rolls back that candidate, emits diagnostics, and does not abort the
+rest of the bounded page.
 
-Extend the scheduled dispatcher with a bounded run-barrier reconciliation pass
-instead of adding an unbounded scan to item completion transactions.
+### Payload and application result
 
-The pass should:
-
-- select registration-complete eligible runs in stable order;
-- examine a configured bounded candidate page;
-- prove no nonterminal member exists with indexed anti-joins;
-- persist and enqueue one run-completion execution in one transaction under a
-  stable workflow identity; and
-- make concurrent passes converge without duplicate execution through a
-  uniqueness constraint.
-
-Eventual release through the scheduled pass is acceptable. Item terminality
-and run-completion creation do not need to share one transaction because the
-reconciler reads authoritative platform state and insertion is idempotent.
-
-### Completion payload
-
-The platform supplies compact immutable facts, not all member outputs:
+The platform supplies compact release facts:
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -402,244 +323,206 @@ class RunCompletionPayload:
     pipeline_version: int
     execution_config_reference: str
     manifest_reference: str
+    membership_digest: str
     member_count: int
-    terminal_state_counts: tuple[StateCount, ...]
+    released_at: datetime
+    release_terminal_state_counts: tuple[StateCount, ...]
 ```
 
-The application resolves member results using its manifest and application-
-owned data. Large result sets and credentials must never enter DBOS workflow
-arguments.
+Manifest reference and membership digest are nonoptional in this payload. The
+application validates the manifest digest, resolves member results from its
+own data, and writes an immutable aggregate artifact recording the exact member
+outcomes and output references it consumed. The platform stores only the
+aggregate artifact's opaque output reference.
 
-### Completion lifecycle
+Large member sets, detailed outcomes, output references, and credentials never
+enter the DBOS workflow arguments.
 
-Use one separate run-completion execution table rather than generalizing the
-item-stage tables to a nullable polymorphic scope. It records the run, stable
-DBOS workflow identity, current outcome, optional output reference, safe error
-summary, and lifecycle timestamps.
+### Run completion execution
 
-The bounded barrier pass creates and enqueues that execution once. The package-
-owned async wrapper awaits the application workflow and uses one guarded
-transaction to record either success with a non-empty output reference or an
-application failure. DBOS replay retains the same workflow identity.
+Use a separate table rather than generalizing stage execution tables. One
+record contains:
 
-The first version does not add run-completion attempts, operator retry,
-operator cancellation, admission controls, abandoned-work sweep integration,
-or detailed attempt-history inspection. Those are separate capabilities to add
-only if a concrete operational need justifies them.
+- the submission run and stable DBOS workflow identity;
+- enqueue timestamp;
+- platform-recorded state: `ENQUEUED`, `SUCCEEDED`, or `FAILED`;
+- optional output reference or safe application error summary; and
+- terminal timestamp when the application outcome is recorded.
 
-## 4. Failure and replay
+Pin a dedicated workflow identity recipe over the submission run, pipeline
+identity, and run completion key, with a prefix distinct from stage attempts.
+Persisting the execution and enqueuing that identity occur in one transaction,
+with uniqueness on the submission run and workflow identity. The identity has
+no attempt suffix.
 
-### Async item workflows
+`ENQUEUED` means the stable identity was durably submitted but no application
+terminal outcome has been recorded. It does not assert that DBOS is currently
+executing. `SUCCEEDED` requires a non-empty output reference, and `FAILED`
+means application failure only. Inspection exposes the stable DBOS workflow
+identity, enqueue timestamp, platform-recorded state, and terminal output or
+error.
 
-- Application exceptions become logical `FAILED` outcomes through the existing
-  safe error-summary boundary.
-- `asyncio.CancelledError` follows DBOS cancellation handling and is not
-  rewritten as an application exception.
-- Existing item-stage cancellation, recovery, and operator retry semantics
-  remain unchanged.
+The async wrapper records at most one application outcome. DBOS replay keeps
+the same workflow identity. Runtime cancellation, administrative intervention,
+or recovery exhaustion may leave the platform record `ENQUEUED`; operators use
+the workflow identity to inspect DBOS directly. Runtime state projection is
+future work.
 
-### Run-completion workflow
+## 4. Failure and replay boundaries
 
-- An application exception records one logical failure through the safe error-
-  summary boundary.
-- `asyncio.CancelledError` remains DBOS cancellation evidence and is not
-  rewritten as an application failure.
-- DBOS recovery replays the same run-completion workflow identity.
-- No run-completion operator retry, cancellation, control, sweep, or attempt-
-  history behavior is promised.
+- Application workflow exceptions use the existing stage execution failure
+  path;
+  cancellation is not rewritten as application failure.
+- A run completion application exception records one `FAILED` outcome;
+  cancellation is not rewritten as application failure.
+- A registration chunk is atomic. Earlier chunks survive a later failure and
+  remain replayable.
+- Closure failure records no closure or release facts.
+- A nonterminal member prevents release; a later reconciliation page observes
+  its terminal transition.
+- Completion failure changes neither membership, member outcomes, nor release
+  facts.
+- Post-release member changes do not invalidate or repeat completion.
 
-### Registration
+## 5. Fresh schema baseline
 
-- A failure before a chunk transaction changes nothing in that chunk.
-- A failure after earlier chunks leaves a resumable exact prefix.
-- A declaration conflict fails before further membership writes.
-- Registration closure failure leaves the run open and explains count or ordinal
-  disagreement without silently accepting a partial set.
+Land the target schema as a fresh development baseline. Do not build an
+in-place migration, origin-only membership backfill, or nullable legacy
+manifest path.
 
-### Barrier
+Any existing database with evidence worth retaining must be archived before
+the schema is reset. Reset is an explicit owner operation outside the supported
+schema API; downgrade and upgrade commands must not delete ledger data.
 
-- A run with any nonterminal member remains unreleased.
-- A run whose members became terminal before registration completion releases
-  only after registration completes.
-- Concurrent reconciliation and item handoff either observe nonterminal work or
-  create the one completion execution; a later pass repairs the former case.
-- Interruption or failure of the completion workflow does not change member
-  outcomes or reopen registration.
-
-## 5. Schema and migration
-
-Add a forward-only Alembic revision after `0001_staging_baseline`.
-
-Recommended migration policy:
-
-1. create membership and run-completion execution tables and indexes;
-2. add immutable run-registration declaration fields;
-3. backfill one membership for each existing work item's `origin_run_key`, with
-   ordinals in stable existing rank order;
-4. compute and store the corresponding expected member count;
-5. leave the opaque manifest reference absent for migrated runs because no
-   authoritative value exists, while requiring it for new registrations;
-6. preserve existing run, item, stage, attempt, control, and output records;
-7. update immutability triggers for the new declaration and membership facts;
-8. retain irreversible downgrade behavior; and
-9. do not delete or reinterpret existing attempt history.
-
-Historical membership in non-origin runs cannot be reconstructed because the
-current schema never recorded it. The migration therefore preserves the
-current observable run scope: each migrated run contains its origin work only.
-It must document that limitation rather than infer membership from unavailable
-submission inputs.
-
-If no persisted `dr-platform` database needs preservation, the owner may choose
-a fresh-schema hard cut instead. That choice must be explicit before
-implementation; the default plan is data-preserving forward migration.
+The fresh baseline contains the complete run declaration, membership, release,
+and run completion execution schema and its immutability enforcement. All new
+completion-enabled submission runs require a manifest reference and membership
+digest from their declaration onward.
 
 ## 6. Package boundaries
 
-`dr-platform` should not add runtime dependencies on `dr-store`,
-`dr-providers`, or `dr-exec` for this change.
-
-The intended composition is:
-
 ```text
 dr-platform
-  owns: membership, barrier, item-stage orchestration, durable completion outcome
+  owns: membership, barrier, pipeline stage orchestration,
+        durable completion outcome
 
 application adapter
-  owns: reference codecs, async bridges, resource instances, aggregate semantics
+  owns: references, resource instances, async bridges, manifest validation,
+        aggregate semantics and aggregate artifact provenance
 
 dr-store / dr-providers / dr-exec
   own: their existing storage, provider-call, and process-execution contracts
 ```
 
-Cross-package qualification tests may install the published foundations as
-test-only inputs. They must use public APIs and should not become alternate
-implementations inside `dr-platform`.
+Cross-package qualification may install the reviewed foundations as test-only
+inputs. It uses public APIs and must not add alternate implementations inside
+`dr-platform`.
 
 ## 7. Verification plan
 
 ### Async boundary
 
-- Reject a synchronous stage workflow at declaration time.
-- Await an async item stage and persist its output reference.
-- Preserve one atomic completion-and-next-stage handoff.
-- Record application exceptions without catching cancellation as failure.
-- Recover the same async DBOS attempt after interruption.
-- Reuse one loop-affine async test resource across concurrent stages.
-- Prove completion transaction calls do not block the event loop.
+- Reject a synchronous application workflow at declaration time.
+- Await an async application workflow and persist its output reference.
+- Preserve atomic stage handoff and current cancellation fencing.
+- Recover the same async DBOS stage attempt after interruption.
+- Reuse one loop-affine async test resource across concurrent application
+  workflows.
+- Prove synchronous ledger calls do not block the event loop.
 
-### Membership and registration
+### Registration and membership
 
-- Register a new work item and membership.
-- Register an existing campaign/work item into a second run.
-- Reject cross-run reuse with a different pipeline or execution configuration.
-- Replay exact chunks and the final completion idempotently.
-- Resume after interruption at every chunk boundary.
-- Reject changed run declaration, ordinal, or work facts at committed
-  positions.
-- Reject duplicate work at different ordinals.
-- Reject truncated completion and noncontiguous ordinals.
-- Make run state counts include reused members.
-- Complete and inspect the empty-membership case.
-- Exercise large registrations with bounded transaction and query counts.
+- Require manifest reference and digest before any member write for a
+  completion-enabled pipeline; allow an item-only pipeline to omit both.
+- Pin the canonical membership digest representation with golden tests.
+- Validate persisted membership against the declared digest at closure.
+- Have the application reject a manifest carrying a different digest.
+- Register new and reused work in independent submission runs.
+- Reject reuse with different execution provenance.
+- Resume at every chunk boundary and replay the completed stream after closure.
+- Reject changed declaration, ordinal, work facts, duplicate work,
+  noncontiguous ordinals, incorrect count, and incorrect digest.
+- Leave registration open after generator or closure validation failure.
+- Include reused members in counts for each submission run.
+- Exercise empty and large memberships with bounded memory and indexed reads.
 
-### Barrier and completion
+### Barrier and run completion
 
-- Do not release before registration completion.
-- Do not release while one member is nonterminal.
-- Release once when every member succeeds.
-- Release once for mixed succeeded, failed, and cancelled members.
-- Release after registration when all members were already terminal.
-- Release every eligible overlapping run containing one shared work item.
-- Make concurrent reconcilers create one completion execution.
-- Persist one completion success or application-failure outcome.
-- Preserve one stable workflow identity across DBOS replay.
-- Leave member outcomes and registration unchanged when completion fails.
+- Withhold release before closure or while any member is nonterminal.
+- Release once for all-success and mixed terminal outcomes.
+- Release every eligible overlapping submission run containing shared work.
+- Make concurrent reconcilers create one run completion execution.
+- Pin release counts, zero representation, workflow identity, and compact
+  payload size.
+- Return one member to `READY` after release but before completion starts;
+  assert one execution, unchanged release facts, and an aggregate artifact that
+  identifies the outcomes and output references actually consumed.
+- Record one success or application failure across DBOS replay.
+- Show that a durably submitted workflow without a recorded application
+  outcome remains truthfully inspectable as `ENQUEUED`.
 
-### Migration and performance
+### Schema and performance
 
-- Upgrade a populated `0001` database and verify every existing fact.
+- Create the complete schema from the fresh baseline on PostgreSQL.
+- Verify the supported schema API cannot delete an existing ledger.
 - Run against password-authenticated PostgreSQL.
 - Assert required membership and barrier indexes through query plans.
-- Verify reconciliation work is page-bounded under a large unrelated backlog.
-- Verify workflow arguments remain compact as membership grows.
-- Run the existing canonical pre-check and built-wheel public API checks.
+- Verify reconciliation is page-bounded under unrelated backlog.
+- Run the canonical pre-check and built-wheel public-API checks.
 
 ## 8. Implementation sequence
 
-1. **Finalize owner decisions and vocabulary**
-   - settle names, async-only policy, barrier terminality, and migration policy;
-   - update `.defs/terms.toml` and `.defs/contracts.toml` with the selected
-     standing contracts.
-
-2. **Async item stages**
+1. **Planning vocabulary and contracts**
+   - apply the documentation changes below;
+   - promote the selected terms and contracts into `.defs/`.
+2. **Fresh schema baseline and membership**
+   - add declaration, membership, release, and run completion execution
+     persistence;
+   - update submission receipts and inspection by submission run.
+3. **Async application workflows**
    - hard-cut declarations and wrappers;
-   - add cancellation and DBOS recovery tests;
-   - qualify one loop-affine async resource.
-
-3. **Exact run membership**
-   - add declaration models, membership persistence, and forward migration;
-   - update submission receipts, run counts, statuses, and barrier queries.
-
-4. **Barrier projection**
-   - add bounded eligibility queries and transactional, duplicate-safe
-     completion creation and enqueue;
-   - extend dispatcher summaries and diagnostics.
-
-5. **Run-completion execution**
-   - add declarations, one execution record, wrapping, guarded outcome
-     recording, and current-outcome inspection;
-   - keep item-stage operator lifecycle capabilities out of this scope.
-
+   - add cancellation, recovery, and loop-affine-resource qualification.
+4. **Run barrier**
+   - add indexed eligibility queries, immutable release facts, and
+     duplicate-safe transactional enqueue.
+5. **Run completion**
+   - add declarations, wrapping, guarded outcome recording, and inspection;
+   - retain the deliberately limited three-state lifecycle.
 6. **Cross-package qualification**
-   - exercise a public `dr-store` async resource;
-   - exercise lifecycle-aware bridges around published `dr-providers` and
-     `dr-exec` without adding them as platform runtime dependencies.
+   - exercise a public async storage resource and application-owned bridges
+     without adding platform runtime dependencies.
+7. **Release documentation**
+   - update README examples, operational guidance, changelog, and version.
 
-7. **Documentation and release**
-   - update README examples, operational startup/shutdown guidance, package
-     definitions, changelog, and version;
-   - describe local/shared-filesystem limits without claiming distributed
-     artifact portability.
+Each phase remains separately reviewable and leaves the canonical pre-check
+green.
 
-Each phase should remain separately reviewable and leave the repository's
-canonical pre-check green.
+## Authoritative documentation changes
 
-## Owner decisions to finalize
-
-The dr-platform planning agent should resolve these explicitly before
-implementation:
-
-1. **Async compatibility:** async-only hard cut (recommended) or temporary
-   sync/async dual support.
-2. **Barrier policy:** release after all members are terminal regardless of
-   outcome (recommended), or select an explicit subset of terminal outcomes
-   and thereby make the platform own completion policy.
-3. **Migration:** data-preserving forward migration (recommended) or an
-   explicitly approved fresh-schema hard cut.
-4. **Naming:** `RunCompletionDefinition` and related terms, or another name that
-   clearly distinguishes the execution from cleanup/finalization and from an
-   item stage.
-5. **Cross-run work compatibility:** require exact pipeline and execution
-   configuration agreement before reusing work (recommended), or redefine work
-   execution provenance independently of its origin run.
+During implementation, promote the planning terms and contracts into `.defs/`.
+Amend the existing platform schema term and contract for the selected fresh
+development baseline: valuable databases are archived before an explicit
+reset, while supported schema commands remain non-destructive.
 
 ## Acceptance criteria
 
 This effort is complete when:
 
-- application stage workflows are async and can reuse a loop-affine async
-  resource safely;
-- every completed submission run has one closed persisted ordered membership
-  with the declared count and contiguous ordinals;
-- overlapping runs retain independent membership and correct status counts;
-- an optional run-completion execution is released exactly once after all
-  members become terminal;
-- run completion records at most one durable success or application-failure
-  outcome under one stable workflow identity;
-- no platform contract interprets provider, process, storage, evaluation, or
-  reward meaning;
-- migrations preserve existing ledger evidence under the selected migration
-  policy; and
-- focused concurrency, recovery, PostgreSQL, performance, and built-wheel
-  checks pass.
+- async application workflows reuse a loop-affine resource safely;
+- every closed submission run has immutable ordered membership matching its
+  declared count, ordinals, uniqueness, and canonical digest;
+- completion-enabled runs declare a manifest reference and digest before
+  registration begins, and the application validates the loaded manifest
+  before aggregation;
+- overlapping runs retain independent membership and correct inspection for
+  each submission run;
+- the run barrier releases one run completion execution with immutable release
+  facts, unaffected by later member transitions;
+- the application aggregate artifact records the exact outcomes and output
+  references it consumed;
+- completion inspection truthfully distinguishes a recorded application
+  outcome from durable submission alone;
+- the fresh schema baseline contains no historical backfill or compatibility
+  path; and
+- focused concurrency, replay, PostgreSQL, query-bound, and built-wheel checks
+  pass.
