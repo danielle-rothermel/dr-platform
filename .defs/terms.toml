@@ -182,6 +182,7 @@ name = "run membership digest"
 definition = """
 The canonical identity binding a submission run's expected member count and \
 ordered member ordinals, work identities, and input references."""
+exported_symbols = ["compute_run_membership_digest"]
 part_of = ["run registration declaration", "run completion payload"]
 
 [[terms]]

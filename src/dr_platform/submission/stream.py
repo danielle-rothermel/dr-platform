@@ -179,16 +179,29 @@ class _MembershipDigester:
         return self._hash.hexdigest()
 
 
-def _membership_digest_for_inputs(
+def compute_run_membership_digest(
     members: Iterable[RunMemberInput], *, expected_member_count: int
 ) -> str:
+    validate_nonnegative_integer(
+        expected_member_count, label="expected member count"
+    )
     digester = _MembershipDigester(expected_member_count=expected_member_count)
+    member_count = 0
     for member in members:
+        if not isinstance(member, RunMemberInput):
+            raise TypeError("members must yield RunMemberInput values")
+        if member.ordinal != member_count:
+            raise ValueError(
+                "members must be ordered by contiguous ordinals from zero"
+            )
         digester.add(
             ordinal=member.ordinal,
             work_key=member.work.work_key.value,
             input_reference=member.work.input_reference,
         )
+        member_count += 1
+    if member_count != expected_member_count:
+        raise ValueError("member count does not match expected member count")
     return digester.finish()
 
 

@@ -98,6 +98,7 @@ from dr_platform.submission.stream import (
     RunRegistrationDeclaration,
     SubmissionReceipt,
     WorkInput,
+    compute_run_membership_digest,
     submit,
 )
 from dr_platform.submission.work_items import WorkItemConflictError
@@ -155,6 +156,7 @@ __all__ = [
     "bulk_work_statuses",
     "campaign_state_counts",
     "cancel_work",
+    "compute_run_membership_digest",
     "get_work_item_stages",
     "initialize_dbos_runtime",
     "initialize_telemetry_safely",

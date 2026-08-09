@@ -33,7 +33,7 @@ from dr_platform.submission.stream import (
     RunMemberInput,
     RunRegistrationDeclaration,
     WorkInput,
-    _membership_digest_for_inputs,
+    compute_run_membership_digest,
     submit,
 )
 from tests.conftest import NOW, _migrate
@@ -73,7 +73,7 @@ def test_run_completion_payload_executes_through_dbos(
         )
         for index in range(2)
     )
-    digest = _membership_digest_for_inputs(members, expected_member_count=2)
+    digest = compute_run_membership_digest(members, expected_member_count=2)
     manifests: Mapping[str, str] = {"manifest:run-1": digest}
 
     def completion_args(

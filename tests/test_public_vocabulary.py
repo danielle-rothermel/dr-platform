@@ -76,6 +76,7 @@ _ROOT_BINDINGS = {
     "bulk_run_state_counts": statuses.bulk_run_state_counts,
     "campaign_state_counts": statuses.campaign_state_counts,
     "cancel_work": cancellation.cancel_work,
+    "compute_run_membership_digest": stream.compute_run_membership_digest,
     "get_work_item_stages": inspection_work_items.get_work_item_stages,
     "initialize_dbos_runtime": dbos.initialize_dbos_runtime,
     "initialize_telemetry_safely": telemetry.initialize_telemetry_safely,

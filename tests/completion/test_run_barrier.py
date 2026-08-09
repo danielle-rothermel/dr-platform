@@ -34,7 +34,7 @@ from dr_platform.submission.stream import (
     RunMemberInput,
     RunRegistrationDeclaration,
     WorkInput,
-    _membership_digest_for_inputs,
+    compute_run_membership_digest,
     submit,
 )
 from tests.conftest import NOW, _migrate, engine_dsn
@@ -107,7 +107,7 @@ def _submit_run(
     run_key: str,
     members: tuple[RunMemberInput, ...],
 ) -> None:
-    digest = _membership_digest_for_inputs(
+    digest = compute_run_membership_digest(
         members, expected_member_count=len(members)
     )
     submit(

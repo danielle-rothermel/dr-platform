@@ -168,7 +168,8 @@ ordered entries of (ordinal, work key, input reference)
 
 Use the repository's canonical serialization and hashing path, and pin the
 schema tag and field literals with a golden test. The application records the
-same digest inside its immutable manifest.
+same digest inside its immutable manifest. Applications use
+`compute_run_membership_digest()` rather than reproducing the wire format.
 
 The platform treats the manifest reference as opaque. At closure it computes
 the digest from persisted run membership and compares it with the declaration;

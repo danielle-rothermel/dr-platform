@@ -29,7 +29,7 @@ from dr_platform.submission.stream import (
     RunMembershipConflictError,
     RunRegistrationDeclaration,
     WorkInput,
-    _membership_digest_for_inputs,
+    compute_run_membership_digest,
     submit,
 )
 from tests.conftest import NOW, _migrate
@@ -338,12 +338,21 @@ def test_reuse_rejects_different_execution_provenance(
 
 
 def test_membership_digest_has_a_pinned_canonical_representation() -> None:
-    digest = _membership_digest_for_inputs(
+    digest = compute_run_membership_digest(
         (_member(0), _member(1)), expected_member_count=2
     )
     assert digest == (
         "f4e204efade37fe9e8ceea948429d25d3dc206ff769c191f72c4befdbcfae71e"
     )
+
+
+def test_membership_digest_rejects_noncanonical_input() -> None:
+    with pytest.raises(ValueError, match="contiguous ordinals"):
+        compute_run_membership_digest(
+            (_member(0, ordinal=1),), expected_member_count=1
+        )
+    with pytest.raises(ValueError, match="member count"):
+        compute_run_membership_digest((), expected_member_count=1)
 
 
 def test_incorrect_digest_leaves_registration_open(pg_engine: Engine) -> None:
@@ -450,7 +459,9 @@ def test_registration_chunk_statement_count_is_cardinality_independent(
             )
         return statements
 
-    assert count_statements("run-one", 1) == count_statements("run-500", 500)
+    one_member_statements = count_statements("run-one", 1)
+    assert one_member_statements == count_statements("run-500", 500)
+    assert one_member_statements <= 10
 
 
 def test_closed_membership_rejects_database_mutation(

@@ -170,3 +170,34 @@ def test_bulk_run_counts_execute_one_query_per_input_chunk(
         event.remove(pg_engine, "before_cursor_execute", before_cursor_execute)
     assert len(counts) == 5
     assert statements == 3
+
+
+def test_paged_run_count_consumer_has_no_per_run_queries(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    for index in range(5):
+        _submit_run(
+            pg_engine,
+            registry,
+            pipeline,
+            run_key=f"run-{index}",
+            work_indexes=(index,),
+        )
+    statements = 0
+
+    def before_cursor_execute(*_args: object) -> None:
+        nonlocal statements
+        statements += 1
+
+    event.listen(pg_engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        page = list_runs("campaign-1", engine=pg_engine, limit=5)
+        counts = bulk_run_state_counts(
+            tuple(run.run_key for run in page), engine=pg_engine
+        )
+    finally:
+        event.remove(pg_engine, "before_cursor_execute", before_cursor_execute)
+    assert len(counts) == 5
+    assert statements == 3

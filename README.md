@@ -178,6 +178,10 @@ def submit(
 ) -> SubmissionReceipt: ...
 ```
 
+Use `compute_run_membership_digest(members, expected_member_count=...)` when
+constructing a manifest-bound declaration. It validates the canonical
+zero-based member order and pins the digest wire format used again at closure.
+
 ### Admission and controls
 
 Admission supplies each selected stage with immutable work context and respects
