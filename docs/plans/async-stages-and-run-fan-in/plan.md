@@ -1,7 +1,8 @@
 # Async stages and run fan-in
 
 Status: implemented; clean-tip schema-4 performance qualification passed on
-2026-08-09. The
+2026-08-09 at implementation commit
+`9af0ecbf357123464299f6f949dcaf6883d59342`. The
 [qualification result](../../qualification/async-stages-and-run-fan-in-results.json)
 is the authoritative numeric evidence.
 
@@ -687,9 +688,11 @@ Also:
 ## Acceptance criteria
 
 The implementation satisfies these criteria. The 2026-08-09 clean-tip
-schema-4 result is the authoritative performance evidence for the scheduler,
-burst, barrier-plan, and `list_runs()`-plan criteria. Focused repository checks
-remain the acceptance evidence for the other functional contracts.
+schema-4 result at implementation commit
+`9af0ecbf357123464299f6f949dcaf6883d59342` is the authoritative performance
+evidence for the scheduler, burst, barrier-plan, and `list_runs()`-plan
+criteria. Focused repository checks remain the acceptance evidence for the
+other functional contracts.
 
 - async application workflows reuse a loop-affine resource safely;
 - dispatcher transactions enqueue validated platform payloads without running

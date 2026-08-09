@@ -38,7 +38,7 @@
 
 <div class="status">
   <strong>Qualified.</strong> On clean Git tip
-  <code>35ed53afbf558d0e8872fe7004f828132eb8f211</code>, both schedules retained
+  <code>9af0ecbf357123464299f6f949dcaf6883d59342</code>, both schedules retained
   44% configured headroom, the representative burst preserved cancellation
   fencing, and both planner checks used their intended bounded/indexed paths.
 </div>
@@ -56,7 +56,7 @@ acceptance bound, not a standing service-level objective.</p>
 <span class="key">20 run completion workflows</span>. All 220 synchronous
 checkpoint transactions ran through the dispatcher-owned dedicated executor:
 200 stage submissions, 20 completion submissions, and zero unknown
-submissions. The executor had a 200-worker limit and reached 185 active
+submissions. The executor had a 200-worker limit and reached 182 active
 workers.</p>
 
 <p>The persisted stage population ended at <span class="key">180 successful
@@ -69,7 +69,7 @@ coroutines remained active and none cleaned before the release gate.</p>
 checkpoint. <span class="key">Late-return fencing</span> preserved the 180
 succeeded / 20 cancelled terminal split. Cleanup completed for all workflows.</p>
 
-<p>The state-gated handoff completed at <span class="key">127.060 successful
+<p>The state-gated handoff completed at <span class="key">115.882 successful
 handoffs per second</span>.</p>
 
 <div class="table-wrap">
@@ -78,10 +78,10 @@ handoffs per second</span>.</p>
     <tr><th>Gate or measurement</th><th>Observed</th><th>Qualification evidence</th></tr>
   </thead>
   <tbody>
-    <tr><td>State-gated handoff</td><td class="metric">1.416653 s</td><td>Below the 7.2-second rate-equivalent bound for 100,000 admissions/hour</td></tr>
-    <tr><td>Cancellation request → cleanup</td><td class="metric">20 samples</td><td>17.760 ms min · 192.859 ms p50 · 465.752 ms p95 · 503.631 ms max</td></tr>
-    <tr><td>Release → cancelled cleanup</td><td class="metric">20 samples</td><td>8.173 ms min · 19.814 ms p50 · 262.130 ms p95 · 270.307 ms max</td></tr>
-    <tr><td>Runtime shutdown cleanup</td><td class="metric">0.359158 s</td><td>Cleaned the deliberately still-active cancellation probe</td></tr>
+    <tr><td>State-gated handoff</td><td class="metric">1.553305 s</td><td>Below the 7.2-second rate-equivalent bound for 100,000 admissions/hour</td></tr>
+    <tr><td>Cancellation request → cleanup</td><td class="metric">20 samples</td><td>14.709 ms min · 150.749 ms p50 · 415.928 ms p95 · 517.929 ms max</td></tr>
+    <tr><td>Release → cancelled cleanup</td><td class="metric">20 samples</td><td>5.710 ms min · 14.226 ms p50 · 324.987 ms p95 · 338.151 ms max</td></tr>
+    <tr><td>Runtime shutdown cleanup</td><td class="metric">0.307074 s</td><td>Cleaned the deliberately still-active cancellation probe</td></tr>
   </tbody>
 </table>
 </div>
@@ -97,10 +97,10 @@ handoffs per second</span>.</p>
     <tr><th>Measurement</th><th>Samples</th><th>Minimum</th><th>p50</th><th>p95</th><th>p99</th><th>Maximum</th></tr>
   </thead>
   <tbody>
-    <tr><td>Dedicated checkpoint queue delay</td><td>220</td><td>0.014 ms</td><td>0.041 ms</td><td>3.635 ms</td><td>9.281 ms</td><td>41.996 ms</td></tr>
-    <tr><td>Stage checkpoint application-pool wait</td><td>200</td><td>0.000 ms</td><td>221.700 ms</td><td>578.628 ms</td><td>707.584 ms</td><td>1046.494 ms</td></tr>
-    <tr><td>Completion checkpoint application-pool wait</td><td>20</td><td>0.001 ms</td><td>0.001 ms</td><td>0.002 ms</td><td>0.002 ms</td><td>0.002 ms</td></tr>
-    <tr><td>Event-loop lag</td><td>90</td><td>0.024 ms</td><td>0.253 ms</td><td>10.120 ms</td><td>872.129 ms</td><td>872.129 ms</td></tr>
+    <tr><td>Dedicated checkpoint queue delay</td><td>220</td><td>0.018 ms</td><td>0.036 ms</td><td>4.404 ms</td><td>8.994 ms</td><td>44.678 ms</td></tr>
+    <tr><td>Stage checkpoint application-pool wait</td><td>200</td><td>0.000 ms</td><td>215.673 ms</td><td>710.590 ms</td><td>815.748 ms</td><td>1102.454 ms</td></tr>
+    <tr><td>Completion checkpoint application-pool wait</td><td>20</td><td>0.001 ms</td><td>0.002 ms</td><td>0.002 ms</td><td>0.002 ms</td><td>0.002 ms</td></tr>
+    <tr><td>Event-loop lag</td><td>128</td><td>0.028 ms</td><td>1.034 ms</td><td>24.701 ms</td><td>367.068 ms</td><td>555.006 ms</td></tr>
   </tbody>
 </table>
 </div>
@@ -111,7 +111,7 @@ connection acquisitions made during that checkpoint; there were no unknown
 checkpoint submissions or pool-wait observations.</p>
 
 <div class="callout">The event-loop result is <strong>not characterized as low</strong>:
-its maximum lag was 872.129 ms. It remained below the qualification-only
+its maximum lag was 555.006 ms. It remained below the qualification-only
 five-second component bound while the probe continued through all completion
 workflows and their checkpoints.</div>
 
@@ -126,8 +126,8 @@ workflows and their checkpoints.</div>
     <tr><th>Schedule</th><th>Declared workload</th><th>Configuration</th><th>Configured capacity</th><th>Headroom</th><th>Measured pass</th><th>Measured burst rate</th></tr>
   </thead>
   <tbody>
-    <tr><td>Admission</td><td>100,000/hour</td><td>200 every 5 seconds</td><td>144,000/hour</td><td>44%</td><td>0.537572 s</td><td>1,339,355.576/hour</td></tr>
-    <tr><td>Run barrier</td><td>10,000/hour</td><td>20 every 5 seconds</td><td>14,400/hour</td><td>44%</td><td>0.048216 s</td><td>1,493,266.056/hour</td></tr>
+    <tr><td>Admission</td><td>100,000/hour</td><td>200 every 5 seconds</td><td>144,000/hour</td><td>44%</td><td>0.337261 s</td><td>2,134,844.329/hour</td></tr>
+    <tr><td>Run barrier</td><td>10,000/hour</td><td>20 every 5 seconds</td><td>14,400/hour</td><td>44%</td><td>0.203542 s</td><td>353,734.622/hour</td></tr>
   </tbody>
 </table>
 </div>
@@ -135,6 +135,13 @@ workflows and their checkpoints.</div>
 <p>Both passes completed inside their five-second schedule intervals. The
 measured single-pass rates are observations from this run, not promised
 sustained throughput.</p>
+
+<p>The run-barrier release batch and candidate budget were both 20. The first
+pass examined a blocked 20-run prefix, released nothing, and persisted its
+cursor at the end of that budget. The measured second pass resumed immediately
+after the prefix, examined 20 later candidates, and released all 20. This is
+the qualification's direct evidence that the bounded cursor rotates fairly
+past an ineligible prefix rather than rescanning it.</p>
 
 <div class="section-head" id="planner">
   <h2>Did the planner retain bounded indexed behavior?</h2>
@@ -148,7 +155,7 @@ contained 10,000 nonterminal runs, including one run with 2,000 memberships.
 The pass materialized a 20-row indexed candidate page, used bounded
 parameterized lateral eligibility probes, locked the one eligible run, and
 returned only <code>planner-00000-eligible</code> in
-<span class="key">0.151 ms</span> under normal planner settings.</p>
+<span class="key">0.325 ms</span> under normal planner settings.</p>
 
 <ul class="evidence">
   <li><code>platform_ix_pipeline_runs_completion_candidates</code></li>
@@ -167,7 +174,7 @@ memberships remained unrelated history rather than candidate work.</p>
 <h3><code>list_runs()</code></h3>
 <p>The inspection planner retained 10,000 historical runs and 250,000
 historical memberships. It selected 20 runs and their 40 memberships in
-<span class="key">0.143 ms</span>, using
+<span class="key">0.144 ms</span>, using
 <code>platform_ix_pipeline_runs_campaign_cursor</code> and
 <code>platform_uq_run_memberships_run_work</code>. Its topology gate required
 one indexed run-page loop returning 20 rows and 20 parameterized membership
@@ -179,38 +186,28 @@ rows; they are diagnostics, not exact row-visit counts.</p>
   <span class="tag">Provenance</span>
 </div>
 
-<p>The qualification ran on <span class="key">password-authenticated PostgreSQL
-17.9 (Homebrew)</span> with a clean tree at both recorded Git-status checks. The
-database URL includes a generated credential and a dedicated <code>_test</code>
-database; the result masks the password.</p>
+<p>The qualification ran on <span class="key">PostgreSQL 17.9 (Homebrew)</span>
+through the local Unix socket database <code>dr_platform_test</code>, with a
+clean tree at both recorded Git-status checks.</p>
 
 <div class="table-wrap provenance">
 <table>
   <tbody>
-    <tr><th>Git tip</th><td><code>35ed53afbf558d0e8872fe7004f828132eb8f211</code></td></tr>
+    <tr><th>Git tip</th><td><code>9af0ecbf357123464299f6f949dcaf6883d59342</code></td></tr>
     <tr><th>Branch</th><td><code>08-08-async-stages-and-run-fan-in-plan</code></td></tr>
     <tr><th>Git status</th><td>Empty at start and immediately before result construction</td></tr>
     <tr><th>Runtime</th><td>arm64 macOS 26.5.2 · Python 3.12.5 · DBOS 2.27.0</td></tr>
     <tr><th>Database stack</th><td>PostgreSQL 17.9 (Homebrew) · SQLAlchemy 2.0.51 · psycopg 3.3.4</td></tr>
     <tr><th>Database capacity</th><td>1,000 maximum connections</td></tr>
-    <tr><th>Completed</th><td><code>2026-08-09T22:15:44.710843+00:00</code></td></tr>
+    <tr><th>Completed</th><td><code>2026-08-09T23:36:21.918730+00:00</code></td></tr>
   </tbody>
 </table>
 </div>
 
-<p>The redacted reproducible command was:</p>
+<p>The exact command was:</p>
 
-<pre><code>DR_PLATFORM_TEST_DATABASE_URL='postgresql+psycopg://drp_qual_s4_e2b696c5858b:REDACTED@127.0.0.1:5432/drp_qual_s4_e2b696c5858b_test' \
-  uv run python qualification/async_stages_and_run_fan_in.py \
+<pre><code>uv run python qualification/async_stages_and_run_fan_in.py \
   --reset-test-database</code></pre>
-
-<p>Before the run, catalog checks verified login role
-<code>drp_qual_s4_e2b696c5858b</code> (OID 15653175) and its owned database
-<code>drp_qual_s4_e2b696c5858b_test</code> (OID 15653176), then a TCP connection
-verified the password-authenticated role/database identity. Cleanup revalidated
-the names, OIDs, login flag, ownership, and absence of active sessions before
-dropping only that database and role. Final catalog checks confirmed both were
-absent; the temporary secret file was removed.</p>
 
 <div class="section-head" id="cross-package">
   <h2>Did real sibling resources survive the durable workflow paths?</h2>
