@@ -168,9 +168,10 @@ def _wrap_stage_workflow(
             completed_at=clock(),
         )
 
-    complete_stage = DBOS.transaction(name=f"{workflow_name}_complete")(
-        _complete_stage_transaction
-    )
+    complete_stage = DBOS.transaction(
+        isolation_level="READ COMMITTED",
+        name=f"{workflow_name}_complete",
+    )(_complete_stage_transaction)
 
     @DBOS.workflow(name=workflow_name)
     async def run_stage(payload_data: dict[str, object]) -> str | None:

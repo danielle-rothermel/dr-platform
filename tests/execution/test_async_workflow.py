@@ -5,10 +5,16 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import pytest
 from dbos import DBOS, Queue
 from sqlalchemy import Engine, select
 
-from dr_platform._core.identities import PipelineKey, StageKey, WorkKey
+from dr_platform._core.identities import (
+    PipelineKey,
+    RunCompletionKey,
+    StageKey,
+    WorkKey,
+)
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import set_stage_capacity
@@ -16,6 +22,7 @@ from dr_platform.execution.handoff import wrap_pipeline_workflows
 from dr_platform.inspection.statuses import bulk_work_statuses
 from dr_platform.pipeline.definitions import (
     PipelineDefinition,
+    RunCompletionDefinition,
     StageDefinition,
 )
 from dr_platform.pipeline.registry import PipelineRegistry
@@ -62,6 +69,57 @@ def _workflow_ids(engine: Engine) -> tuple[str, ...]:
                 )
             ).scalars()
         )
+
+
+def test_checkpoint_transactions_register_read_committed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    isolation_levels: list[str] = []
+
+    def transaction(
+        isolation_level: str = "SERIALIZABLE",
+        *,
+        name: str | None = None,
+    ):
+        assert name is not None
+        isolation_levels.append(isolation_level)
+        return lambda function: function
+
+    def workflow(*, name: str | None = None):
+        assert name is not None
+        return lambda function: function
+
+    monkeypatch.setattr(DBOS, "transaction", transaction)
+    monkeypatch.setattr(DBOS, "workflow", workflow)
+
+    async def stage(value: str) -> str:
+        return value
+
+    async def completion(value: str) -> str:
+        return value
+
+    declared = PipelineDefinition(
+        key=PipelineKey("read-committed-checkpoints"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name="read-committed-stage",
+                workflow=stage,
+                args_for=lambda payload: (payload.input_reference,),
+            ),
+        ),
+        run_completion=RunCompletionDefinition(
+            key=RunCompletionKey("aggregate"),
+            queue_name="read-committed-completion",
+            workflow=completion,
+            args_for=lambda payload: (payload.manifest_reference,),
+        ),
+    )
+
+    wrap_pipeline_workflows(declared)
+
+    assert isolation_levels == ["READ COMMITTED", "READ COMMITTED"]
 
 
 def _run_pipeline(  # noqa: PLR0913 -- explicit integration wiring

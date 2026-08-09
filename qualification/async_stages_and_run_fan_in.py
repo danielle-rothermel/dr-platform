@@ -71,6 +71,9 @@ SCHEDULE_INTERVAL_SECONDS = 5.0
 DECLARED_SCHEDULE_HEADROOM_PERCENT = 44.0
 DECLARED_ADMISSIONS_PER_HOUR = 100_000
 DECLARED_COMPLETIONS_PER_HOUR = 10_000
+HANDOFF_SERVICE_RATE_BOUND_SECONDS = (
+    ADMISSION_BATCH_SIZE * 3_600 / DECLARED_ADMISSIONS_PER_HOUR
+)
 CANCELLATION_COUNT = 20
 LOOP_PROBE_INTERVAL_SECONDS = 0.01
 QUALIFICATION_BOUND_SECONDS = 5.0
@@ -332,6 +335,7 @@ class _CheckpointInstrumentation:
             def invoke() -> object:
                 started_at = perf_counter()
                 instrumentation._active.checkpoint_kind = kind
+                instrumentation._active.pool_wait_seconds = 0.0
                 with instrumentation._condition:
                     instrumentation.checkpoint_queue_delays.append(
                         started_at - submitted_at
@@ -344,11 +348,15 @@ class _CheckpointInstrumentation:
                 try:
                     return function(*args, **kwargs)
                 finally:
-                    instrumentation._active.checkpoint_kind = None
                     with instrumentation._condition:
+                        instrumentation.pool_waits[kind].append(
+                            instrumentation._active.pool_wait_seconds
+                        )
                         instrumentation._active_workers -= 1
                         instrumentation._completed[kind] += 1
                         instrumentation._condition.notify_all()
+                    instrumentation._active.checkpoint_kind = None
+                    instrumentation._active.pool_wait_seconds = 0.0
 
             return instrumentation._original_submit(pool, invoke)
 
@@ -362,8 +370,7 @@ class _CheckpointInstrumentation:
                 "completion",
                 "unknown",
             ):
-                with instrumentation._lock:
-                    instrumentation.pool_waits[kind].append(elapsed)
+                instrumentation._active.pool_wait_seconds += elapsed
             return connection
 
         ThreadPoolExecutor.submit = (  # ty: ignore[invalid-assignment]
@@ -1010,7 +1017,7 @@ def _run_live_qualification(  # noqa: PLR0912,PLR0915 -- explicit live scenario
                     loop_lags.maximum_ms <= bound_ms,
                     cancellation_cleanup_latencies.maximum_ms <= bound_ms,
                     release_cleanup_latencies.maximum_ms <= bound_ms,
-                    handoff_elapsed <= QUALIFICATION_BOUND_SECONDS,
+                    handoff_elapsed <= HANDOFF_SERVICE_RATE_BOUND_SECONDS,
                 )
             )
             burst = BurstResult(
@@ -1696,6 +1703,9 @@ def _run(database_url: str) -> QualificationResult:
                     DECLARED_SCHEDULE_HEADROOM_PERCENT
                 ),
                 "burst_component_max_seconds": (QUALIFICATION_BOUND_SECONDS),
+                "handoff_service_rate_bound_seconds": (
+                    HANDOFF_SERVICE_RATE_BOUND_SECONDS
+                ),
                 "correctness": (
                     "state/event gated; time is measurement or watchdog only"
                 ),

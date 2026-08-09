@@ -215,9 +215,10 @@ def wrap_run_completion(
             terminal_at=clock(),
         )
 
-    record_outcome = DBOS.transaction(name=f"{workflow_name}_complete")(
-        _record_transaction
-    )
+    record_outcome = DBOS.transaction(
+        isolation_level="READ COMMITTED",
+        name=f"{workflow_name}_complete",
+    )(_record_transaction)
 
     @DBOS.workflow(name=workflow_name)
     async def run_completion(payload_data: dict[str, object]) -> str | None:
