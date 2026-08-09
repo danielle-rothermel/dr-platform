@@ -74,8 +74,7 @@ Consequences include:
 The platform can report per-work state, but no durable primitive waits for a
 closed run membership set, releases exactly once after all members become
 terminal, and records an aggregate execution result. Each consumer would have
-to implement its own polling, race handling, retry history, and publication
-trigger.
+to implement its own polling, race handling, and one-time publication trigger.
 
 ## Goals
 
@@ -84,15 +83,15 @@ trigger.
    mutation where those operations are currently correct.
 3. Represent exact append-only membership between runs and work items,
    including work reused across runs.
-4. Bind each run to one caller-declared immutable ordered membership set and
-   reject incomplete or conflicting completion.
+4. Close each run only after its persisted ordered membership has the declared
+   count and contiguous ordinals, then keep that membership immutable.
 5. Release at most one run-completion execution when registration is complete
    and every declared member is terminal.
-6. Give run-completion execution the same durable outcome, attempt, retry,
-   cancellation, recovery, admission, and inspection quality as item stages.
+6. Record one durable run-completion outcome under one stable workflow
+   identity without duplicating the item-stage operator lifecycle.
 7. Preserve opaque references and keep payload resolution application-owned.
 8. Keep all scans, registration writes, reconciliation passes, and inspection
-   reads bounded or paginated.
+   reads bounded or aggregate.
 
 ## Non-goals
 
@@ -104,6 +103,10 @@ trigger.
 - Resolving `dr-store`, `dr-exec`, or other references inside the platform.
 - Distributed blob storage or a portable `dr-exec` run-record backend.
 - Exactly-once external provider or process effects.
+- A platform-verified identity of the caller's complete original member set.
+- Run-completion operator retry, cancellation, admission controls, abandoned-
+  workflow sweep, or attempt-history inspection in the first version.
+- A general run-member listing or result-pagination API.
 - Sync and async variants of every platform API.
 - Changing admission, inspection, and migration APIs to async without a
   demonstrated async caller requirement.
@@ -171,18 +174,18 @@ The wrapped workflow becomes `async def` and:
 The transaction itself should remain synchronous SQLAlchemy code. Do not add a
 second async ledger implementation.
 
-### Application resource lifecycle
+### Application resource guidance
 
-The platform must document and qualify the following wiring boundary:
+Resource creation and shutdown remain application concerns, not platform
+lifecycle guarantees:
 
-- async resources such as `asyncpg.Pool` are process-scoped and created on the
-  same long-lived DBOS target event loop that uses them;
-- application workflow closures or application-owned containers supply those
-  resources to stages;
+- applications create and close the resources supplied to their workflows;
+- loop-affine resources such as `asyncpg.Pool` must be created on a compatible
+  event loop as required by that resource;
 - the platform neither constructs nor closes provider, store, or executor
   clients; and
-- shutdown stops admission before application resources are drained and
-  closed.
+- applications coordinate their own shutdown order around platform startup and
+  shutdown without a platform promise to stop admission and drain resources.
 
 Add an integration test proving that two async DBOS stage invocations can reuse
 one loop-affine async resource. Use a small test capability rather than making
@@ -211,23 +214,20 @@ package. They are not part of this platform change.
 
 ### Caller-prepared declaration
 
-Require the caller to declare the complete ordered member set before run
-registration begins. This matches current experiment workflows, where the
-task/sample/configuration grid is known before submission.
+Require the caller to declare the expected member count before run registration
+begins. The caller may still stream the ordered members in bounded chunks.
 
-Introduce a closed declaration carrying at least:
+Introduce an immutable declaration carrying at least:
 
 ```python
 @dataclass(frozen=True, slots=True)
 class RunRegistrationDeclaration:
     expected_member_count: int
-    membership_identity_hash: str
     manifest_reference: str
 ```
 
-The manifest reference remains opaque. The platform does not resolve it. The
-membership identity hash binds the exact ordered member facts crossing the
-platform boundary.
+The manifest reference remains opaque. The platform does not resolve it or
+compare the manifest's contents with registered members.
 
 Each submitted member has an explicit zero-based ordinal:
 
@@ -238,16 +238,11 @@ class RunMemberInput:
     work: WorkInput
 ```
 
-Define and pin one `dr-serialize` identity recipe over:
-
-- ordinal;
-- work key;
-- input reference; and
-- labels in canonical key order.
-
-The run membership identity is a versioned identity document over the ordered
-member identity hashes. The final plan must pin its schema, schema version, and
-golden vectors before implementation.
+Registration proves the exact persisted membership at closure, not the
+caller's original uncommitted intent. A resumed caller may supply a different
+not-yet-committed suffix as long as it satisfies the stored declaration and
+does not conflict with committed ordinals. This limitation avoids a second
+whole-set identity protocol between callers and the platform.
 
 ### Persistence
 
@@ -259,7 +254,6 @@ run_memberships
   run_key                FK pipeline_runs
   member_ordinal         nonnegative integer
   work_item_id           FK work_items
-  member_identity_hash   exact lowercase SHA-256
 
   PRIMARY KEY (run_key, member_ordinal)
   UNIQUE (run_key, work_item_id)
@@ -304,17 +298,17 @@ Submission completion must atomically verify:
 
 - exactly `expected_member_count` membership rows exist;
 - ordinals are contiguous from zero;
-- the recomputed ordered membership identity equals the declared identity; and
 - the run has not already completed with different facts.
 
 Only then set the existing completion timestamp. A truncated stream cannot
-close the run. Reordered, altered, or duplicated inputs fail visibly. Exact
-replay of any committed prefix and the complete stream is idempotent.
+close the run. A different member at a committed ordinal and duplicate work at
+different ordinals fail visibly. Exact replay of any committed prefix and the
+complete stream is idempotent, and completion freezes further membership
+writes.
 
 Preserve the currently valid empty-run case: a declaration with zero members
-uses the pinned empty-membership identity and may complete registration. If it
-declares run completion, its barrier is immediately eligible after
-registration.
+may complete registration. If it declares run completion, its barrier is
+immediately eligible after registration.
 
 Revise `SubmissionReceipt` so it does not conflate work creation with run
 membership. It should report new/existing work items and new/existing
@@ -322,12 +316,10 @@ memberships separately.
 
 ### Run-scoped inspection
 
-All run-scoped counts, lists, bulk status, and completion queries must join
-through membership rather than `origin_run_key`.
-
-Expose bounded readers for ordered run members and their current terminal
-states. Do not return every member or every output reference in one unbounded
-`RunSummary`.
+Run-scoped counts, status queries, and completion eligibility must join through
+membership rather than `origin_run_key`. Do not add a general member-listing or
+result-pagination API in the first version; applications use their opaque
+manifest and application-owned storage when they need ordered member results.
 
 ## 3. Run barrier and completion execution
 
@@ -388,9 +380,10 @@ The pass should:
 - select registration-complete eligible runs in stable order;
 - examine a configured bounded candidate page;
 - prove no nonterminal member exists with indexed anti-joins;
-- insert one ready run-completion execution using a uniqueness constraint;
-- isolate malformed registry/declaration candidates from unrelated runs; and
-- make concurrent passes converge without duplicate execution.
+- persist and enqueue one run-completion execution in one transaction under a
+  stable workflow identity; and
+- make concurrent passes converge without duplicate execution through a
+  uniqueness constraint.
 
 Eventual release through the scheduled pass is acceptable. Item terminality
 and run-completion creation do not need to share one transaction because the
@@ -409,64 +402,59 @@ class RunCompletionPayload:
     pipeline_version: int
     execution_config_reference: str
     manifest_reference: str
-    membership_identity_hash: str
     member_count: int
     terminal_state_counts: tuple[StateCount, ...]
-    attempt_number: int
 ```
 
-The application resolves or pages member results using platform inspection and
-its own opaque references. Large result sets and credentials must never enter
-DBOS workflow arguments.
+The application resolves member results using its manifest and application-
+owned data. Large result sets and credentials must never enter DBOS workflow
+arguments.
 
 ### Completion lifecycle
 
-Prefer separate run-completion execution and attempt tables over immediately
-generalizing all item-stage tables to a nullable polymorphic scope. The two
-scopes have different foreign keys and payloads, and the shared abstraction is
-not yet earned.
+Use one separate run-completion execution table rather than generalizing the
+item-stage tables to a nullable polymorphic scope. It records the run, stable
+DBOS workflow identity, current outcome, optional output reference, safe error
+summary, and lifecycle timestamps.
 
-The run-completion ledger should nevertheless preserve the established
-semantics:
+The bounded barrier pass creates and enqueues that execution once. The package-
+owned async wrapper awaits the application workflow and uses one guarded
+transaction to record either success with a non-empty output reference or an
+application failure. DBOS replay retains the same workflow identity.
 
-- `READY`, `ADMITTED`, `SUCCEEDED`, `FAILED`, and `CANCELLED` logical states;
-- append-only attempt ordinals and stable DBOS workflow identities;
-- one guarded terminal transaction;
-- a non-empty output reference only on success;
-- explicit operator retry only from `FAILED`;
-- logical cancellation before non-recursive DBOS cancellation delegation;
-- abandoned-work sweep projection;
-- capacity occupancy while admitted; and
-- read-only attempt history and state-count inspection.
+The first version does not add run-completion attempts, operator retry,
+operator cancellation, admission controls, abandoned-work sweep integration,
+or detailed attempt-history inspection. Those are separate capabilities to add
+only if a concrete operational need justifies them.
 
-Extract shared lifecycle helpers only after the two concrete implementations
-show identical logic that can be shared without weakening either foreign-key
-or lock-order contract.
+## 4. Failure and replay
 
-For the first version, use the existing stage-control table and require an
-empty-selector control for a run-completion key. Label-specific completion
-controls should be rejected until runs have an explicit immutable label
-contract.
-
-## 4. Failure, cancellation, and replay
-
-### Async item and completion workflows
+### Async item workflows
 
 - Application exceptions become logical `FAILED` outcomes through the existing
   safe error-summary boundary.
 - `asyncio.CancelledError` follows DBOS cancellation handling and is not
   rewritten as an application exception.
-- A platform cancellation committed before a late workflow return wins.
-- DBOS recovery resumes the same platform attempt and workflow identity.
-- Operator retry appends a new attempt; it never reopens an old attempt.
+- Existing item-stage cancellation, recovery, and operator retry semantics
+  remain unchanged.
+
+### Run-completion workflow
+
+- An application exception records one logical failure through the safe error-
+  summary boundary.
+- `asyncio.CancelledError` remains DBOS cancellation evidence and is not
+  rewritten as an application failure.
+- DBOS recovery replays the same run-completion workflow identity.
+- No run-completion operator retry, cancellation, control, sweep, or attempt-
+  history behavior is promised.
 
 ### Registration
 
 - A failure before a chunk transaction changes nothing in that chunk.
 - A failure after earlier chunks leaves a resumable exact prefix.
 - A declaration conflict fails before further membership writes.
-- Completion failure leaves the run open and explains count, ordinal, or
-  identity disagreement without silently accepting a partial set.
+- Registration closure failure leaves the run open and explains count or ordinal
+  disagreement without silently accepting a partial set.
 
 ### Barrier
 
@@ -475,7 +463,7 @@ contract.
   only after registration completes.
 - Concurrent reconciliation and item handoff either observe nonterminal work or
   create the one completion execution; a later pass repairs the former case.
-- Failure or cancellation of the completion workflow does not change member
+- Interruption or failure of the completion workflow does not change member
   outcomes or reopen registration.
 
 ## 5. Schema and migration
@@ -484,15 +472,17 @@ Add a forward-only Alembic revision after `0001_staging_baseline`.
 
 Recommended migration policy:
 
-1. create membership and run-completion tables and indexes;
+1. create membership and run-completion execution tables and indexes;
 2. add immutable run-registration declaration fields;
 3. backfill one membership for each existing work item's `origin_run_key`, with
    ordinals in stable existing rank order;
-4. compute and store the corresponding membership identity and member count;
-5. preserve existing run, item, stage, attempt, control, and output records;
-6. update immutability triggers for the new declaration and membership facts;
-7. retain irreversible downgrade behavior; and
-8. do not delete or reinterpret existing attempt history.
+4. compute and store the corresponding expected member count;
+5. leave the opaque manifest reference absent for migrated runs because no
+   authoritative value exists, while requiring it for new registrations;
+6. preserve existing run, item, stage, attempt, control, and output records;
+7. update immutability triggers for the new declaration and membership facts;
+8. retain irreversible downgrade behavior; and
+9. do not delete or reinterpret existing attempt history.
 
 Historical membership in non-origin runs cannot be reconstructed because the
 current schema never recorded it. The migration therefore preserves the
@@ -513,10 +503,10 @@ The intended composition is:
 
 ```text
 dr-platform
-  owns: membership, barrier, admission, durable execution, attempts, controls
+  owns: membership, barrier, item-stage orchestration, durable completion outcome
 
 application adapter
-  owns: reference codecs, async bridges, resource instances, cancellation
+  owns: reference codecs, async bridges, resource instances, aggregate semantics
 
 dr-store / dr-providers / dr-exec
   own: their existing storage, provider-call, and process-execution contracts
@@ -545,13 +535,12 @@ implementations inside `dr-platform`.
 - Reject cross-run reuse with a different pipeline or execution configuration.
 - Replay exact chunks and the final completion idempotently.
 - Resume after interruption at every chunk boundary.
-- Reject changed run declaration, ordinal, work facts, or member identity.
+- Reject changed run declaration, ordinal, or work facts at committed
+  positions.
 - Reject duplicate work at different ordinals.
 - Reject truncated completion and noncontiguous ordinals.
-- Reject an incorrect final membership identity.
-- Preserve caller-declared order in paginated inspection.
 - Make run state counts include reused members.
-- Complete and inspect the pinned empty-membership case.
+- Complete and inspect the empty-membership case.
 - Exercise large registrations with bounded transaction and query counts.
 
 ### Barrier and completion
@@ -563,11 +552,9 @@ implementations inside `dr-platform`.
 - Release after registration when all members were already terminal.
 - Release every eligible overlapping run containing one shared work item.
 - Make concurrent reconcilers create one completion execution.
-- Isolate a missing or conflicting registry definition.
-- Enforce completion capacity and pause.
-- Persist completion output, failure, retry, cancellation, and attempt history.
-- Preserve late-completion and cancellation race behavior.
-- Reconcile an abandoned completion workflow through the sweep.
+- Persist one completion success or application-failure outcome.
+- Preserve one stable workflow identity across DBOS replay.
+- Leave member outcomes and registration unchanged when completion fails.
 
 ### Migration and performance
 
@@ -581,8 +568,7 @@ implementations inside `dr-platform`.
 ## 8. Implementation sequence
 
 1. **Finalize owner decisions and vocabulary**
-   - settle names, async-only policy, manifest identity, barrier terminality,
-     completion control scope, and migration policy;
+   - settle names, async-only policy, barrier terminality, and migration policy;
    - update `.defs/terms.toml` and `.defs/contracts.toml` with the selected
      standing contracts.
 
@@ -592,19 +578,18 @@ implementations inside `dr-platform`.
    - qualify one loop-affine async resource.
 
 3. **Exact run membership**
-   - add declaration models, identity vectors, membership persistence, and
-     forward migration;
-   - update submission receipts and every run-scoped query.
+   - add declaration models, membership persistence, and forward migration;
+   - update submission receipts, run counts, statuses, and barrier queries.
 
 4. **Barrier projection**
-   - add bounded eligibility queries and idempotent ready-completion creation;
+   - add bounded eligibility queries and transactional, duplicate-safe
+     completion creation and enqueue;
    - extend dispatcher summaries and diagnostics.
 
 5. **Run-completion execution**
-   - add declarations, wrapping, admission, attempts, handoff, retry,
-     cancellation, sweep, and inspection;
-   - preserve separate concrete persistence until shared lifecycle code is
-     demonstrably identical.
+   - add declarations, one execution record, wrapping, guarded outcome
+     recording, and current-outcome inspection;
+   - keep item-stage operator lifecycle capabilities out of this scope.
 
 6. **Cross-package qualification**
    - exercise a public `dr-store` async resource;
@@ -627,21 +612,15 @@ implementation:
 
 1. **Async compatibility:** async-only hard cut (recommended) or temporary
    sync/async dual support.
-2. **Registration identity:** explicit ordinal plus one pinned ordered identity
-   recipe (recommended), or a different complete-set proof.
-3. **Barrier policy:** release after all members are terminal regardless of
+2. **Barrier policy:** release after all members are terminal regardless of
    outcome (recommended), or select an explicit subset of terminal outcomes
    and thereby make the platform own completion policy.
-4. **Completion persistence:** separate run-completion tables (recommended) or
-   a broader polymorphic execution-scope refactor.
-5. **Completion controls:** empty-selector stage control only (recommended) or
-   a new immutable run-label model.
-6. **Migration:** data-preserving forward migration (recommended) or an
+3. **Migration:** data-preserving forward migration (recommended) or an
    explicitly approved fresh-schema hard cut.
-7. **Naming:** `RunCompletionDefinition` and related terms, or another name that
+4. **Naming:** `RunCompletionDefinition` and related terms, or another name that
    clearly distinguishes the execution from cleanup/finalization and from an
    item stage.
-8. **Cross-run work compatibility:** require exact pipeline and execution
+5. **Cross-run work compatibility:** require exact pipeline and execution
    configuration agreement before reusing work (recommended), or redefine work
    execution provenance independently of its origin run.
 
@@ -651,12 +630,13 @@ This effort is complete when:
 
 - application stage workflows are async and can reuse a loop-affine async
   resource safely;
-- every completed submission run has a verified exact ordered membership set;
+- every completed submission run has one closed persisted ordered membership
+  with the declared count and contiguous ordinals;
 - overlapping runs retain independent membership and correct status counts;
 - an optional run-completion execution is released exactly once after all
   members become terminal;
-- run completion has durable attempts, controls, recovery, retry,
-  cancellation, and inspection;
+- run completion records at most one durable success or application-failure
+  outcome under one stable workflow identity;
 - no platform contract interprets provider, process, storage, evaluation, or
   reward meaning;
 - migrations preserve existing ledger evidence under the selected migration

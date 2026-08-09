@@ -7,8 +7,7 @@
 name = "run registration declaration"
 definition = """
 The immutable caller declaration that fixes a submission run's expected member \
-count, ordered membership identity, and opaque manifest reference before \
-membership registration begins."""
+count and opaque manifest reference before membership registration begins."""
 exported_symbols = ["RunRegistrationDeclaration"]
 part_of = ["submission run"]
 
@@ -24,18 +23,10 @@ part_of = ["run membership"]
 [[terms]]
 name = "run membership"
 definition = """
-The exact immutable ordered set of run members belonging to one submission \
-run. A work item may belong to multiple compatible runs but occurs at most \
-once in each run."""
+The exact ordered set of run members belonging to one submission run, append-\
+only during registration and immutable after closure. A work item may belong \
+to multiple compatible runs but occurs at most once in each run."""
 part_of = ["submission run"]
-
-[[terms]]
-name = "run membership identity"
-definition = """
-The versioned identity of one exact ordered run membership, derived from each \
-member's ordinal and immutable work facts. It proves membership completeness \
-and order without resolving the run's manifest."""
-part_of = ["run registration declaration", "run membership"]
 
 [[terms]]
 name = "run barrier"
@@ -57,23 +48,16 @@ part_of = ["pipeline definition"]
 [[terms]]
 name = "run completion execution"
 definition = """
-One logical execution of a pipeline's run completion for one submission run \
-across one or more attempts. At most one such execution belongs to a run."""
+One durable execution of a pipeline's run completion for one submission run, \
+under one stable workflow identity. At most one such execution belongs to a \
+run."""
 part_of = ["run completion", "submission run"]
-
-[[terms]]
-name = "run completion attempt"
-definition = """
-One attempt in a run completion execution's ordered history, with fixed \
-identity and provenance and lifecycle facts filled at most once."""
-is_a = ["attempt"]
-part_of = ["run completion execution"]
 
 [[terms]]
 name = "run completion payload"
 definition = """
-The compact immutable run identity, registration, terminal-count, and attempt \
-facts supplied when deriving a run completion operation's arguments. It does \
-not contain or resolve the run members' application-owned outputs."""
+The compact immutable run identity, registration, and terminal-count facts \
+supplied when deriving a run completion operation's arguments. It does not \
+contain or resolve the run members' application-owned outputs."""
 exported_symbols = ["RunCompletionPayload"]
 part_of = ["run completion execution"]
