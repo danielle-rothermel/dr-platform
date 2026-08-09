@@ -6,58 +6,55 @@
 [[terms]]
 name = "run registration declaration"
 definition = """
-The immutable caller declaration that fixes a submission run's expected member \
-count and opaque manifest reference before membership registration begins."""
+The immutable declaration fixing a submission run's expected member count and \
+opaque manifest reference before registration."""
 exported_symbols = ["RunRegistrationDeclaration"]
 part_of = ["submission run"]
 
 [[terms]]
 name = "run member"
 definition = """
-One work item's ordered inclusion in a submission run, independent of which \
-run first created the work item. It fixes one ordinal and the immutable work \
-facts bound at that position."""
+One work item's ordered inclusion in a submission run, binding it to one \
+ordinal independently of its origin run."""
 exported_symbols = ["RunMemberInput"]
 part_of = ["run membership"]
 
 [[terms]]
 name = "run membership"
 definition = """
-The exact ordered set of run members belonging to one submission run, append-\
-only during registration and immutable after closure. A work item may belong \
-to multiple compatible runs but occurs at most once in each run."""
+A submission run's ordered member set, append-only during registration and \
+immutable after closure. Work appears at most once per run but may belong to \
+multiple compatible runs."""
 part_of = ["submission run"]
 
 [[terms]]
 name = "run barrier"
 definition = """
-The run-level eligibility boundary satisfied after registration is complete \
-and every exact member's current item stage is terminal. It represents \
-execution completeness independently of member outcomes or domain acceptance."""
+The eligibility boundary satisfied when registration is complete and every \
+member's current item stage is terminal, regardless of outcome or domain \
+acceptance."""
 part_of = ["submission run"]
 
 [[terms]]
 name = "run completion"
 definition = """
-An optional pipeline-declared durable operation for one submission run that \
-becomes eligible after the run barrier is satisfied. It is separate from the \
-linear item-stage sequence and is not a graph node."""
+An optional pipeline-declared durable run-level operation eligible after the \
+run barrier. It is neither an item stage nor a graph node."""
 exported_symbols = ["RunCompletionDefinition"]
 part_of = ["pipeline definition"]
 
 [[terms]]
 name = "run completion execution"
 definition = """
-One durable execution of a pipeline's run completion for one submission run, \
-under one stable workflow identity. At most one such execution belongs to a \
-run."""
+The sole durable execution of a run completion for one submission run, \
+identified by a stable workflow identity."""
 part_of = ["run completion", "submission run"]
 
 [[terms]]
 name = "run completion payload"
 definition = """
-The compact immutable run identity, registration, and terminal-count facts \
-supplied when deriving a run completion operation's arguments. It does not \
-contain or resolve the run members' application-owned outputs."""
+The compact immutable run and terminal-count facts used to derive run-\
+completion arguments; it neither contains nor resolves application-owned \
+member outputs."""
 exported_symbols = ["RunCompletionPayload"]
 part_of = ["run completion execution"]

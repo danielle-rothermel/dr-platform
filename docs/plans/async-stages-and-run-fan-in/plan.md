@@ -359,7 +359,7 @@ A run is eligible for completion when:
 
 1. submission/registration is completed;
 2. it declares a run-completion definition;
-3. every exact membership has a terminal current item stage; and
+3. every member has a terminal current item stage; and
 4. no completion execution already exists for the run.
 
 Terminal means `SUCCEEDED`, `FAILED`, or `CANCELLED`. The platform releases the

@@ -2,13 +2,12 @@
 # are discussion artifacts and are not yet binding repository contracts.
 
 [[contracts]]
-title = "Application workflows use one async boundary"
+title = "Application workflows are async"
 statement = """
-Platform-managed item-stage and run-completion application workflows are \
-coroutine functions awaited by platform-owned wrappers. Argument derivation \
-remains synchronous and must not perform external I/O. Ledger mutation remains \
-synchronous, and coroutine cancellation is not recorded as application \
-failure."""
+Platform-managed item-stage and run-completion workflows are async and awaited \
+by platform wrappers. Argument derivation remains synchronous and must not \
+perform external I/O; ledger mutation remains synchronous, and coroutine \
+cancellation is not an application failure."""
 rationale = """
 One async application boundary permits loop-affine resources and async storage \
 without duplicating the synchronous transactional ledger or extending \
@@ -17,35 +16,31 @@ date = "2026-08-08"
 check = "planned: uv run pytest -q tests/pipeline/test_definitions.py tests/execution/test_async_workflow.py"
 
 [[contracts]]
-title = "Async resource lifecycle stays application-owned"
+title = "Applications own workflow resources"
 statement = """
-Applications own the creation and closure of resources supplied to their \
-workflows. The platform does not construct, resolve, or close application \
-storage, provider, or process clients."""
+Applications create and close workflow resources; the platform does not \
+construct, resolve, or close storage, provider, or process clients."""
 rationale = """
-Resource ownership must stay with the component that knows client semantics \
-and shutdown requirements without making the platform promise a particular \
-event-loop or shutdown sequence."""
+Resource owners know their client and shutdown semantics; the platform promises \
+no event-loop or shutdown sequence."""
 date = "2026-08-08"
 check = "planned: uv run pytest -q tests/execution/test_async_workflow.py -k 'resource_owner'"
 
 [[contracts]]
-title = "Run registration closes one ordered membership"
+title = "Registration closes ordered membership"
 statement = """
-A submission run declares its expected member count and opaque manifest \
-reference before registration. Registration may resume in bounded idempotent \
-chunks, but closes only when the persisted membership has the expected count, \
-contiguous ordinals, and no duplicate work items; closure makes that ordered \
-membership immutable."""
+Before registration, a run declares its expected member count and opaque \
+manifest reference. Bounded idempotent registration closes only when \
+membership has that count, contiguous ordinals, and unique work items; closure \
+freezes membership."""
 rationale = """
-Explicit closure gives fan-in one complete persisted member set and rejects \
-truncation or duplication without requiring callers and the platform to share \
-a versioned whole-set identity recipe."""
+This rejects truncation and duplication without a shared whole-set identity \
+protocol."""
 date = "2026-08-08"
 check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'registration or ordinal or duplicate'"
 
 [[contracts]]
-title = "Membership and origin are independent facts"
+title = "Membership is distinct from origin"
 statement = """
 Every submission run records its own membership edges, including edges to \
 compatible work items created by another run. Origin records creation \
@@ -59,7 +54,7 @@ date = "2026-08-08"
 check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'overlapping or origin or migration'"
 
 [[contracts]]
-title = "Cross-run work reuse preserves execution provenance"
+title = "Work reuse preserves execution provenance"
 statement = """
 A run may reuse an existing campaign-and-work identity only when its pipeline \
 key, pipeline version, and execution-configuration reference exactly match the \
@@ -73,9 +68,9 @@ date = "2026-08-08"
 check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'compatible or provenance'"
 
 [[contracts]]
-title = "Run-scoped inspection follows membership"
+title = "Run inspection follows membership"
 statement = """
-Run counts, status queries, and completion eligibility derive through exact run \
+Run counts, status queries, and completion eligibility derive through run \
 membership rather than work origin. These reads remain bounded or aggregate \
 without promising a general member-listing API."""
 rationale = """
@@ -86,13 +81,11 @@ date = "2026-08-08"
 check = "planned: uv run pytest -q tests/inspection/test_run_membership.py"
 
 [[contracts]]
-title = "The run barrier projects terminal completeness once"
+title = "Run barrier releases completion once"
 statement = """
-A run whose registration is complete and that declares a run completion \
-becomes eligible only after every exact member's current item stage is \
-succeeded, failed, or cancelled. Reconciliation examines bounded pages, and \
-persisted uniqueness prevents concurrent passes from creating duplicate run \
-completion executions."""
+A registration-complete run that declares completion becomes eligible when \
+every member's current stage is succeeded, failed, or cancelled. Reconciliation \
+is bounded, and persisted uniqueness prevents duplicate completion executions."""
 rationale = """
 Terminality is durable platform evidence, while experiment acceptance remains \
 application policy. A bounded idempotent projection avoids polling races, \
@@ -101,9 +94,9 @@ date = "2026-08-08"
 check = "planned: uv run pytest -q tests/completion/test_run_barrier.py"
 
 [[contracts]]
-title = "Run completion is separate from item pipelines"
+title = "Run completion is outside item pipelines"
 statement = """
-Run completion is one optional run-scoped execution after the exact members \
+Run completion is one optional run-scoped execution after the members \
 settle, not an item stage or graph edge. Its payload contains compact immutable \
 run facts; applications use their manifest and application-owned data to \
 resolve member results and own aggregate and acceptance semantics."""
@@ -115,15 +108,13 @@ date = "2026-08-08"
 check = "planned: uv run pytest -q tests/pipeline/test_definitions.py tests/completion/test_run_payload.py"
 
 [[contracts]]
-title = "Run completion records one durable outcome"
+title = "Run completion records one outcome"
 statement = """
-A run completion executes under one stable durable-workflow identity and \
-records at most one terminal success or application-failure outcome. Success \
-records one non-empty output reference, and durable-workflow replay preserves \
-the same execution identity."""
+Run completion uses one stable workflow identity and records at most one \
+terminal success or application failure. Success requires a non-empty output \
+reference; replay preserves identity."""
 rationale = """
-This establishes durable fan-in without duplicating the item-stage operator \
-lifecycle. Run-completion retry, cancellation, admission controls, abandonment \
-sweep, and attempt-history inspection are not promised by this contract."""
+This provides durable fan-in without retry, cancellation, controls, sweep, or \
+attempt-history guarantees."""
 date = "2026-08-08"
 check = "planned: uv run pytest -q tests/completion/test_run_execution.py"
