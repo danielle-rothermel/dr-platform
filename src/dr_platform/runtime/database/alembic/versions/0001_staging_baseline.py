@@ -48,6 +48,10 @@ def upgrade() -> None:
     prefix = _prefix()
     schema = StagingSchema(prefix)
     schema.metadata.create_all(op.get_bind(), checkfirst=False)
+    op.bulk_insert(
+        schema.run_barrier_cursor,
+        [{"singleton": True, "last_run_key": None}],
+    )
 
     pipeline_runs = _name(prefix, "pipeline_runs")
     run_memberships = _name(prefix, "run_memberships")

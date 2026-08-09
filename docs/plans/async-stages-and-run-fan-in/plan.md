@@ -339,24 +339,29 @@ key in the same pipeline identity.
 
 Register run barrier reconciliation as a scheduled workflow separate from
 admission and sweep. It shares the dispatcher-owned DBOS client but has its own
-cron or interval, batch size, workflow name, diagnostics, and qualification
-target.
+cron or interval, release batch size, candidate budget, workflow name,
+diagnostics, and qualification target. The positive candidate budget is at
+least the release batch size.
 
 Each bounded pass:
 
-1. materializes a stable, indexed, keyset-ordered page of completion candidates
-   before evaluating member state;
-2. performs one bounded parameterized lateral nonterminal probe per candidate;
-3. locks only candidates found eligible, skipping rows locked by a concurrent
-   pass;
-4. advances by keyset across blocked, ineligible, or lock-skipped pages until
-   the release batch or pass budget is exhausted;
+1. acquires the barrier-specific singleton cursor with
+   `FOR UPDATE SKIP LOCKED`; a lock loser performs no candidate scan;
+2. materializes stable, indexed, keyset-ordered pages of completion candidates
+   strictly after the persisted run key;
+3. performs one bounded parameterized lateral nonterminal probe per candidate
+   and counts every evaluated row against the candidate budget, including
+   ineligible and lock-skipped rows;
+4. advances across blocked candidates, wrapping at most once and stopping at
+   the original cursor boundary so a pass never evaluates a candidate twice;
 5. calculates terminal state counts only for locked eligible runs, with one
    grouped query for the page;
 6. records immutable `released_at` and release terminal state counts;
 7. creates and enqueues each run completion execution transactionally using
    only its compact validated platform payload; and
-8. relies on persisted uniqueness to make concurrent passes converge.
+8. transactionally persists the last examined run key, including after a
+   candidate-local release failure, so later candidates make fair progress and
+   the failed release remains retryable after rotation.
 
 The expected starting index is equivalent to:
 

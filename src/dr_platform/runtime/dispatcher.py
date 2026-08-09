@@ -16,6 +16,7 @@ from dr_platform.admission.runner import (
 )
 from dr_platform.completion.barrier import (
     DEFAULT_RUN_BARRIER_BATCH_SIZE,
+    DEFAULT_RUN_BARRIER_CANDIDATE_BUDGET,
     run_barrier_pass,
 )
 from dr_platform.execution._checkpoint import (
@@ -189,6 +190,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
     batch_size: int = DEFAULT_ADMISSION_BATCH_SIZE,
     barrier_cron: str = DEFAULT_RUN_BARRIER_CRON,
     barrier_batch_size: int = DEFAULT_RUN_BARRIER_BATCH_SIZE,
+    barrier_candidate_budget: int = DEFAULT_RUN_BARRIER_CANDIDATE_BUDGET,
     sweep_cron: str | None = None,
     sweep_batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
 ) -> DispatcherRegistration:
@@ -197,6 +199,13 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
     validate_positive_integer(
         barrier_batch_size, label="run barrier batch size"
     )
+    validate_positive_integer(
+        barrier_candidate_budget, label="run barrier candidate budget"
+    )
+    if barrier_candidate_budget < barrier_batch_size:
+        raise ValueError(
+            "run barrier candidate budget must be at least the batch size"
+        )
     if sweep_cron is not None:
         validate_positive_integer(sweep_batch_size, label="sweep batch size")
     validate_database_colocation(
@@ -284,6 +293,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
                 client=client,
                 registry=registry,
                 batch_size=barrier_batch_size,
+                candidate_budget=barrier_candidate_budget,
             )
             if summary.failures:
                 logger.error(

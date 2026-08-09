@@ -395,8 +395,12 @@ recorded ledger.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher
 before `DBOS.launch()`. Admission and run-barrier reconciliation have separate
-schedule and batch settings. Keep the returned dispatcher registration alive
-while the runtime is active. Production-like deployments must also schedule
+schedule and batch settings. The barrier also has a candidate budget, which
+must be at least its release batch size and bounds all evaluated runs, including
+ineligible and lock-skipped candidates. A persisted cursor rotates blocked or
+failed candidates so later runs can make progress. Keep the returned dispatcher
+registration alive while the runtime is active. Production-like deployments
+must also schedule
 `sweep_abandoned_stages`, either through the dispatcher or independently, so
 abandoned workflows do not retain admission capacity indefinitely.
 

@@ -117,13 +117,17 @@ check = "uv run pytest -q tests/inspection/test_run_membership.py"
 title = "Run barrier releases completion once"
 statement = """
 A closed submission run that declares completion releases once when every \
-member's current stage execution is succeeded, failed, or cancelled. Release \
-time and terminal state counts are immutable; later member transitions neither \
-invalidate release nor create another completion execution."""
+member's current stage execution is succeeded, failed, or cancelled. Each \
+scanning pass exclusively advances one persisted barrier cursor, examines at most its \
+candidate budget, and rotates past ineligible, lock-skipped, or failed \
+candidates. Release time and terminal state counts are immutable; later member \
+transitions neither invalidate release nor create another completion \
+execution."""
 rationale = """
 Terminality is durable platform evidence, while experiment acceptance remains \
-application policy. Immutable edge-triggered release avoids cross-run retry \
-fences, duplicate aggregate launch, and unrelated-backlog scans."""
+application policy. Immutable edge-triggered release avoids duplicate aggregate \
+launch, while the bounded fair cursor prevents a permanently nonterminal prefix \
+from starving later runs."""
 date = "2026-08-08"
 check = "uv run pytest -q tests/completion/test_run_barrier.py"
 

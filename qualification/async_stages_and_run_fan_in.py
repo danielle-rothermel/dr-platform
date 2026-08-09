@@ -67,6 +67,7 @@ if TYPE_CHECKING:
 
 ADMISSION_BATCH_SIZE = 200
 BARRIER_BATCH_SIZE = 20
+BARRIER_CANDIDATE_BUDGET = 20
 SCHEDULE_INTERVAL_SECONDS = 5.0
 DECLARED_SCHEDULE_HEADROOM_PERCENT = 44.0
 DECLARED_ADMISSIONS_PER_HOUR = 100_000
@@ -717,6 +718,7 @@ def _dbos_runtime(
         batch_size=ADMISSION_BATCH_SIZE,
         barrier_cron="0 0 0 1 1 *",
         barrier_batch_size=BARRIER_BATCH_SIZE,
+        barrier_candidate_budget=BARRIER_CANDIDATE_BUDGET,
     )
     try:
         DBOS.launch()
@@ -904,12 +906,48 @@ def _run_live_qualification(  # noqa: PLR0912,PLR0915 -- explicit live scenario
                     f"unexpected burst terminal counts: {terminal_counts!r}"
                 )
 
+            for index in range(BARRIER_CANDIDATE_BUDGET):
+                _submit_completion_run(
+                    engine=engine,
+                    registry=registry,
+                    pipeline=pipeline,
+                    run_key=f"qualification-blocked-{index:02d}",
+                    members=(
+                        RunMemberInput(
+                            ordinal=0,
+                            work=WorkInput(
+                                work_key=f"blocked-work-{index:02d}",
+                                input_reference=f"blocked:{index}",
+                                labels={},
+                            ),
+                        ),
+                    ),
+                )
+
+            blocked_summary = run_barrier_pass(
+                engine,
+                client=client,
+                registry=registry,
+                batch_size=BARRIER_BATCH_SIZE,
+                candidate_budget=BARRIER_CANDIDATE_BUDGET,
+            )
+            if (
+                blocked_summary.releases
+                or blocked_summary.failures
+                or blocked_summary.candidates_examined
+                != BARRIER_CANDIDATE_BUDGET
+            ):
+                raise RuntimeError(
+                    "barrier did not stop at the blocked-prefix budget: "
+                    f"{blocked_summary!r}"
+                )
             barrier_started = perf_counter()
             barrier_summary = run_barrier_pass(
                 engine,
                 client=client,
                 registry=registry,
                 batch_size=BARRIER_BATCH_SIZE,
+                candidate_budget=BARRIER_CANDIDATE_BUDGET,
             )
             barrier_elapsed = perf_counter() - barrier_started
             if len(barrier_summary.releases) != BARRIER_BATCH_SIZE:
@@ -920,6 +958,11 @@ def _run_live_qualification(  # noqa: PLR0912,PLR0915 -- explicit live scenario
             if barrier_summary.failures:
                 raise RuntimeError(
                     f"barrier failures: {barrier_summary.failures!r}"
+                )
+            if barrier_summary.candidates_examined != BARRIER_BATCH_SIZE:
+                raise RuntimeError(
+                    "barrier did not resume immediately after the blocked "
+                    f"prefix: {barrier_summary!r}"
                 )
             _wait_for_run_completions(engine, BARRIER_BATCH_SIZE)
             instrumentation.wait_for_completed(

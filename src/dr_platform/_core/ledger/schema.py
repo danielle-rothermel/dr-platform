@@ -146,6 +146,17 @@ class StagingSchema:
             self.pipeline_runs.c.run_key,
         )
 
+        self.run_barrier_cursor = Table(
+            name("run_barrier_cursor"),
+            self.metadata,
+            Column("singleton", Boolean, primary_key=True),
+            Column("last_run_key", Text),
+            CheckConstraint(
+                "singleton",
+                name=name("ck_run_barrier_cursor_singleton"),
+            ),
+        )
+
         self.work_items = Table(
             name("work_items"),
             self.metadata,

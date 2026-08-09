@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     bindparam,
     inspect,
+    select,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -59,6 +60,7 @@ from tests.conftest import NOW, engine_dsn
 
 STAGING_TABLE_SUFFIXES = (
     "pipeline_runs",
+    "run_barrier_cursor",
     "run_memberships",
     "run_completion_executions",
     "work_items",
@@ -469,7 +471,14 @@ def test_custom_prefix_upgrade_matches_runtime_names_and_is_idempotent(
         installed_revision = connection.execute(
             text("SELECT version_num FROM tenant_platform_alembic_version")
         ).scalar_one()
+        barrier_cursor = connection.execute(
+            select(
+                schema.run_barrier_cursor.c.singleton,
+                schema.run_barrier_cursor.c.last_run_key,
+            )
+        ).one()
     assert installed_revision == PLATFORM_HEAD_REVISION
+    assert barrier_cursor == (True, None)
 
     first_inventory = _schema_inventory(pg_engine, prefix=prefix)
     first_triggers = _trigger_inventory(pg_engine, prefix=prefix)

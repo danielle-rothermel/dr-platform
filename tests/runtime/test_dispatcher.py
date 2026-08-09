@@ -109,7 +109,12 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
 
     def fake_barrier(engine: object, **kwargs: object) -> RunBarrierSummary:
         calls.append(("barrier", (engine, kwargs)))
-        return RunBarrierSummary(releases=(), failures=())
+        return RunBarrierSummary(
+            releases=(),
+            failures=(),
+            cursor_acquired=True,
+            candidates_examined=0,
+        )
 
     monkeypatch.setattr(dispatcher, "run_barrier_pass", fake_barrier)
     config = PlatformDbosConfig(
@@ -127,6 +132,7 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
         batch_size=17,
         barrier_cron="*/7 * * * * *",
         barrier_batch_size=23,
+        barrier_candidate_budget=29,
     )
     registration.workflow(
         datetime(2026, 7, 17, tzinfo=UTC),
@@ -155,10 +161,37 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
         "barrier",
         (
             engine,
-            {"client": client, "registry": registry, "batch_size": 23},
+            {
+                "client": client,
+                "registry": registry,
+                "batch_size": 23,
+                "candidate_budget": 29,
+            },
         ),
     )
     assert client.destroyed
+
+
+@pytest.mark.parametrize("candidate_budget", [0, 4])
+def test_registration_validates_run_barrier_candidate_budget(
+    candidate_budget: int,
+) -> None:
+    config = PlatformDbosConfig(
+        database_url="postgresql+psycopg://user:secret@db/platform",
+        system_database_url="postgresql+psycopg://user:secret@db/platform",
+    )
+    engine = create_engine(config.database_url)
+    try:
+        with pytest.raises(ValueError, match="run barrier candidate budget"):
+            dispatcher.register_scheduled_dispatcher(
+                config=config,
+                engine=engine,
+                registry=PipelineRegistry(),
+                barrier_batch_size=5,
+                barrier_candidate_budget=candidate_budget,
+            )
+    finally:
+        engine.dispose()
 
 
 def test_mismatched_stages_are_logged_as_registry_drift_at_error(

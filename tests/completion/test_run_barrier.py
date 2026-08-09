@@ -5,6 +5,7 @@ from datetime import timedelta
 from threading import Event, Lock
 from typing import TYPE_CHECKING, Any, cast
 
+import pytest
 from sqlalchemy import Engine, create_engine, select, text, update
 
 from dr_platform._core.identities import (
@@ -158,6 +159,14 @@ def _set_states(
                 )
                 .values(**values)
             )
+
+
+def _barrier_cursor(engine: Engine) -> str | None:
+    schema = StagingSchema()
+    with engine.connect() as connection:
+        return connection.execute(
+            select(schema.run_barrier_cursor.c.last_run_key)
+        ).scalar_one()
 
 
 class _RecordingClient:
@@ -327,6 +336,70 @@ def test_failure_isolated_keyset_continuation_fills_enqueue_batch(
     assert [payload["run_key"] for _, payload in client.enqueued] == ["run-b"]
 
 
+def test_failed_release_consumes_budget_rotates_and_remains_retryable(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry("barrier-failure-rotation")
+    for index, run_key in enumerate(("run-a", "run-b", "run-c")):
+        _submit_run(
+            pg_engine,
+            registry,
+            pipeline,
+            run_key=run_key,
+            members=_members(index),
+        )
+    _set_states(
+        pg_engine,
+        {
+            "work-0": StageExecutionState.SUCCEEDED,
+            "work-1": StageExecutionState.SUCCEEDED,
+            "work-2": StageExecutionState.SUCCEEDED,
+        },
+    )
+    failing = _RecordingClient(fail_runs=frozenset({"run-a"}))
+
+    first = run_barrier_pass(
+        pg_engine,
+        client=cast("DBOSClient", failing),
+        registry=registry,
+        batch_size=1,
+        candidate_budget=1,
+    )
+    second = run_barrier_pass(
+        pg_engine,
+        client=cast("DBOSClient", failing),
+        registry=registry,
+        batch_size=1,
+        candidate_budget=1,
+    )
+    third = run_barrier_pass(
+        pg_engine,
+        client=cast("DBOSClient", failing),
+        registry=registry,
+        batch_size=1,
+        candidate_budget=1,
+    )
+    recovered = _RecordingClient()
+    fourth = run_barrier_pass(
+        pg_engine,
+        client=cast("DBOSClient", recovered),
+        registry=registry,
+        batch_size=1,
+        candidate_budget=1,
+    )
+
+    assert first.candidates_examined == 1
+    assert [failure.run_key for failure in first.failures] == [RunKey("run-a")]
+    assert [release.run_key for release in second.releases] == [
+        RunKey("run-b")
+    ]
+    assert [release.run_key for release in third.releases] == [RunKey("run-c")]
+    assert [release.run_key for release in fourth.releases] == [
+        RunKey("run-a")
+    ]
+
+
 def test_all_blocked_first_page_advances_to_later_eligible_run(
     pg_engine: Engine,
 ) -> None:
@@ -361,6 +434,103 @@ def test_all_blocked_first_page_advances_to_later_eligible_run(
     assert [release.run_key for release in summary.releases] == [
         RunKey("run-b-eligible")
     ]
+
+
+def test_candidate_budget_bounds_blocked_population_and_next_pass_resumes(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry("barrier-budget")
+    for index in range(7):
+        _submit_run(
+            pg_engine,
+            registry,
+            pipeline,
+            run_key=f"run-{index:02d}-blocked",
+            members=_members(index),
+        )
+    _submit_run(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-07-eligible",
+        members=_members(7),
+    )
+    _set_states(pg_engine, {"work-7": StageExecutionState.SUCCEEDED})
+    client = _RecordingClient()
+
+    first = run_barrier_pass(
+        pg_engine,
+        client=cast("DBOSClient", client),
+        registry=registry,
+        batch_size=1,
+        candidate_budget=4,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+    second = run_barrier_pass(
+        pg_engine,
+        client=cast("DBOSClient", client),
+        registry=registry,
+        batch_size=1,
+        candidate_budget=4,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+
+    assert first.cursor_acquired
+    assert first.candidates_examined == 4
+    assert first.releases == ()
+    assert second.candidates_examined == 4
+    assert [release.run_key for release in second.releases] == [
+        RunKey("run-07-eligible")
+    ]
+    assert _barrier_cursor(pg_engine) == "run-07-eligible"
+
+
+def test_wraparound_stops_at_original_cursor_without_duplicate_evaluation(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry("barrier-wrap")
+    for index in range(3):
+        _submit_run(
+            pg_engine,
+            registry,
+            pipeline,
+            run_key=f"run-{index}",
+            members=_members(index),
+        )
+    with pg_engine.begin() as connection:
+        connection.execute(
+            update(schema.run_barrier_cursor).values(last_run_key="run-1")
+        )
+
+    summary = run_barrier_pass(
+        pg_engine,
+        client=cast("DBOSClient", _RecordingClient()),
+        registry=registry,
+        batch_size=1,
+        candidate_budget=3,
+    )
+
+    assert summary.releases == ()
+    assert summary.candidates_examined == 3
+    assert _barrier_cursor(pg_engine) == "run-1"
+
+
+def test_missing_required_cursor_fails_loudly(pg_engine: Engine) -> None:
+    schema = _migrate(pg_engine)
+    registry, _pipeline = _registry("barrier-missing-cursor")
+    with pg_engine.begin() as connection:
+        connection.execute(schema.run_barrier_cursor.delete())
+
+    with pytest.raises(
+        RuntimeError, match="required run barrier cursor row is missing"
+    ):
+        run_barrier_pass(
+            pg_engine,
+            client=cast("DBOSClient", _RecordingClient()),
+            registry=registry,
+        )
 
 
 def test_overlapping_runs_each_release(pg_engine: Engine) -> None:
@@ -401,7 +571,7 @@ def test_overlapping_runs_each_release(pg_engine: Engine) -> None:
     }
 
 
-def test_lock_skipped_page_advances_and_concurrent_reconcilers_release_once(
+def test_cursor_lock_loser_does_not_scan_or_duplicate_completion(
     pg_engine: Engine,
 ) -> None:
     _migrate(pg_engine)
@@ -475,16 +645,28 @@ def test_lock_skipped_page_advances_and_concurrent_reconcilers_release_once(
                 clock=lambda: NOW + timedelta(seconds=1),
             )
             client.release_first_transaction.set()
-            summaries = (first.result(), second)
+            first_summary = first.result()
+            third = run_barrier_pass(
+                engines[1],
+                client=cast("DBOSClient", client),
+                registry=registry,
+                batch_size=1,
+                clock=lambda: NOW + timedelta(seconds=2),
+            )
     finally:
         client.release_first_transaction.set()
         for engine in engines:
             engine.dispose()
 
-    assert all(summary.failures == () for summary in summaries)
+    assert first_summary.failures == ()
+    assert second.failures == ()
+    assert second.cursor_acquired is False
+    assert second.candidates_examined == 0
+    assert second.releases == ()
+    assert third.failures == ()
     assert {
         release.run_key
-        for summary in summaries
+        for summary in (first_summary, third)
         for release in summary.releases
     } == {RunKey("run-a"), RunKey("run-b")}
     assert sorted(payload["run_key"] for _, payload in client.enqueued) == [
