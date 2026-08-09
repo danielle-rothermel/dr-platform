@@ -139,6 +139,12 @@ class StagingSchema:
                 "run_completion_key IS NOT NULL AND released_at IS NULL"
             ),
         )
+        Index(
+            name("ix_pipeline_runs_campaign_cursor"),
+            self.pipeline_runs.c.campaign_key,
+            self.pipeline_runs.c.created_at,
+            self.pipeline_runs.c.run_key,
+        )
 
         self.work_items = Table(
             name("work_items"),

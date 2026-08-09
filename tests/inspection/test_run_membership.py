@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from sqlalchemy import Engine, event, update
+from sqlalchemy import Engine, event, text, update
 
 from dr_platform._core.identities import PipelineKey, RunKey, StageKey
 from dr_platform._core.ledger.states import StageExecutionState
-from dr_platform.inspection.campaigns import list_runs
+from dr_platform.inspection.campaigns import _run_summary_statement, list_runs
 from dr_platform.inspection.statuses import (
     StateCount,
     bulk_run_state_counts,
@@ -201,3 +201,195 @@ def test_paged_run_count_consumer_has_no_per_run_queries(
         event.remove(pg_engine, "before_cursor_execute", before_cursor_execute)
     assert len(counts) == 5
     assert statements == 3
+
+
+def test_list_runs_bounds_planner_work_to_selected_page(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    page_size = 5
+    page_members_per_run = 2
+    history_run_count = 2_000
+    history_members_per_run = 50
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO platform_pipeline_runs (
+                    run_key, campaign_key, pipeline_key, pipeline_version,
+                    execution_config_reference, expected_member_count,
+                    created_at
+                )
+                SELECT
+                    'page-' || lpad(run_index::text, 4, '0'),
+                    'campaign-plan', 'inspection-membership', 1,
+                    'config:plan', :members_per_run, :created_at
+                FROM generate_series(0, :last_run_index) AS run_index
+                """
+            ),
+            {
+                "created_at": NOW,
+                "last_run_index": page_size - 1,
+                "members_per_run": page_members_per_run,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO platform_pipeline_runs (
+                    run_key, campaign_key, pipeline_key, pipeline_version,
+                    execution_config_reference, expected_member_count,
+                    created_at
+                )
+                SELECT
+                    'history-' || lpad(run_index::text, 4, '0'),
+                    'campaign-plan', 'inspection-membership', 1,
+                    'config:plan', :members_per_run, :created_at
+                FROM generate_series(0, :last_run_index) AS run_index
+                """
+            ),
+            {
+                "created_at": NOW.replace(year=NOW.year + 1),
+                "last_run_index": history_run_count - 1,
+                "members_per_run": history_members_per_run,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                WITH inserted_work AS (
+                    INSERT INTO platform_work_items (
+                        campaign_key, work_key, origin_run_key,
+                        input_reference, labels, rank
+                    )
+                    SELECT
+                        'campaign-plan',
+                        'page-work-' || member_index::text,
+                        'page-' || lpad(
+                            (member_index / :members_per_run)::text,
+                            4,
+                            '0'
+                        ),
+                        'input:page-' || member_index::text,
+                        '{}'::jsonb,
+                        member_index + 1
+                    FROM generate_series(0, :last_member_index)
+                        AS member_index
+                    RETURNING work_item_id, origin_run_key, rank
+                )
+                INSERT INTO platform_run_memberships (
+                    run_key, member_ordinal, work_item_id
+                )
+                SELECT
+                    origin_run_key,
+                    (rank - 1) % :members_per_run,
+                    work_item_id
+                FROM inserted_work
+                """
+            ),
+            {
+                "last_member_index": (page_size * page_members_per_run - 1),
+                "members_per_run": page_members_per_run,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                WITH inserted_work AS (
+                    INSERT INTO platform_work_items (
+                        campaign_key, work_key, origin_run_key,
+                        input_reference, labels, rank
+                    )
+                    SELECT
+                        'campaign-plan',
+                        'history-work-' || member_index::text,
+                        'history-' || lpad(
+                            (member_index / :members_per_run)::text,
+                            4,
+                            '0'
+                        ),
+                        'input:history-' || member_index::text,
+                        '{}'::jsonb,
+                        member_index + :first_rank
+                    FROM generate_series(0, :last_member_index)
+                        AS member_index
+                    RETURNING work_item_id, origin_run_key, rank
+                )
+                INSERT INTO platform_run_memberships (
+                    run_key, member_ordinal, work_item_id
+                )
+                SELECT
+                    origin_run_key,
+                    (rank - :first_rank) % :members_per_run,
+                    work_item_id
+                FROM inserted_work
+                """
+            ),
+            {
+                "first_rank": page_size * page_members_per_run + 1,
+                "last_member_index": (
+                    history_run_count * history_members_per_run - 1
+                ),
+                "members_per_run": history_members_per_run,
+            },
+        )
+
+    page = list_runs("campaign-plan", engine=pg_engine, limit=page_size)
+    assert tuple(str(run.run_key) for run in page) == tuple(
+        f"page-{index:04d}" for index in range(page_size)
+    )
+    assert all(
+        run.registered_member_count == page_members_per_run for run in page
+    )
+
+    statement = _run_summary_statement(
+        schema,
+        campaign_key="campaign-plan",
+        limit=page_size,
+        after=None,
+    )
+    sql = str(
+        statement.compile(
+            dialect=pg_engine.dialect,
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text("ANALYZE platform_pipeline_runs, platform_run_memberships")
+        )
+        plan = connection.execute(
+            text(
+                "EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, "
+                f"TIMING OFF, SUMMARY OFF) {sql}"
+            )
+        ).scalar_one()
+
+    visited_rows: dict[str, int] = {
+        "platform_pipeline_runs": 0,
+        "platform_run_memberships": 0,
+    }
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            relation_name = value.get("Relation Name")
+            if (
+                isinstance(relation_name, str)
+                and relation_name in visited_rows
+            ):
+                actual_rows = value.get("Actual Rows")
+                actual_loops = value.get("Actual Loops")
+                assert isinstance(actual_rows, int)
+                assert isinstance(actual_loops, int)
+                visited_rows[relation_name] += actual_rows * actual_loops
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(plan)
+    assert visited_rows["platform_pipeline_runs"] <= page_size
+    assert visited_rows["platform_run_memberships"] <= (
+        page_size * page_members_per_run
+    )
