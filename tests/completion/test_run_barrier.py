@@ -582,7 +582,7 @@ def test_barrier_candidate_and_anti_join_indexes_with_sparse_history(
         registry,
         pipeline,
         run_key="run-waiting",
-        members=_members(3_000),
+        members=_members(*range(2_000)),
     )
     _submit_run(
         pg_engine,
