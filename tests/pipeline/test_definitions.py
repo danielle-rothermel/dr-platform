@@ -26,6 +26,10 @@ def _args_for(*args: object) -> tuple[object, ...]:
     return args
 
 
+async def _async_args_for(*args: object) -> tuple[object, ...]:
+    return args
+
+
 def _stage(
     key: str,
     *,
@@ -101,6 +105,26 @@ def test_stage_rejects_a_synchronous_workflow() -> None:
 
     with pytest.raises(TypeError, match="async callable"):
         _stage("execute", workflow=workflow)  # ty: ignore[invalid-argument-type]
+
+
+def test_stage_rejects_async_argument_derivation() -> None:
+    with pytest.raises(TypeError, match="args_for must be synchronous"):
+        StageDefinition(
+            key=StageKey("execute"),
+            queue_name="execution",
+            workflow=_workflow,
+            args_for=_async_args_for,  # ty: ignore[invalid-argument-type]
+        )
+
+
+def test_run_completion_rejects_async_argument_derivation() -> None:
+    with pytest.raises(TypeError, match="args_for must be synchronous"):
+        RunCompletionDefinition(
+            key=RunCompletionKey("aggregate"),
+            queue_name="completion",
+            workflow=_workflow,
+            args_for=_async_args_for,  # ty: ignore[invalid-argument-type]
+        )
 
 
 def test_run_completion_key_cannot_collide_with_a_stage_key() -> None:

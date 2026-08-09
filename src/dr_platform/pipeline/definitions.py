@@ -21,6 +21,13 @@ def _validate_async_workflow(value: object) -> None:
         raise TypeError("workflow must be an async callable")
 
 
+def _validate_args_for(value: object) -> None:
+    if not callable(value):
+        raise TypeError("args_for must be callable")
+    if inspect.iscoroutinefunction(value):
+        raise TypeError("args_for must be synchronous")
+
+
 @dataclass(frozen=True, slots=True)
 class PipelineIdentity:
     key: PipelineKey
@@ -50,8 +57,7 @@ class StageDefinition:
             raise TypeError("stage key must be a StageKey")
         validate_key_value(self.queue_name, label="queue name")
         _validate_async_workflow(self.workflow)
-        if not callable(self.args_for):
-            raise TypeError("args_for must be callable")
+        _validate_args_for(self.args_for)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -66,8 +72,7 @@ class RunCompletionDefinition:
             raise TypeError("run completion key must be a RunCompletionKey")
         validate_key_value(self.queue_name, label="queue name")
         _validate_async_workflow(self.workflow)
-        if not callable(self.args_for):
-            raise TypeError("args_for must be callable")
+        _validate_args_for(self.args_for)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
