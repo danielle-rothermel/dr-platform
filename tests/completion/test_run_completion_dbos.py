@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import pytest
 from dbos import DBOS, Queue
 from sqlalchemy import Engine, select
 
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
 def test_run_completion_payload_executes_through_dbos(
     clean_pg: str,
     pg_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _migrate(pg_engine)
     suffix = uuid4().hex[:10]
@@ -141,6 +143,10 @@ def test_run_completion_payload_executes_through_dbos(
     initialize_dbos_runtime(config, app_name=f"drp-completion-{suffix}")
     registration = None
     try:
+        # Keep DBOS workflow registration without competing scheduler pollers.
+        monkeypatch.setattr(
+            DBOS, "scheduled", lambda _cron: lambda workflow: workflow
+        )
         registration = register_scheduled_dispatcher(
             config=config,
             engine=pg_engine,
@@ -166,6 +172,15 @@ def test_run_completion_payload_executes_through_dbos(
         } == {"output:input:0", "output:input:1"}
 
         registration.barrier_workflow(NOW, NOW)
+        with pg_engine.connect() as connection:
+            assert (
+                connection.execute(
+                    select(schema.pipeline_runs.c.released_at).where(
+                        schema.pipeline_runs.c.run_key == "run-1"
+                    )
+                ).scalar_one()
+                is not None
+            )
         execution = inspect_run_completion("run-1", engine=pg_engine)
         assert (
             _await_dbos_result(
