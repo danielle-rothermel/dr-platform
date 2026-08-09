@@ -24,7 +24,9 @@ def _validate_async_workflow(value: object) -> None:
 def _validate_args_for(value: object) -> None:
     if not callable(value):
         raise TypeError("args_for must be callable")
-    if inspect.iscoroutinefunction(value):
+    if inspect.iscoroutinefunction(value) or inspect.iscoroutinefunction(
+        value.__call__
+    ):
         raise TypeError("args_for must be synchronous")
 
 

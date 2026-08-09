@@ -30,6 +30,16 @@ async def _async_args_for(*args: object) -> tuple[object, ...]:
     return args
 
 
+class _AsyncArgsFor:
+    async def __call__(self, *args: object) -> tuple[object, ...]:
+        return args
+
+
+class _SynchronousArgsFor:
+    def __call__(self, *args: object) -> tuple[object, ...]:
+        return args
+
+
 def _stage(
     key: str,
     *,
@@ -125,6 +135,46 @@ def test_run_completion_rejects_async_argument_derivation() -> None:
             workflow=_workflow,
             args_for=_async_args_for,  # ty: ignore[invalid-argument-type]
         )
+
+
+def test_stage_rejects_async_callable_object_args_for() -> None:
+    with pytest.raises(TypeError, match="args_for must be synchronous"):
+        StageDefinition(
+            key=StageKey("execute"),
+            queue_name="execution",
+            workflow=_workflow,
+            args_for=_AsyncArgsFor(),  # ty: ignore[invalid-argument-type]
+        )
+
+
+def test_run_completion_rejects_async_callable_object_args_for() -> None:
+    with pytest.raises(TypeError, match="args_for must be synchronous"):
+        RunCompletionDefinition(
+            key=RunCompletionKey("aggregate"),
+            queue_name="completion",
+            workflow=_workflow,
+            args_for=_AsyncArgsFor(),  # ty: ignore[invalid-argument-type]
+        )
+
+
+def test_definitions_accept_synchronous_callable_object_args_for() -> None:
+    args_for = _SynchronousArgsFor()
+
+    stage = StageDefinition(
+        key=StageKey("execute"),
+        queue_name="execution",
+        workflow=_workflow,
+        args_for=args_for,
+    )
+    completion = RunCompletionDefinition(
+        key=RunCompletionKey("aggregate"),
+        queue_name="completion",
+        workflow=_workflow,
+        args_for=args_for,
+    )
+
+    assert stage.args_for is args_for
+    assert completion.args_for is args_for
 
 
 def test_run_completion_key_cannot_collide_with_a_stage_key() -> None:
