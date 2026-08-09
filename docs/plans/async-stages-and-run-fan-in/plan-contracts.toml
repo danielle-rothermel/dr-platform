@@ -1,0 +1,129 @@
+# Proposed additions for the async-stages-and-run-fan-in plan. These contracts
+# are discussion artifacts and are not yet binding repository contracts.
+
+[[contracts]]
+title = "Application workflows use one async boundary"
+statement = """
+Platform-managed item-stage and run-completion application workflows are \
+coroutine functions awaited by platform-owned wrappers. Argument derivation \
+and ledger mutation remain synchronous, and admission transactions perform no \
+external I/O; coroutine cancellation is not recorded as application failure."""
+rationale = """
+One async application boundary permits loop-affine resources and async storage \
+without duplicating the synchronous transactional ledger or extending \
+database transactions across application effects."""
+date = "2026-08-08"
+check = "planned: uv run pytest -q tests/pipeline/test_definitions.py tests/execution/test_async_workflow.py"
+
+[[contracts]]
+title = "Async resource lifecycle stays application-owned"
+statement = """
+Applications create loop-affine resources on the long-lived event loop that \
+uses them, supply them to their workflows, and drain them after admission \
+stops. The platform does not construct, resolve, or close application storage, \
+provider, or process clients."""
+rationale = """
+Resource ownership must stay with the component that knows client semantics \
+and shutdown requirements. Platform ownership would couple durable scheduling \
+to particular storage, provider, or execution implementations."""
+date = "2026-08-08"
+check = "planned: uv run pytest -q tests/execution/test_async_workflow.py -k 'loop_affine or shutdown'"
+
+[[contracts]]
+title = "Run registration proves exact ordered membership"
+statement = """
+A submission run declares its expected member count, ordered membership \
+identity, and opaque manifest reference before registration. Registration may \
+resume in bounded idempotent chunks, but closes only when the exact count, \
+contiguous ordinals, and recomputed identity match the declaration."""
+rationale = """
+An immutable complete-set proof prevents truncated, reordered, duplicated, or \
+altered submission streams from being accepted as a completed run while \
+preserving safe recovery after any committed chunk."""
+date = "2026-08-08"
+check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'registration or identity or ordinal'"
+
+[[contracts]]
+title = "Membership and origin are independent facts"
+statement = """
+Every submission run records its own membership edges, including edges to \
+compatible work items created by another run. Origin records creation \
+provenance only; it neither substitutes for membership nor authorizes inferred \
+historical membership."""
+rationale = """
+Overlapping runs need independent complete member sets and correct run-scoped \
+counts, while creation provenance must remain immutable and unavailable \
+historical relationships must not be invented."""
+date = "2026-08-08"
+check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'overlapping or origin or migration'"
+
+[[contracts]]
+title = "Cross-run work reuse preserves execution provenance"
+statement = """
+A run may reuse an existing campaign-and-work identity only when its pipeline \
+key, pipeline version, and execution-configuration reference exactly match the \
+work item's origin run. Different execution-defining facts require a different \
+work identity."""
+rationale = """
+One work item has one item-stage execution history. Reusing that history under \
+different execution facts would make its outcome ambiguous and allow a later \
+run to silently reinterpret earlier work."""
+date = "2026-08-08"
+check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'compatible or provenance'"
+
+[[contracts]]
+title = "Run-scoped inspection follows membership"
+statement = """
+Run counts, status queries, member lists, and completion eligibility derive \
+through exact run membership rather than work origin. Member and state readers \
+are bounded or paginated and preserve declared member order."""
+rationale = """
+Membership is the authoritative run scope, including for reused work. Bounded \
+ordered reads keep large runs inspectable without embedding complete result \
+sets in summaries or workflow arguments."""
+date = "2026-08-08"
+check = "planned: uv run pytest -q tests/inspection/test_run_membership.py"
+
+[[contracts]]
+title = "The run barrier projects terminal completeness once"
+statement = """
+A run whose registration is complete and that declares a run completion \
+becomes eligible only after every exact member's current item stage is \
+succeeded, failed, or cancelled. Bounded failure-isolated reconciliation \
+creates at most one ready run completion execution, and concurrent passes \
+converge through persisted uniqueness."""
+rationale = """
+Terminality is durable platform evidence, while experiment acceptance remains \
+application policy. A bounded idempotent projection avoids polling races, \
+duplicate aggregate launch, and unrelated-backlog scans."""
+date = "2026-08-08"
+check = "planned: uv run pytest -q tests/completion/test_run_barrier.py"
+
+[[contracts]]
+title = "Run completion is separate from item pipelines"
+statement = """
+Run completion is one optional run-scoped execution after the exact members \
+settle, not an item stage or graph edge. Its payload contains compact immutable \
+run facts; applications page member results, resolve opaque references, and \
+own aggregate and acceptance semantics."""
+rationale = """
+Keeping fan-in beside the linear item pipeline adds a reusable completeness \
+primitive without turning the platform into a graph engine or importing \
+storage, provider, evaluation, or analysis policy."""
+date = "2026-08-08"
+check = "planned: uv run pytest -q tests/pipeline/test_definitions.py tests/completion/test_run_payload.py"
+
+[[contracts]]
+title = "Run completion preserves the durable execution lifecycle"
+statement = """
+A run completion execution has authoritative logical state, append-only \
+attempts, stable workflow identities, guarded terminal writes, admission \
+control, explicit retry only from failure, logical cancellation before \
+delegation, recovery under the same attempt, abandonment projection, and a \
+non-empty output reference only on success."""
+rationale = """
+Fan-in is durable work rather than a notification. Applying the established \
+execution lifecycle preserves auditability and makes interruption, retry, \
+cancellation, and late-return races converge predictably."""
+date = "2026-08-08"
+check = "planned: uv run pytest -q tests/completion/test_run_lifecycle.py"

@@ -1,0 +1,79 @@
+#:schema ../../../.defs/terms.schema.json
+
+# Proposed additions for the async-stages-and-run-fan-in plan. These terms are
+# discussion artifacts and are not yet part of the authoritative vocabulary.
+
+[[terms]]
+name = "run registration declaration"
+definition = """
+The immutable caller declaration that fixes a submission run's expected member \
+count, ordered membership identity, and opaque manifest reference before \
+membership registration begins."""
+exported_symbols = ["RunRegistrationDeclaration"]
+part_of = ["submission run"]
+
+[[terms]]
+name = "run member"
+definition = """
+One work item's ordered inclusion in a submission run, independent of which \
+run first created the work item. It fixes one ordinal and the immutable work \
+facts bound at that position."""
+exported_symbols = ["RunMemberInput"]
+part_of = ["run membership"]
+
+[[terms]]
+name = "run membership"
+definition = """
+The exact immutable ordered set of run members belonging to one submission \
+run. A work item may belong to multiple compatible runs but occurs at most \
+once in each run."""
+part_of = ["submission run"]
+
+[[terms]]
+name = "run membership identity"
+definition = """
+The versioned identity of one exact ordered run membership, derived from each \
+member's ordinal and immutable work facts. It proves membership completeness \
+and order without resolving the run's manifest."""
+part_of = ["run registration declaration", "run membership"]
+
+[[terms]]
+name = "run barrier"
+definition = """
+The run-level eligibility boundary satisfied after registration is complete \
+and every exact member's current item stage is terminal. It represents \
+execution completeness independently of member outcomes or domain acceptance."""
+part_of = ["submission run"]
+
+[[terms]]
+name = "run completion"
+definition = """
+An optional pipeline-declared durable operation for one submission run that \
+becomes eligible after the run barrier is satisfied. It is separate from the \
+linear item-stage sequence and is not a graph node."""
+exported_symbols = ["RunCompletionDefinition"]
+part_of = ["pipeline definition"]
+
+[[terms]]
+name = "run completion execution"
+definition = """
+One logical execution of a pipeline's run completion for one submission run \
+across one or more attempts. At most one such execution belongs to a run."""
+part_of = ["run completion", "submission run"]
+
+[[terms]]
+name = "run completion attempt"
+definition = """
+One attempt in a run completion execution's ordered history, with fixed \
+identity and provenance and lifecycle facts filled at most once."""
+is_a = ["attempt"]
+part_of = ["run completion execution"]
+
+[[terms]]
+name = "run completion payload"
+definition = """
+The compact immutable run identity, registration, terminal-count, and attempt \
+facts supplied when deriving a run completion operation's arguments. It does \
+not contain or resolve the run members' application-owned outputs."""
+exported_symbols = ["RunCompletionPayload"]
+part_of = ["run completion execution"]
