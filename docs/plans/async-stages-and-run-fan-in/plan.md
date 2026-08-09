@@ -1,6 +1,9 @@
 # Async stages and run fan-in
 
-Status: implemented
+Status: implemented; clean-tip schema-4 performance qualification passed on
+2026-08-09. The
+[qualification result](../../qualification/async-stages-and-run-fan-in-results.json)
+is the authoritative numeric evidence.
 
 ## Planning vocabulary and contracts
 
@@ -341,17 +344,19 @@ target.
 
 Each bounded pass:
 
-1. filters eligibility with an indexed `NOT EXISTS` anti-join before stable
-   `ORDER BY` and `LIMIT`;
-2. selects the eligible page with one query rather than one eligibility query
-   per candidate;
-3. advances by keyset within the pass;
-4. calculates terminal state counts only for selected runs, preferably with one
+1. materializes a stable, indexed, keyset-ordered page of completion candidates
+   before evaluating member state;
+2. performs one bounded parameterized lateral nonterminal probe per candidate;
+3. locks only candidates found eligible, skipping rows locked by a concurrent
+   pass;
+4. advances by keyset across blocked, ineligible, or lock-skipped pages until
+   the release batch or pass budget is exhausted;
+5. calculates terminal state counts only for locked eligible runs, with one
    grouped query for the page;
-5. records immutable `released_at` and release terminal state counts;
-6. creates and enqueues each run completion execution transactionally using
+6. records immutable `released_at` and release terminal state counts;
+7. creates and enqueues each run completion execution transactionally using
    only its compact validated platform payload; and
-7. relies on persisted uniqueness to make concurrent passes converge.
+8. relies on persisted uniqueness to make concurrent passes converge.
 
 The expected starting index is equivalent to:
 
@@ -583,8 +588,9 @@ move large member sets or outputs into platform rows or DBOS workflow arguments.
 - Verify the declared service-rate formula and qualify one configuration for
   each schedule with headroom.
 - Withhold release before closure or while any member is nonterminal.
-- Use one eligibility query per page with `NOT EXISTS` before ordering and
-  limiting, then advance by keyset within the pass.
+- Materialize an indexed completion-candidate page before bounded parameterized
+  lateral eligibility probes; lock only eligible runs and advance by keyset
+  across blocked or lock-skipped pages within the pass.
 - Calculate terminal counts for the selected page with one grouped query.
 - Release once for all-success and mixed terminal outcomes.
 - Release every eligible overlapping submission run containing shared work.
@@ -644,8 +650,9 @@ move large member sets or outputs into platform rows or DBOS workflow arguments.
    - add cancellation, recovery, and loop-affine-resource qualification.
 4. **Run barrier**
    - register a schedule independent from admission;
-   - add eligibility-before-pagination queries, grouped release counts,
-     immutable release facts, and duplicate-safe transactional enqueue.
+   - add materialized candidate paging, bounded parameterized eligibility
+     probes, eligible-only locking, grouped release counts, immutable release
+     facts, and duplicate-safe transactional enqueue.
 5. **Run completion**
    - add declarations, wrapping, guarded outcome recording, and inspection;
    - retain the deliberately limited three-state lifecycle.
@@ -674,7 +681,10 @@ Also:
 
 ## Acceptance criteria
 
-This effort is complete when:
+The implementation satisfies these criteria. The 2026-08-09 clean-tip
+schema-4 result is the authoritative performance evidence for the scheduler,
+burst, barrier-plan, and `list_runs()`-plan criteria. Focused repository checks
+remain the acceptance evidence for the other functional contracts.
 
 - async application workflows reuse a loop-affine resource safely;
 - dispatcher transactions enqueue validated platform payloads without running

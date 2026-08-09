@@ -13,8 +13,8 @@
     "configured_service_rate_per_hour": 144000.0,
     "declared_workload_per_hour": 100000,
     "interval_seconds": 5.0,
-    "measured_burst_rate_per_hour": 1231484.527,
-    "measured_pass_seconds": 0.58466,
+    "measured_burst_rate_per_hour": 1339355.576,
+    "measured_pass_seconds": 0.537572,
     "qualified": true
   },
   "barrier": {
@@ -23,42 +23,44 @@
     "configured_service_rate_per_hour": 14400.0,
     "declared_workload_per_hour": 10000,
     "interval_seconds": 5.0,
-    "measured_burst_rate_per_hour": 665270.675,
-    "measured_pass_seconds": 0.108227,
+    "measured_burst_rate_per_hour": 1493266.056,
+    "measured_pass_seconds": 0.048216,
     "qualified": true
   },
   "barrier_planner": {
     "backlog": {
-      "eligible_runs": 1,
-      "large_nonterminal_run_members": 2000,
-      "nonterminal_candidate_runs": 10000,
-      "released_history_runs": 10000
+      "candidate_large_nonterminal_members": 2000,
+      "candidate_nonterminal_runs": 10000,
+      "evaluated_candidate_page_rows": 20,
+      "locked_eligible_runs": 1,
+      "unrelated_released_history_memberships": 10000,
+      "unrelated_released_history_runs": 10000
     },
-    "execution_ms": 12.703,
+    "execution_ms": 0.151,
     "index_names": [
       "platform_ix_pipeline_runs_completion_candidates",
       "platform_ix_stage_executions_nonterminal_work",
-      "platform_run_memberships_pkey"
+      "platform_uq_run_memberships_run_work"
     ],
     "qualified": true,
     "result_keys": [
-      "planner-zz-eligible"
+      "planner-00000-eligible"
     ],
-    "visited_rows": {
-      "platform_pipeline_runs": 10002,
-      "platform_run_memberships": 12200,
-      "platform_stage_executions": 12200
+    "rounded_plan_row_estimates": {
+      "platform_pipeline_runs": 21,
+      "platform_run_memberships": 20,
+      "platform_stage_executions": 19
     }
   },
   "burst": {
     "cancellation_exact_delegations_verified": 20,
     "cancellation_request_to_cleanup": {
       "count": 20,
-      "maximum_ms": 676.299,
-      "minimum_ms": 21.315,
-      "p50_ms": 192.147,
-      "p95_ms": 559.272,
-      "p99_ms": 676.299
+      "maximum_ms": 503.631,
+      "minimum_ms": 17.76,
+      "p50_ms": 192.859,
+      "p95_ms": 465.752,
+      "p99_ms": 503.631
     },
     "cancellations": 20,
     "cancelled_coroutines_active_before_release": 20,
@@ -66,46 +68,46 @@
     "cancelled_late_handoff_attempts": 20,
     "cleanup_complete": true,
     "expected_burst": 200,
-    "handoff_seconds": 1.731838,
-    "handoffs_per_second": 103.936,
+    "handoff_seconds": 1.416653,
+    "handoffs_per_second": 127.06,
     "instrumentation": {
       "app_pool_max_overflow": 0,
       "app_pool_size": 20,
-      "checkpoint_active_workers_peak": 179,
+      "checkpoint_active_workers_peak": 185,
       "checkpoint_queue_delay": {
         "count": 220,
-        "maximum_ms": 69.934,
-        "minimum_ms": 0.017,
-        "p50_ms": 0.069,
-        "p95_ms": 5.089,
-        "p99_ms": 52.743
+        "maximum_ms": 41.996,
+        "minimum_ms": 0.014,
+        "p50_ms": 0.041,
+        "p95_ms": 3.635,
+        "p99_ms": 9.281
       },
       "checkpoint_worker_limit": 200,
       "completion_checkpoint_submissions": 20,
       "completion_ledger_pool_wait": {
         "count": 20,
-        "maximum_ms": 0.009,
+        "maximum_ms": 0.002,
         "minimum_ms": 0.001,
-        "p50_ms": 0.002,
+        "p50_ms": 0.001,
         "p95_ms": 0.002,
-        "p99_ms": 0.009
+        "p99_ms": 0.002
       },
       "event_loop_lag": {
-        "count": 99,
-        "maximum_ms": 1015.377,
-        "minimum_ms": 0.029,
-        "p50_ms": 0.397,
-        "p95_ms": 33.501,
-        "p99_ms": 1015.377
+        "count": 90,
+        "maximum_ms": 872.129,
+        "minimum_ms": 0.024,
+        "p50_ms": 0.253,
+        "p95_ms": 10.12,
+        "p99_ms": 872.129
       },
       "stage_checkpoint_submissions": 200,
       "stage_ledger_pool_wait": {
         "count": 200,
-        "maximum_ms": 1209.325,
+        "maximum_ms": 1046.494,
         "minimum_ms": 0.0,
-        "p50_ms": 246.671,
-        "p95_ms": 781.323,
-        "p99_ms": 1063.608
+        "p50_ms": 221.7,
+        "p95_ms": 578.628,
+        "p99_ms": 707.584
       },
       "unknown_checkpoint_submissions": 0,
       "unknown_ledger_pool_wait_count": 0
@@ -115,14 +117,14 @@
     "qualified": true,
     "release_to_cleanup": {
       "count": 20,
-      "maximum_ms": 446.924,
-      "minimum_ms": 8.686,
-      "p50_ms": 14.994,
-      "p95_ms": 435.974,
-      "p99_ms": 446.924
+      "maximum_ms": 270.307,
+      "minimum_ms": 8.173,
+      "p50_ms": 19.814,
+      "p95_ms": 262.13,
+      "p99_ms": 270.307
     },
     "runtime_shutdown_cleanup_complete": true,
-    "runtime_shutdown_cleanup_seconds": 0.366908,
+    "runtime_shutdown_cleanup_seconds": 0.359158,
     "successful_handoffs": 180
   },
   "declared_workload": {
@@ -138,7 +140,7 @@
       "selected_page_memberships": 40,
       "selected_page_runs": 20
     },
-    "execution_ms": 0.142,
+    "execution_ms": 0.143,
     "index_names": [
       "platform_ix_pipeline_runs_campaign_cursor",
       "platform_uq_run_memberships_run_work"
@@ -166,7 +168,7 @@
       "list-page-00018",
       "list-page-00019"
     ],
-    "visited_rows": {
+    "rounded_plan_row_estimates": {
       "platform_pipeline_runs": 20,
       "platform_run_memberships": 40
     }
@@ -174,13 +176,13 @@
   "provenance": {
     "cpu_count": 14,
     "database": {
-      "database_url": "postgresql+psycopg://drp_qual_1a22e8ca458442fdb284ae7ef10dea21:***@127.0.0.1/dr_platform_qualification_1a22e8ca458442fdb284ae7ef10dea21_test",
+      "database_url": "postgresql+psycopg://drp_qual_s4_e2b696c5858b:***@127.0.0.1:5432/drp_qual_s4_e2b696c5858b_test",
       "max_connections": 1000,
       "postgresql": "17.9 (Homebrew)"
     },
     "dbos": "2.27.0",
     "git_branch": "08-08-async-stages-and-run-fan-in-plan",
-    "git_commit": "0387e0ea14829b47422770e27363b03d0809b929",
+    "git_commit": "35ed53afbf558d0e8872fe7004f828132eb8f211",
     "git_status_at_start": [],
     "git_status_before_result": [],
     "machine": "arm64",
@@ -191,6 +193,6 @@
     "sqlalchemy": "2.0.51"
   },
   "qualified": true,
-  "run_at": "2026-08-09T20:43:38.216653+00:00",
-  "schema_version": 3
+  "run_at": "2026-08-09T22:15:44.710843+00:00",
+  "schema_version": 4
 }
