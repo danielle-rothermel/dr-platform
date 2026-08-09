@@ -5,9 +5,8 @@
 title = "Application workflows are async"
 statement = """
 Platform-managed pipeline stage and run completion workflows are async and \
-awaited by platform wrappers. Argument derivation remains synchronous and must \
-not perform external I/O; ledger mutation remains synchronous, and coroutine \
-cancellation is not an application failure."""
+awaited by platform wrappers. Argument derivation and ledger mutation remain \
+synchronous, and coroutine cancellation is not an application failure."""
 rationale = """
 One async application boundary permits loop-affine resources and async storage \
 without duplicating the synchronous transactional ledger or extending \
@@ -27,6 +26,21 @@ date = "2026-08-08"
 check = "planned: uv run pytest -q tests/execution/test_async_workflow.py -k 'resource_owner'"
 
 [[contracts]]
+title = "Dispatcher transactions execute platform code only"
+statement = """
+Admission and run barrier transactions enqueue compact validated platform \
+payloads without calling application code. Durable wrappers reconstruct typed \
+payloads, call argument derivation and application workflows, and record either \
+callback's non-cancellation exception as application failure. Argument derivation is \
+deterministic, replay-safe, external-I/O-free, and bounded."""
+rationale = """
+Application callbacks inside dispatcher transactions lengthen lock time and a \
+repeatable callback error can poison every pass. Moving them into durable \
+execution bounds transaction work and records one attributable outcome."""
+date = "2026-08-09"
+check = "planned: uv run pytest -q tests/admission/test_runner.py tests/completion/test_run_execution.py -k 'args_for or platform_payload or application_failure'"
+
+[[contracts]]
 title = "Registration closes ordered membership"
 statement = """
 Before registration, a submission run declares its expected member count. A \
@@ -34,14 +48,27 @@ run with completion also declares its manifest reference and membership \
 digest; a run without completion supplies both or neither. Bounded idempotent \
 registration closes after normal stream exhaustion only when persisted \
 membership has the declared count, contiguous ordinals, unique work items, \
-and any declared digest; closure freezes membership while exact replay remains \
-idempotent."""
+and any declared digest. Closure freezes membership; matching closed replay \
+returns the same closure receipt without consuming another member stream."""
 rationale = """
 Normal exhaustion and full validation distinguish a complete stream from a \
 partial prefix. The digest binds closed membership to the application manifest \
 without a member listing API or per-member outcome snapshot."""
 date = "2026-08-08"
 check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'registration or digest or replay'"
+
+[[contracts]]
+title = "Registration is set-oriented"
+statement = """
+Each bounded registration chunk uses a fixed upper bound of database statement \
+executions independent of member count and performs no per-member SQL. Closure \
+may make one indexed ordered pass over the submission run's membership."""
+rationale = """
+Bounding transactions without bounding round trips still scales database \
+latency with every member. Set-oriented chunk work preserves streaming and \
+exact validation without serial query amplification."""
+date = "2026-08-09"
+check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'statement_count or closure_scan'"
 
 [[contracts]]
 title = "Membership is distinct from origin"
@@ -76,7 +103,9 @@ title = "Run inspection follows membership"
 statement = """
 Counts, status queries, and completion eligibility for a submission run derive \
 through run membership rather than work origin. These reads remain bounded or \
-aggregate without promising a general member listing API."""
+aggregate; bulk run state counts use one aggregate query per bounded input \
+chunk and distinguish missing from present empty runs without promising a \
+general member listing API."""
 rationale = """
 Membership is the authoritative run scope, including for reused work. Keeping \
 the first inspection surface narrow avoids embedding complete result sets in \
