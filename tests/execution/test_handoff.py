@@ -41,6 +41,11 @@ from dr_platform.recovery.cancellation import (
     cancel_work,
 )
 from dr_platform.recovery.sweep import sweep_abandoned_stages
+from dr_platform.runtime.dbos import PlatformDbosConfig
+from dr_platform.runtime.dispatcher import (
+    DispatcherRegistration,
+    register_scheduled_dispatcher,
+)
 from dr_platform.submission.stream import WorkInput
 from dr_platform.submission.work_items import stable_random_rank
 from tests.conftest import (
@@ -135,7 +140,13 @@ def _submit_items(  # noqa: PLR0913 -- explicit submission facts
     )
 
 
-def _launch_dbos(database_url: str, *, suffix: str) -> None:
+def _launch_dbos(
+    database_url: str,
+    *,
+    suffix: str,
+    engine: Engine,
+    registry: PipelineRegistry,
+) -> DispatcherRegistration:
     DBOS(
         config=dbos_config(
             name=f"drp-handoff-{suffix}",
@@ -145,7 +156,20 @@ def _launch_dbos(database_url: str, *, suffix: str) -> None:
             notification_listener_polling_interval_sec=0.01,
         )
     )
-    DBOS.launch()
+    registration = register_scheduled_dispatcher(
+        config=PlatformDbosConfig(
+            database_url=database_url,
+            system_database_url=database_url,
+        ),
+        engine=engine,
+        registry=registry,
+    )
+    try:
+        DBOS.launch()
+    except Exception:
+        registration.close()
+        raise
+    return registration
 
 
 def _wait_for(
@@ -343,10 +367,15 @@ def test_three_stage_pipeline_streams_end_to_end_through_wrapped_workflows(
     for stage in pipeline.stages:
         Queue(stage.queue_name, polling_interval_sec=0.02)
 
-    client: DBOSClient | None = None
+    registration: DispatcherRegistration | None = None
     try:
-        _launch_dbos(clean_pg, suffix=suffix)
-        client = DBOSClient(system_database_url=clean_pg)
+        registration = _launch_dbos(
+            clean_pg,
+            suffix=suffix,
+            engine=pg_engine,
+            registry=registry,
+        )
+        client = registration.client
         for stage_index in range(3):
             summary = run_admission_pass(
                 pg_engine,
@@ -403,8 +432,8 @@ def test_three_stage_pipeline_streams_end_to_end_through_wrapped_workflows(
             expected_status="SUCCESS",
         )
     finally:
-        if client is not None:
-            client.destroy()
+        if registration is not None:
+            registration.close()
         DBOS.destroy(destroy_registry=True)
 
 
@@ -656,10 +685,15 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
     )
     Queue(pipeline.stages[0].queue_name, polling_interval_sec=0.02)
 
-    client: DBOSClient | None = None
+    registration: DispatcherRegistration | None = None
     try:
-        _launch_dbos(clean_pg, suffix=suffix)
-        client = DBOSClient(system_database_url=clean_pg)
+        registration = _launch_dbos(
+            clean_pg,
+            suffix=suffix,
+            engine=pg_engine,
+            registry=registry,
+        )
+        client = registration.client
         first = run_admission_pass(
             pg_engine,
             client=client,
@@ -717,8 +751,8 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
             )
         )
     finally:
-        if client is not None:
-            client.destroy()
+        if registration is not None:
+            registration.close()
         DBOS.destroy(destroy_registry=True)
 
 
@@ -763,10 +797,15 @@ def test_invalid_application_output_lands_failed_without_a_successor(
     )
     Queue(pipeline.stages[0].queue_name, polling_interval_sec=0.02)
 
-    client: DBOSClient | None = None
+    registration: DispatcherRegistration | None = None
     try:
-        _launch_dbos(clean_pg, suffix=suffix)
-        client = DBOSClient(system_database_url=clean_pg)
+        registration = _launch_dbos(
+            clean_pg,
+            suffix=suffix,
+            engine=pg_engine,
+            registry=registry,
+        )
+        client = registration.client
         admitted = run_admission_pass(
             pg_engine,
             client=client,
@@ -813,8 +852,8 @@ def test_invalid_application_output_lands_failed_without_a_successor(
             expected_status="SUCCESS",
         )
     finally:
-        if client is not None:
-            client.destroy()
+        if registration is not None:
+            registration.close()
         DBOS.destroy(destroy_registry=True)
 
     assert execution_rows == [(0, "execute", "failed", None)]
@@ -866,10 +905,15 @@ def test_application_failure_with_unprintable_error_lands_failed(
     )
     Queue(pipeline.stages[0].queue_name, polling_interval_sec=0.02)
 
-    client: DBOSClient | None = None
+    registration: DispatcherRegistration | None = None
     try:
-        _launch_dbos(clean_pg, suffix=suffix)
-        client = DBOSClient(system_database_url=clean_pg)
+        registration = _launch_dbos(
+            clean_pg,
+            suffix=suffix,
+            engine=pg_engine,
+            registry=registry,
+        )
+        client = registration.client
         admitted = run_admission_pass(
             pg_engine,
             client=client,
@@ -903,8 +947,8 @@ def test_application_failure_with_unprintable_error_lands_failed(
                 )
             ).scalar_one()
     finally:
-        if client is not None:
-            client.destroy()
+        if registration is not None:
+            registration.close()
         DBOS.destroy(destroy_registry=True)
 
     expected_type = (

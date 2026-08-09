@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import re
 from dataclasses import dataclass
@@ -30,6 +29,9 @@ from dr_platform._core.identities import (
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import RunCompletionExecutionState
 from dr_platform._core.validation import validate_non_empty_string
+from dr_platform.execution._checkpoint import (
+    _require_ledger_checkpoint_executor,
+)
 from dr_platform.inspection.statuses import StateCount  # noqa: TC001
 from dr_platform.pipeline.definitions import RunCompletionDefinition
 
@@ -219,6 +221,9 @@ def wrap_run_completion(
 
     @DBOS.workflow(name=workflow_name)
     async def run_completion(payload_data: dict[str, object]) -> str | None:
+        checkpoint_executor = _require_ledger_checkpoint_executor(
+            run_completion
+        )
         workflow_id = _current_workflow_id()
         payload = RunCompletionPayload.model_validate(payload_data)
         try:
@@ -230,7 +235,7 @@ def wrap_run_completion(
             )
         except Exception as error:  # noqa: BLE001 -- application boundary
             error_type = f"{type(error).__module__}.{type(error).__qualname__}"
-            await asyncio.to_thread(
+            await checkpoint_executor.run(
                 record_outcome,
                 workflow_id=workflow_id,
                 succeeded=False,
@@ -243,7 +248,7 @@ def wrap_run_completion(
                 },
             )
             return None
-        await asyncio.to_thread(
+        await checkpoint_executor.run(
             record_outcome,
             workflow_id=workflow_id,
             succeeded=True,

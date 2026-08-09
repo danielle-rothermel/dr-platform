@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import re
 from datetime import UTC, datetime
@@ -20,6 +19,9 @@ from dr_platform.admission.runner import AdmissionPayload
 from dr_platform.completion.execution import (
     is_run_completion_wrapped,
     wrap_run_completion,
+)
+from dr_platform.execution._checkpoint import (
+    _require_ledger_checkpoint_executor,
 )
 from dr_platform.pipeline.definitions import (
     AsyncWorkflowCallable,
@@ -52,6 +54,16 @@ def is_pipeline_wrapped(pipeline: PipelineDefinition) -> bool:
     completion = pipeline.run_completion
     return stages_wrapped and (
         completion is None or is_run_completion_wrapped(completion)
+    )
+
+
+def _pipeline_checkpoint_workflows(
+    pipeline: PipelineDefinition,
+) -> tuple[AsyncWorkflowCallable, ...]:
+    completion = pipeline.run_completion
+    return (
+        *(stage.workflow for stage in pipeline.stages),
+        *(() if completion is None else (completion.workflow,)),
     )
 
 
@@ -162,6 +174,7 @@ def _wrap_stage_workflow(
 
     @DBOS.workflow(name=workflow_name)
     async def run_stage(payload_data: dict[str, object]) -> str | None:
+        checkpoint_executor = _require_ledger_checkpoint_executor(run_stage)
         workflow_id = _current_workflow_id()
         payload = AdmissionPayload.model_validate(payload_data)
         try:
@@ -171,7 +184,7 @@ def _wrap_stage_workflow(
             )
         except Exception as error:  # noqa: BLE001 -- application boundary
             error_type = f"{type(error).__module__}.{type(error).__qualname__}"
-            await asyncio.to_thread(
+            await checkpoint_executor.run(
                 complete_stage,
                 workflow_id=workflow_id,
                 pipeline_key=pipeline.key.value,
@@ -193,7 +206,7 @@ def _wrap_stage_workflow(
             )
             return None
 
-        await asyncio.to_thread(
+        await checkpoint_executor.run(
             complete_stage,
             workflow_id=workflow_id,
             pipeline_key=pipeline.key.value,
