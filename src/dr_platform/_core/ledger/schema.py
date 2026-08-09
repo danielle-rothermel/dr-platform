@@ -131,6 +131,14 @@ class StagingSchema:
                 name=name("ck_pipeline_runs_release_counts"),
             ),
         )
+        Index(
+            name("ix_pipeline_runs_completion_candidates"),
+            self.pipeline_runs.c.run_key,
+            postgresql_where=text(
+                "registration_closed_at IS NOT NULL AND "
+                "run_completion_key IS NOT NULL AND released_at IS NULL"
+            ),
+        )
 
         self.work_items = Table(
             name("work_items"),

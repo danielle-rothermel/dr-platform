@@ -471,26 +471,127 @@ def test_empty_completion_run_is_immediately_eligible(
     ]
 
 
-def test_barrier_anti_join_uses_nonterminal_index_with_large_backlog(
+def test_barrier_candidate_and_anti_join_indexes_with_sparse_history(
     pg_engine: Engine,
 ) -> None:
     schema = _migrate(pg_engine)
     registry, pipeline = _registry("barrier-plan")
+    completion = pipeline.run_completion
+    assert completion is not None
+    history_size = 2_000
+    terminal_history_size = 500
+    closed_at = NOW + timedelta(seconds=1)
+    released_at = NOW + timedelta(seconds=2)
+    released_counts = [
+        {"state": "succeeded", "count": 0},
+        {"state": "failed", "count": 0},
+        {"state": "cancelled", "count": 0},
+    ]
+    history_run = {
+        "campaign_key": "campaign-history",
+        "pipeline_key": pipeline.key.value,
+        "pipeline_version": pipeline.version,
+        "execution_config_reference": "config:history",
+        "created_at": NOW,
+    }
+    released_runs = [
+        history_run
+        | {
+            "run_key": f"released-{index:04d}",
+            "expected_member_count": 0,
+            "manifest_reference": f"manifest:released-{index}",
+            "membership_digest": f"digest:released-{index}",
+            "run_completion_key": completion.key.value,
+            "registration_closed_at": closed_at,
+            "registered_member_count": 0,
+            "created_work_count": 0,
+            "reused_work_count": 0,
+            "released_at": released_at,
+            "release_terminal_state_counts": released_counts,
+        }
+        for index in range(history_size)
+    ]
+    item_only_runs = [
+        history_run
+        | {
+            "run_key": f"item-only-{index:04d}",
+            "expected_member_count": 0,
+            "registration_closed_at": closed_at,
+            "registered_member_count": 0,
+            "created_work_count": 0,
+            "reused_work_count": 0,
+        }
+        for index in range(history_size)
+    ]
+    open_runs = [
+        history_run
+        | {
+            "run_key": f"open-{index:04d}",
+            "expected_member_count": int(index < terminal_history_size),
+            "manifest_reference": f"manifest:open-{index}",
+            "membership_digest": f"digest:open-{index}",
+            "run_completion_key": completion.key.value,
+        }
+        for index in range(history_size)
+    ]
+    with pg_engine.begin() as connection:
+        connection.execute(schema.pipeline_runs.insert(), released_runs)
+        connection.execute(schema.pipeline_runs.insert(), item_only_runs)
+        connection.execute(schema.pipeline_runs.insert(), open_runs)
+        connection.execute(
+            text(
+                """
+                WITH inserted_work AS (
+                INSERT INTO platform_work_items (
+                    campaign_key, work_key, origin_run_key,
+                    input_reference, labels, rank
+                )
+                SELECT
+                    'campaign-history',
+                    'open-work-' || lpad(history_index::text, 4, '0'),
+                    'open-' || lpad(history_index::text, 4, '0'),
+                    'input:open-' || history_index::text,
+                    '{}'::jsonb,
+                    history_index + 1
+                FROM generate_series(0, :last_history_index) AS history_index
+                RETURNING work_item_id, origin_run_key, rank
+                ), inserted_memberships AS (
+                INSERT INTO platform_run_memberships (
+                    run_key, member_ordinal, work_item_id
+                )
+                SELECT origin_run_key, 0, work_item_id
+                FROM inserted_work
+                )
+                INSERT INTO platform_stage_executions (
+                    work_item_id, stage_key, stage_index, state,
+                    current_attempt, rank, created_at, updated_at
+                )
+                SELECT
+                    work_item_id, 'execute', 0, 'failed',
+                    0, rank, :created_at, :created_at
+                FROM inserted_work
+                """
+            ),
+            {
+                "created_at": NOW,
+                "last_history_index": terminal_history_size - 1,
+            },
+        )
     _submit_run(
         pg_engine,
         registry,
         pipeline,
-        run_key="run-backlog",
-        members=_members(*range(2_000)),
-    )
-    _submit_run(
-        pg_engine,
-        registry,
-        pipeline,
-        run_key="run-ready",
+        run_key="run-waiting",
         members=_members(3_000),
     )
-    _set_states(pg_engine, {"work-3000": StageExecutionState.SUCCEEDED})
+    _submit_run(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-eligible",
+        members=_members(3_001),
+    )
+    _set_states(pg_engine, {"work-3001": StageExecutionState.SUCCEEDED})
 
     statement = _eligible_runs_statement(
         schema=schema,
@@ -505,7 +606,6 @@ def test_barrier_anti_join_uses_nonterminal_index_with_large_backlog(
     )
     with pg_engine.begin() as connection:
         connection.execute(text("ANALYZE"))
-        connection.execute(text("SET LOCAL enable_seqscan = off"))
         plan = connection.execute(
             text(f"EXPLAIN (FORMAT JSON, COSTS OFF) {sql}")
         ).scalar_one()
@@ -524,6 +624,10 @@ def test_barrier_anti_join_uses_nonterminal_index_with_large_backlog(
                 collect(child)
 
     collect(plan)
+    assert any(
+        name.endswith("ix_pipeline_runs_completion_candidates")
+        for name in index_names
+    )
     assert any(
         name.endswith("ix_stage_executions_nonterminal_work")
         for name in index_names
