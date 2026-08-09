@@ -1,7 +1,7 @@
 [project]
 name = "dr-platform"
-version = "0.1.1"
-description = "A durable staged-work funnel built on PostgreSQL and DBOS."
+version = "0.2.0"
+description = "Durable staged pipelines and run fan-in on PostgreSQL and DBOS."
 readme = "README.md"
 license = "MIT"
 authors = [

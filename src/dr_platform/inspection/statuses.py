@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from sqlalchemy import and_, func, select
+from pydantic import BaseModel, ConfigDict, StrictInt, field_validator
+from sqlalchemy import Text, and_, column, func, select, values
 
 from dr_platform._core.identities import CampaignKey, RunKey, StageKey, WorkKey
 from dr_platform._core.ledger.schema import StagingSchema
@@ -26,10 +27,18 @@ if TYPE_CHECKING:
 DEFAULT_BULK_STATUS_CHUNK_SIZE = 500
 
 
-@dataclass(frozen=True, slots=True)
-class StateCount:
+class StateCount(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     state: StageExecutionState
-    count: int
+    count: StrictInt
+
+    @field_validator("count")
+    @classmethod
+    def _nonnegative_count(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("state count must be non-negative")
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +83,49 @@ def run_state_counts(
         run_key=normalize_run_key(run_key),
         schema=schema,
     )
+
+
+def bulk_run_state_counts(
+    run_keys: Iterable[RunKey | str],
+    *,
+    engine: Engine,
+    chunk_size: int = DEFAULT_BULK_STATUS_CHUNK_SIZE,
+    schema: StagingSchema | None = None,
+) -> Mapping[RunKey, tuple[StateCount, ...] | None]:
+    """Return one aggregate result per key with one SELECT per input chunk."""
+    validate_positive_integer(chunk_size, label="bulk run count chunk size")
+    normalized_keys = tuple(
+        dict.fromkeys(normalize_run_key(key) for key in run_keys)
+    )
+    results: dict[RunKey, tuple[StateCount, ...] | None] = dict.fromkeys(
+        normalized_keys
+    )
+    selected_schema = schema or StagingSchema()
+    with engine.connect() as connection:
+        for start in range(0, len(normalized_keys), chunk_size):
+            chunk = normalized_keys[start : start + chunk_size]
+            grouped: dict[RunKey, list[StateCount]] = {
+                key: [] for key in chunk
+            }
+            present: set[RunKey] = set()
+            for row in connection.execute(
+                _bulk_run_counts_statement(
+                    run_keys=chunk, schema=selected_schema
+                )
+            ).mappings():
+                key = RunKey(row["requested_run_key"])
+                if row["present"]:
+                    present.add(key)
+                if row["state"] is not None:
+                    grouped[key].append(
+                        StateCount(
+                            state=StageExecutionState(row["state"]),
+                            count=row["count"],
+                        )
+                    )
+            for key in present:
+                results[key] = tuple(grouped[key])
+    return MappingProxyType(results)
 
 
 def bulk_work_statuses(
@@ -143,8 +195,9 @@ def _state_counts(
         )
     else:
         assert run_key is not None
-        scoped_item_ids = select(items.c.work_item_id).where(
-            items.c.origin_run_key == run_key.value
+        memberships = selected_schema.run_memberships
+        scoped_item_ids = select(memberships.c.work_item_id).where(
+            memberships.c.run_key == run_key.value
         )
     current = current_stage_indexes(selected_schema, scoped_item_ids)
     statement = (
@@ -168,7 +221,7 @@ def _state_counts(
         statement = statement.where(items.c.campaign_key == campaign_key.value)
     else:
         assert run_key is not None
-        statement = statement.where(items.c.origin_run_key == run_key.value)
+        statement = statement.where(items.c.work_item_id.in_(scoped_item_ids))
     with engine.connect() as connection:
         if campaign_key is not None:
             require_campaign(
@@ -230,6 +283,63 @@ def _bulk_status_statement(
             items.c.work_key.in_([key.value for key in work_keys]),
         )
         .order_by(items.c.work_key)
+    )
+
+
+def _bulk_run_counts_statement(
+    *,
+    run_keys: tuple[RunKey, ...],
+    schema: StagingSchema,
+):
+    requested = (
+        values(column("run_key", Text), name="requested_runs")
+        .data([(key.value,) for key in run_keys])
+        .cte("requested_runs")
+    )
+    runs = schema.pipeline_runs
+    memberships = schema.run_memberships
+    executions = schema.stage_executions
+    scoped = (
+        select(memberships.c.run_key, memberships.c.work_item_id)
+        .where(memberships.c.run_key.in_([key.value for key in run_keys]))
+        .subquery()
+    )
+    current = (
+        select(
+            scoped.c.run_key,
+            scoped.c.work_item_id,
+            func.max(executions.c.stage_index).label("stage_index"),
+        )
+        .select_from(
+            scoped.join(
+                executions,
+                scoped.c.work_item_id == executions.c.work_item_id,
+            )
+        )
+        .group_by(scoped.c.run_key, scoped.c.work_item_id)
+        .subquery()
+    )
+    current_states = current.join(
+        executions,
+        and_(
+            current.c.work_item_id == executions.c.work_item_id,
+            current.c.stage_index == executions.c.stage_index,
+        ),
+    )
+    return (
+        select(
+            requested.c.run_key.label("requested_run_key"),
+            runs.c.run_key.is_not(None).label("present"),
+            executions.c.state,
+            func.count(executions.c.stage_execution_id).label("count"),
+        )
+        .select_from(
+            requested.outerjoin(
+                runs, requested.c.run_key == runs.c.run_key
+            ).outerjoin(current_states, runs.c.run_key == current.c.run_key)
+        )
+        .group_by(requested.c.run_key, runs.c.run_key, executions.c.state)
+        .order_by(requested.c.run_key, executions.c.state)
     )
 
 

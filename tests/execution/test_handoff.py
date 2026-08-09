@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -40,7 +41,7 @@ from dr_platform.recovery.cancellation import (
     cancel_work,
 )
 from dr_platform.recovery.sweep import sweep_abandoned_stages
-from dr_platform.submission.stream import WorkInput, submit
+from dr_platform.submission.stream import WorkInput
 from dr_platform.submission.work_items import stable_random_rank
 from tests.conftest import (
     _args_for,
@@ -48,6 +49,7 @@ from tests.conftest import (
     _migrate,
     _RecordingCanceller,
     dbos_config,
+    submit_items,
 )
 
 if TYPE_CHECKING:
@@ -67,6 +69,15 @@ def _pipeline(
     key: str,
     stage_logic: tuple[tuple[str, Callable[[str], object]], ...],
 ) -> PipelineDefinition:
+    def as_async(logic: Callable[[str], object]):
+        async def run(input_reference: str) -> str | None:
+            result = logic(input_reference)
+            if inspect.isawaitable(result):
+                result = await result
+            return cast("str | None", result)
+
+        return run
+
     return PipelineDefinition(
         key=PipelineKey(key),
         version=1,
@@ -74,7 +85,7 @@ def _pipeline(
             StageDefinition(
                 key=StageKey(stage_key),
                 queue_name=f"{key}-{stage_key}-queue",
-                workflow=logic,
+                workflow=as_async(logic),
                 args_for=_args_for,
             )
             for stage_key, logic in stage_logic
@@ -112,7 +123,7 @@ def _submit_items(  # noqa: PLR0913 -- explicit submission facts
     items: tuple[WorkInput, ...],
     clock: Callable[[], datetime] = _utc_now,
 ) -> None:
-    submit(
+    submit_items(
         campaign_key=campaign_key,
         run_key=run_key,
         pipeline=pipeline.identity,

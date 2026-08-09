@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from collections.abc import Mapping  # noqa: TC003 -- Pydantic resolves it
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    StrictInt,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import (
     Connection,
     Engine,
@@ -22,6 +31,7 @@ from dr_platform._core.identities import (
     RunKey,
     StageKey,
     WorkKey,
+    validate_key_value,
 )
 from dr_platform._core.ledger.attempts import (
     StageAttemptRecord,
@@ -32,10 +42,13 @@ from dr_platform._core.ledger.attempts import (
 from dr_platform._core.ledger.executions import transition_stage_execution
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
-from dr_platform._core.validation import validate_positive_integer
+from dr_platform._core.validation import (
+    validate_non_empty_string,
+    validate_positive_integer,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from dbos import DBOSClient, EnqueueOptions
     from sqlalchemy.engine import RowMapping
@@ -64,17 +77,83 @@ def _failure_message(error: Exception) -> str:
             return f"unprintable {type(error).__name__}"
 
 
-@dataclass(frozen=True, slots=True)
-class AdmissionPayload:
+class AdmissionPayload(BaseModel):
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        arbitrary_types_allowed=True,
+    )
+
     campaign_key: CampaignKey
     work_key: WorkKey
     run_key: RunKey
     input_reference: str
     labels: Mapping[str, str]
     pipeline_key: str
-    pipeline_version: int
+    pipeline_version: StrictInt
     stage_key: StageKey
-    attempt_number: int
+    attempt_number: StrictInt
+
+    @field_validator("campaign_key", mode="before")
+    @classmethod
+    def _campaign_key(cls, value: object) -> CampaignKey:
+        if isinstance(value, CampaignKey):
+            return value
+        if not isinstance(value, str):
+            raise TypeError("campaign key must be a string")
+        return CampaignKey(value)
+
+    @field_validator("work_key", mode="before")
+    @classmethod
+    def _work_key(cls, value: object) -> WorkKey:
+        if isinstance(value, WorkKey):
+            return value
+        if not isinstance(value, str):
+            raise TypeError("work key must be a string")
+        return WorkKey(value)
+
+    @field_validator("run_key", mode="before")
+    @classmethod
+    def _run_key(cls, value: object) -> RunKey:
+        if isinstance(value, RunKey):
+            return value
+        if not isinstance(value, str):
+            raise TypeError("run key must be a string")
+        return RunKey(value)
+
+    @field_validator("stage_key", mode="before")
+    @classmethod
+    def _stage_key(cls, value: object) -> StageKey:
+        if isinstance(value, StageKey):
+            return value
+        if not isinstance(value, str):
+            raise TypeError("stage key must be a string")
+        return StageKey(value)
+
+    @field_validator("labels", mode="after")
+    @classmethod
+    def _labels(cls, value: Mapping[str, str]) -> Mapping[str, str]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("campaign_key", "work_key", "run_key", "stage_key")
+    def _serialize_key(self, value: object) -> str:
+        return str(value)
+
+    @field_serializer("labels")
+    def _serialize_labels(self, value: Mapping[str, str]) -> dict[str, str]:
+        return dict(value)
+
+    @model_validator(mode="after")
+    def _validate_payload(self) -> AdmissionPayload:
+        validate_non_empty_string(
+            self.input_reference, label="input reference"
+        )
+        validate_key_value(self.pipeline_key, label="pipeline key")
+        validate_positive_integer(
+            self.pipeline_version, label="pipeline version"
+        )
+        validate_positive_integer(self.attempt_number, label="attempt number")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,9 +587,6 @@ def _admit_candidate(  # noqa: PLR0913 -- explicit admission facts
         stage_key=StageKey(candidate.stage_key),
         attempt_number=attempt.attempt_number,
     )
-    workflow_args = stage.args_for(payload)
-    if not isinstance(workflow_args, tuple):
-        raise TypeError("stage args_for must return a tuple")
     options: EnqueueOptions = {
         "workflow_name": _workflow_name(stage),
         "queue_name": stage.queue_name,
@@ -519,7 +595,7 @@ def _admit_candidate(  # noqa: PLR0913 -- explicit admission facts
     client.enqueue_in_transaction(
         connection,
         options,
-        *workflow_args,
+        payload.model_dump(mode="json"),
     )
 
 

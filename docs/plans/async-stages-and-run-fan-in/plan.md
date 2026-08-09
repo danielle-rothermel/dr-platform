@@ -1,15 +1,14 @@
 # Async stages and run fan-in
 
-Status: draft implementation plan
+Status: implemented
 
 ## Planning vocabulary and contracts
 
-The proposed vocabulary in [plan-terms.toml](plan-terms.toml) and standing
-rules in [plan-contracts.toml](plan-contracts.toml) hold definitions and rules
-for this planning stage. This document applies them rather than repeating them.
+The vocabulary in [plan-terms.toml](plan-terms.toml) and standing rules in
+[plan-contracts.toml](plan-contracts.toml) hold the planning-stage selections.
+This document applies them rather than repeating them.
 
-The selected planning vocabulary and contracts must be promoted into `.defs/`
-during implementation.
+Their binding forms live in the repository's authoritative `.defs/` sources.
 
 ## Purpose and scope
 
@@ -27,21 +26,10 @@ The reviewed foundation versions are:
 - `dr-store==0.2.0`
 - `dr-providers==0.3.0`
 - `dr-exec==0.1.7`
-- `dr-platform==0.1.1` as the starting point
 - DBOS `2.27.0`, already pinned by `dr-platform`
 
 The packages co-install under Python 3.12 and newer. This work adds no runtime
 dependency from `dr-platform` to `dr-store`, `dr-providers`, or `dr-exec`.
-
-### Current gaps
-
-- The platform-owned workflow wrapper is synchronous and does not await an
-  async application workflow.
-- A work item records its origin run, but a submission run does not persist its
-  own membership. Reused work is therefore absent from reads for later
-  submission runs.
-- No durable platform primitive observes a closed run membership, releases one
-  run completion after all members settle, and records its outcome.
 
 ### Goals
 

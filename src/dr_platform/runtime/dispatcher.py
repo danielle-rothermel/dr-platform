@@ -13,6 +13,10 @@ from dr_platform.admission.runner import (
     DEFAULT_ADMISSION_BATCH_SIZE,
     run_admission_pass,
 )
+from dr_platform.completion.barrier import (
+    DEFAULT_RUN_BARRIER_BATCH_SIZE,
+    run_barrier_pass,
+)
 from dr_platform.execution.handoff import is_pipeline_wrapped
 from dr_platform.recovery.sweep import (
     DEFAULT_SWEEP_BATCH_SIZE,
@@ -31,7 +35,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_DISPATCHER_CRON = "*/5 * * * * *"
+DEFAULT_RUN_BARRIER_CRON = "*/5 * * * * *"
 DISPATCHER_WORKFLOW_NAME = "dr_platform_staging_dispatcher"
+RUN_BARRIER_WORKFLOW_NAME = "dr_platform_run_barrier"
 SWEEP_WORKFLOW_NAME = "dr_platform_staging_sweep"
 
 ScheduledWorkflow = Callable[[datetime, datetime], None]
@@ -61,10 +67,11 @@ def _require_wrapped_registry(registry: PipelineRegistry) -> None:
 
 @dataclass(frozen=True, slots=True)
 class DispatcherRegistration:
-    """Owns the client shared by admission and optional sweep workflows."""
+    """Owns the client shared by admission, barrier, and optional sweep."""
 
     client: DBOSClient
     workflow: ScheduledWorkflow
+    barrier_workflow: ScheduledWorkflow
     sweep_workflow: ScheduledWorkflow | None = None
 
     def close(self) -> None:
@@ -78,11 +85,16 @@ def register_scheduled_dispatcher(  # noqa: PLR0913 -- explicit wiring facts
     registry: PipelineRegistry,
     cron: str = DEFAULT_DISPATCHER_CRON,
     batch_size: int = DEFAULT_ADMISSION_BATCH_SIZE,
+    barrier_cron: str = DEFAULT_RUN_BARRIER_CRON,
+    barrier_batch_size: int = DEFAULT_RUN_BARRIER_BATCH_SIZE,
     sweep_cron: str | None = None,
     sweep_batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
 ) -> DispatcherRegistration:
     """Register admission and optional single-sweeper workflows."""
     validate_positive_integer(batch_size, label="admission batch size")
+    validate_positive_integer(
+        barrier_batch_size, label="run barrier batch size"
+    )
     if sweep_cron is not None:
         validate_positive_integer(sweep_batch_size, label="sweep batch size")
     validate_database_colocation(
@@ -129,7 +141,6 @@ def register_scheduled_dispatcher(  # noqa: PLR0913 -- explicit wiring facts
                     ),
                 )
             if summary.mismatched_stages:
-                # Registry/data drift is a deployment failure, not app failure.
                 logger.error(
                     "admission found registry/data drift for stages: %s",
                     ", ".join(
@@ -137,6 +148,28 @@ def register_scheduled_dispatcher(  # noqa: PLR0913 -- explicit wiring facts
                         f"{stage.pipeline_version} stage "
                         f"{stage.stage_key.value!r}: {stage.message}"
                         for stage in summary.mismatched_stages
+                    ),
+                )
+
+        @DBOS.scheduled(barrier_cron)
+        @DBOS.workflow(name=RUN_BARRIER_WORKFLOW_NAME)
+        def reconcile_run_barriers(
+            _scheduled_time: datetime,
+            _actual_time: datetime,
+        ) -> None:
+            summary = run_barrier_pass(
+                engine,
+                client=client,
+                registry=registry,
+                batch_size=barrier_batch_size,
+            )
+            if summary.failures:
+                logger.error(
+                    "run barrier failed for runs: %s",
+                    ", ".join(
+                        f"{failure.run_key.value!r}: "
+                        f"{failure.error_type}: {failure.message}"
+                        for failure in summary.failures
                     ),
                 )
 
@@ -162,5 +195,6 @@ def register_scheduled_dispatcher(  # noqa: PLR0913 -- explicit wiring facts
     return DispatcherRegistration(
         client=client,
         workflow=cast("ScheduledWorkflow", dispatch),
+        barrier_workflow=cast("ScheduledWorkflow", reconcile_run_barriers),
         sweep_workflow=sweep_workflow,
     )

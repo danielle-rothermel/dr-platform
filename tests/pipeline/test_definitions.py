@@ -1,20 +1,25 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import pytest
 
-from dr_platform._core.identities import PipelineKey, StageKey
+from dr_platform._core.identities import (
+    PipelineKey,
+    RunCompletionKey,
+    StageKey,
+)
 from dr_platform.pipeline.definitions import (
     PipelineDefinition,
     PipelineIdentity,
+    RunCompletionDefinition,
     StageDefinition,
 )
 from dr_platform.pipeline.registry import PipelineRegistry
 
 
-def _workflow(*args: object) -> object:
-    return args
+async def _workflow(*args: object) -> str:
+    return repr(args)
 
 
 def _args_for(*args: object) -> tuple[object, ...]:
@@ -25,7 +30,7 @@ def _stage(
     key: str,
     *,
     queue_name: str | None = None,
-    workflow: Callable[..., object] = _workflow,
+    workflow: Callable[..., Awaitable[str | None]] = _workflow,
 ) -> StageDefinition:
     return StageDefinition(
         key=StageKey(key),
@@ -87,4 +92,28 @@ def test_pipeline_rejects_duplicate_stage_keys() -> None:
             key=PipelineKey("evaluation"),
             version=1,
             stages=(_stage("execute"), _stage("execute")),
+        )
+
+
+def test_stage_rejects_a_synchronous_workflow() -> None:
+    def workflow() -> str:
+        return "output:1"
+
+    with pytest.raises(TypeError, match="async callable"):
+        _stage("execute", workflow=workflow)  # ty: ignore[invalid-argument-type]
+
+
+def test_run_completion_key_cannot_collide_with_a_stage_key() -> None:
+    completion = RunCompletionDefinition(
+        key=RunCompletionKey("execute"),
+        queue_name="completion",
+        workflow=_workflow,
+        args_for=_args_for,
+    )
+    with pytest.raises(ValueError, match="must not collide"):
+        PipelineDefinition(
+            key=PipelineKey("evaluation"),
+            version=1,
+            stages=(_stage("execute"),),
+            run_completion=completion,
         )

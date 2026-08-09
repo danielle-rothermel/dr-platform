@@ -8,6 +8,7 @@ from sqlalchemy import create_engine
 
 from dr_platform._core.identities import PipelineKey, StageKey
 from dr_platform.admission.runner import AdmissionSummary, StageMismatch
+from dr_platform.completion.barrier import RunBarrierSummary
 from dr_platform.execution.handoff import wrap_pipeline_workflows
 from dr_platform.pipeline.definitions import (
     PipelineDefinition,
@@ -20,7 +21,7 @@ from dr_platform.runtime.dispatcher import UnwrappedPipelineError
 
 
 def _declared_pipeline() -> PipelineDefinition:
-    def workflow(*args: object) -> str:
+    async def workflow(*args: object) -> str:
         return "ref"
 
     def args_for(*args: object) -> tuple[object, ...]:
@@ -92,6 +93,12 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
         )
 
     monkeypatch.setattr(dispatcher, "run_admission_pass", fake_pass)
+
+    def fake_barrier(engine: object, **kwargs: object) -> RunBarrierSummary:
+        calls.append(("barrier", (engine, kwargs)))
+        return RunBarrierSummary(releases=(), failures=())
+
+    monkeypatch.setattr(dispatcher, "run_barrier_pass", fake_barrier)
     config = PlatformDbosConfig(
         database_url=("postgresql+psycopg://user:secret@db/platform"),
         system_database_url=("postgresql+psycopg://user:secret@db/platform"),
@@ -103,9 +110,16 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
         config=config,
         engine=engine,
         registry=registry,
+        cron="*/2 * * * * *",
         batch_size=17,
+        barrier_cron="*/7 * * * * *",
+        barrier_batch_size=23,
     )
     registration.workflow(
+        datetime(2026, 7, 17, tzinfo=UTC),
+        datetime(2026, 7, 17, tzinfo=UTC),
+    )
+    registration.barrier_workflow(
         datetime(2026, 7, 17, tzinfo=UTC),
         datetime(2026, 7, 17, tzinfo=UTC),
     )
@@ -113,13 +127,22 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
     engine.dispose()
 
     assert calls[0] == ("client", config.system_database_url)
-    assert ("cron", dispatcher.DEFAULT_DISPATCHER_CRON) in calls
+    assert ("cron", "*/2 * * * * *") in calls
+    assert ("cron", "*/7 * * * * *") in calls
     assert ("workflow", dispatcher.DISPATCHER_WORKFLOW_NAME) in calls
-    assert calls[-1] == (
+    assert ("workflow", dispatcher.RUN_BARRIER_WORKFLOW_NAME) in calls
+    assert (
         "pass",
         (
             engine,
             {"client": client, "registry": registry, "batch_size": 17},
+        ),
+    ) in calls
+    assert calls[-1] == (
+        "barrier",
+        (
+            engine,
+            {"client": client, "registry": registry, "batch_size": 23},
         ),
     )
     assert client.destroyed

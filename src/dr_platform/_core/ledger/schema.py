@@ -22,7 +22,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
-from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.states import (
+    RunCompletionExecutionState,
+    StageExecutionState,
+)
 
 if TYPE_CHECKING:
     from enum import StrEnum
@@ -64,16 +67,68 @@ class StagingSchema:
             Column("pipeline_key", Text, nullable=False),
             Column("pipeline_version", Integer, nullable=False),
             Column("execution_config_reference", Text, nullable=False),
+            Column("expected_member_count", Integer, nullable=False),
+            Column("manifest_reference", Text),
+            Column("membership_digest", Text),
+            Column("run_completion_key", Text),
             Column("created_at", DateTime(timezone=True), nullable=False),
-            Column("submission_completed_at", DateTime(timezone=True)),
+            Column("registration_closed_at", DateTime(timezone=True)),
+            Column("registered_member_count", Integer),
+            Column("created_work_count", Integer),
+            Column("reused_work_count", Integer),
+            Column("released_at", DateTime(timezone=True)),
+            Column("release_terminal_state_counts", JSONB),
             CheckConstraint(
                 "pipeline_version > 0",
                 name=name("ck_pipeline_runs_version"),
             ),
             CheckConstraint(
-                "submission_completed_at IS NULL "
-                "OR submission_completed_at >= created_at",
-                name=name("ck_pipeline_runs_submission_time"),
+                "expected_member_count >= 0",
+                name=name("ck_pipeline_runs_member_count"),
+            ),
+            CheckConstraint(
+                "(manifest_reference IS NULL) = (membership_digest IS NULL)",
+                name=name("ck_pipeline_runs_manifest_binding"),
+            ),
+            CheckConstraint(
+                "run_completion_key IS NULL OR manifest_reference IS NOT NULL",
+                name=name("ck_pipeline_runs_completion_manifest"),
+            ),
+            CheckConstraint(
+                "registration_closed_at IS NULL OR "
+                "registration_closed_at >= created_at",
+                name=name("ck_pipeline_runs_registration_time"),
+            ),
+            CheckConstraint(
+                "(registration_closed_at IS NULL) = "
+                "(registered_member_count IS NULL)",
+                name=name("ck_pipeline_runs_registration_count"),
+            ),
+            CheckConstraint(
+                "(registration_closed_at IS NULL) = "
+                "(created_work_count IS NULL) AND "
+                "(registration_closed_at IS NULL) = "
+                "(reused_work_count IS NULL)",
+                name=name("ck_pipeline_runs_receipt_presence"),
+            ),
+            CheckConstraint(
+                "registration_closed_at IS NULL OR "
+                "(registered_member_count = expected_member_count AND "
+                "created_work_count >= 0 AND reused_work_count >= 0 AND "
+                "created_work_count + reused_work_count = "
+                "registered_member_count)",
+                name=name("ck_pipeline_runs_receipt_counts"),
+            ),
+            CheckConstraint(
+                "released_at IS NULL OR "
+                "(registration_closed_at IS NOT NULL AND "
+                "released_at >= registration_closed_at)",
+                name=name("ck_pipeline_runs_release_time"),
+            ),
+            CheckConstraint(
+                "(released_at IS NULL) = "
+                "(release_terminal_state_counts IS NULL)",
+                name=name("ck_pipeline_runs_release_counts"),
             ),
         )
 
@@ -124,6 +179,41 @@ class StagingSchema:
             name("ix_work_items_labels"),
             self.work_items.c.labels,
             postgresql_using="gin",
+        )
+
+        self.run_memberships = Table(
+            name("run_memberships"),
+            self.metadata,
+            Column(
+                "run_key",
+                Text,
+                ForeignKey(
+                    f"{name('pipeline_runs')}.run_key",
+                    name=name("fk_run_memberships_run"),
+                    ondelete="RESTRICT",
+                ),
+                primary_key=True,
+            ),
+            Column("member_ordinal", Integer, primary_key=True),
+            Column(
+                "work_item_id",
+                BigInteger,
+                ForeignKey(
+                    f"{name('work_items')}.work_item_id",
+                    name=name("fk_run_memberships_work_item"),
+                    ondelete="RESTRICT",
+                ),
+                nullable=False,
+            ),
+            UniqueConstraint(
+                "run_key",
+                "work_item_id",
+                name=name("uq_run_memberships_run_work"),
+            ),
+            CheckConstraint(
+                "member_ordinal >= 0",
+                name=name("ck_run_memberships_ordinal"),
+            ),
         )
 
         self.stage_executions = Table(
@@ -184,6 +274,11 @@ class StagingSchema:
             self.stage_executions.c.stage_key,
             self.stage_executions.c.rank,
             postgresql_where=text("state = 'ready'"),
+        )
+        Index(
+            name("ix_stage_executions_nonterminal_work"),
+            self.stage_executions.c.work_item_id,
+            postgresql_where=text("state IN ('ready', 'admitted')"),
         )
 
         self.stage_attempts = Table(
@@ -279,5 +374,50 @@ class StagingSchema:
             CheckConstraint(
                 "capacity >= 0",
                 name=name("ck_stage_controls_capacity"),
+            ),
+        )
+
+        self.run_completion_executions = Table(
+            name("run_completion_executions"),
+            self.metadata,
+            Column(
+                "run_completion_execution_id",
+                BigInteger,
+                Identity(),
+                primary_key=True,
+            ),
+            Column(
+                "run_key",
+                Text,
+                ForeignKey(
+                    f"{name('pipeline_runs')}.run_key",
+                    name=name("fk_run_completion_executions_run"),
+                    ondelete="RESTRICT",
+                ),
+                nullable=False,
+                unique=True,
+            ),
+            Column("workflow_id", Text, nullable=False, unique=True),
+            Column("state", Text, nullable=False),
+            Column("enqueued_at", DateTime(timezone=True), nullable=False),
+            Column("output_reference", Text),
+            Column("error_summary", JSONB),
+            Column("terminal_at", DateTime(timezone=True)),
+            CheckConstraint(
+                _enum_check("state", RunCompletionExecutionState),
+                name=name("ck_run_completion_executions_state"),
+            ),
+            CheckConstraint(
+                "terminal_at IS NULL OR terminal_at >= enqueued_at",
+                name=name("ck_run_completion_executions_terminal_time"),
+            ),
+            CheckConstraint(
+                "(state = 'enqueued' AND terminal_at IS NULL AND "
+                "output_reference IS NULL AND error_summary IS NULL) OR "
+                "(state = 'succeeded' AND terminal_at IS NOT NULL AND "
+                "output_reference IS NOT NULL AND error_summary IS NULL) OR "
+                "(state = 'failed' AND terminal_at IS NOT NULL AND "
+                "output_reference IS NULL AND error_summary IS NOT NULL)",
+                name=name("ck_run_completion_executions_outcome"),
             ),
         )

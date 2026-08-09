@@ -20,8 +20,13 @@ from dr_platform.pipeline.definitions import (
 )
 from dr_platform.pipeline.registry import PipelineRegistry
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
-from dr_platform.submission.stream import WorkInput, submit
-from tests.conftest import _args_for, dbos_config, initialize_dbos_schema
+from dr_platform.submission.stream import WorkInput
+from tests.conftest import (
+    _args_for,
+    dbos_config,
+    initialize_dbos_schema,
+    submit_items,
+)
 
 _HARD_EXIT_CODE = 86
 _WORKER_TIMEOUT_SECONDS = 10
@@ -29,7 +34,7 @@ _WORKER_JOIN_TIMEOUT_SECONDS = 20
 _PROBE_ROW_ID = 1
 
 
-def _recovery_probe_stage(database_url: str) -> str:
+async def _recovery_probe_stage(database_url: str) -> str:
     engine = create_engine(database_url)
     try:
         with engine.begin() as connection:
@@ -221,7 +226,7 @@ def test_dbos_recovery_reuses_the_platform_stage_attempt(
         capacity=1,
         engine=pg_engine,
     )
-    submit(
+    submit_items(
         campaign_key=f"campaign-{suffix}",
         run_key=f"run-{suffix}",
         pipeline=pipeline.identity,

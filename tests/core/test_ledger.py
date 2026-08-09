@@ -59,6 +59,8 @@ from tests.conftest import NOW, engine_dsn
 
 STAGING_TABLE_SUFFIXES = (
     "pipeline_runs",
+    "run_memberships",
+    "run_completion_executions",
     "work_items",
     "stage_executions",
     "stage_attempts",
@@ -334,6 +336,7 @@ def _create_stage_execution(
         pipeline_key="pipeline",
         pipeline_version=1,
         execution_config_reference="config:1",
+        expected_member_count=0,
         created_at=NOW,
     )
     work_item = insert_work_item(
@@ -513,7 +516,15 @@ def test_migration_and_runtime_schema_inventories_match(
                 timing="before",
                 orientation="row",
                 events=("update",),
-            )
+            ),
+            _TriggerInventory(
+                name="guard_closed_run_membership",
+                table="run_memberships",
+                function="guard_closed_run_membership",
+                timing="before",
+                orientation="row",
+                events=("insert", "delete", "update"),
+            ),
         }
     )
     assert _trigger_inventory(pg_engine, prefix=runtime_prefix) == frozenset()
@@ -566,6 +577,7 @@ def test_campaign_work_identity_is_unique(pg_engine: Engine) -> None:
                 pipeline_key="pipeline",
                 pipeline_version=1,
                 execution_config_reference="config:1",
+                expected_member_count=0,
                 created_at=NOW,
             )
         )
@@ -677,7 +689,7 @@ def test_pipeline_run_provenance_rejects_direct_updates(
         )
 
 
-def test_pipeline_run_allows_submission_completion_update(
+def test_pipeline_run_allows_one_registration_closure_update(
     pg_engine: Engine,
 ) -> None:
     _migrate(pg_engine)
@@ -693,14 +705,19 @@ def test_pipeline_run_allows_submission_completion_update(
             execution_config_reference="config:1",
             created_at=NOW,
         )
-        stored_completed_at = connection.execute(
+        stored_closed_at = connection.execute(
             schema.pipeline_runs.update()
             .where(schema.pipeline_runs.c.run_key == "run-1")
-            .values(submission_completed_at=completed_at)
-            .returning(schema.pipeline_runs.c.submission_completed_at)
+            .values(
+                registration_closed_at=completed_at,
+                registered_member_count=0,
+                created_work_count=0,
+                reused_work_count=0,
+            )
+            .returning(schema.pipeline_runs.c.registration_closed_at)
         ).scalar_one()
 
-    assert stored_completed_at == completed_at
+    assert stored_closed_at == completed_at
 
 
 def test_stage_execution_transitions_reject_terminal_reentry(

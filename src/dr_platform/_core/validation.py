@@ -10,6 +10,13 @@ def validate_positive_integer(value: int, *, label: str) -> None:
         raise ValueError(f"{label} must be positive")
 
 
+def validate_nonnegative_integer(value: int, *, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{label} must be an integer")
+    if value < 0:
+        raise ValueError(f"{label} must be non-negative")
+
+
 def validate_non_empty_string(value: object, *, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{label} must be a non-empty string")

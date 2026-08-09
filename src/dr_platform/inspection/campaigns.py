@@ -38,9 +38,13 @@ class RunSummary:
     pipeline_key: str
     pipeline_version: int
     execution_config_reference: str
+    expected_member_count: int
+    manifest_reference: str | None
+    membership_digest: str | None
     created_at: datetime
-    submission_completed_at: datetime | None
-    originated_work_item_count: int
+    registration_closed_at: datetime | None
+    registered_member_count: int | None
+    released_at: datetime | None
 
 
 def inspect_campaign(
@@ -113,16 +117,16 @@ def list_runs(
         normalize_run_key(cursor) if cursor is not None else None
     )
     runs = selected_schema.pipeline_runs
-    items = selected_schema.work_items
+    memberships = selected_schema.run_memberships
     statement = (
         select(
             *runs.c,
-            func.count(items.c.work_item_id).label("item_count"),
+            func.count(memberships.c.work_item_id).label("member_count"),
         )
         .select_from(
             runs.outerjoin(
-                items,
-                runs.c.run_key == items.c.origin_run_key,
+                memberships,
+                runs.c.run_key == memberships.c.run_key,
             )
         )
         .where(runs.c.campaign_key == normalized_campaign.value)
@@ -215,7 +219,15 @@ def _decode_run_summary(row: RowMapping) -> RunSummary:
         pipeline_key=row["pipeline_key"],
         pipeline_version=row["pipeline_version"],
         execution_config_reference=row["execution_config_reference"],
+        expected_member_count=row["expected_member_count"],
+        manifest_reference=row["manifest_reference"],
+        membership_digest=row["membership_digest"],
         created_at=row["created_at"],
-        submission_completed_at=row["submission_completed_at"],
-        originated_work_item_count=row["item_count"],
+        registration_closed_at=row["registration_closed_at"],
+        registered_member_count=(
+            row["registered_member_count"]
+            if row["registration_closed_at"] is not None
+            else row["member_count"]
+        ),
+        released_at=row["released_at"],
     )

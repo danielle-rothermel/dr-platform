@@ -1,7 +1,7 @@
 #:schema ../../../.defs/terms.schema.json
 
-# Selected additions for the async-stages-and-run-fan-in plan. These terms are
-# not yet part of the authoritative repository vocabulary.
+# Planning-stage selections for async stages and run fan-in. Their binding
+# forms live in ../../../.defs/terms.toml.
 
 [[terms]]
 name = "run registration declaration"

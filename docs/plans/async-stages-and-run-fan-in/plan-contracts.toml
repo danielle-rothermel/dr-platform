@@ -1,5 +1,5 @@
-# Selected additions for the async-stages-and-run-fan-in plan. These contracts
-# are not yet binding repository contracts.
+# Planning-stage selections for async stages and run fan-in. Their binding
+# forms live in ../../../.defs/contracts.toml.
 
 [[contracts]]
 title = "Application workflows are async"
@@ -12,7 +12,7 @@ One async application boundary permits loop-affine resources and async storage \
 without duplicating the synchronous transactional ledger or extending \
 database transactions across application effects."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/pipeline/test_definitions.py tests/execution/test_async_workflow.py"
+check = "uv run pytest -q tests/pipeline/test_definitions.py tests/execution/test_async_workflow.py"
 
 [[contracts]]
 title = "Applications own workflow resources"
@@ -23,7 +23,7 @@ rationale = """
 Resource owners know their client and shutdown semantics; the platform promises \
 no event-loop or shutdown sequence."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/execution/test_async_workflow.py -k 'resource_owner'"
+check = "uv run pytest -q tests/execution/test_async_workflow.py -k 'loop_affine_resource'"
 
 [[contracts]]
 title = "Dispatcher transactions execute platform code only"
@@ -38,7 +38,7 @@ Application callbacks inside dispatcher transactions lengthen lock time and a \
 repeatable callback error can poison every pass. Moving them into durable \
 execution bounds transaction work and records one attributable outcome."""
 date = "2026-08-09"
-check = "planned: uv run pytest -q tests/admission/test_runner.py tests/completion/test_run_execution.py -k 'args_for or platform_payload or application_failure'"
+check = "uv run pytest -q tests/admission/test_runner.py tests/execution/test_async_workflow.py -k 'serialized_platform_payload or args_for_failure'"
 
 [[contracts]]
 title = "Registration closes ordered membership"
@@ -55,7 +55,7 @@ Normal exhaustion and full validation distinguish a complete stream from a \
 partial prefix. The digest binds closed membership to the application manifest \
 without a member listing API or per-member outcome snapshot."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'registration or digest or replay'"
+check = "uv run pytest -q tests/submission/test_stream.py -k 'interrupted_registration or closed_replay or digest or invalid_membership or database_mutation'"
 
 [[contracts]]
 title = "Registration is set-oriented"
@@ -68,7 +68,7 @@ Bounding transactions without bounding round trips still scales database \
 latency with every member. Set-oriented chunk work preserves streaming and \
 exact validation without serial query amplification."""
 date = "2026-08-09"
-check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'statement_count or closure_scan'"
+check = "uv run pytest -q tests/submission/test_stream.py -k 'statement_count'"
 
 [[contracts]]
 title = "Membership is distinct from origin"
@@ -82,7 +82,7 @@ Overlapping runs need independent complete member sets and correct counts for \
 each submission run, while creation provenance must remain immutable and must \
 not be reinterpreted as membership."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'overlapping or origin'"
+check = "uv run pytest -q tests/submission/test_stream.py tests/inspection/test_run_membership.py -k 'overlapping'"
 
 [[contracts]]
 title = "Work reuse preserves execution provenance"
@@ -96,7 +96,7 @@ One work item has one stage execution history. Reusing that history under \
 different execution facts would make its outcome ambiguous and allow a later \
 run to silently reinterpret earlier work."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/submission/test_run_membership.py -k 'compatible or provenance'"
+check = "uv run pytest -q tests/submission/test_stream.py -k 'execution_provenance'"
 
 [[contracts]]
 title = "Run inspection follows membership"
@@ -111,7 +111,7 @@ Membership is the authoritative run scope, including for reused work. Keeping \
 the first inspection surface narrow avoids embedding complete result sets in \
 summaries or adding pagination before a caller requires it."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/inspection/test_run_membership.py"
+check = "uv run pytest -q tests/inspection/test_run_membership.py"
 
 [[contracts]]
 title = "Run barrier releases completion once"
@@ -125,7 +125,7 @@ Terminality is durable platform evidence, while experiment acceptance remains \
 application policy. Immutable edge-triggered release avoids cross-run retry \
 fences, duplicate aggregate launch, and unrelated-backlog scans."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/completion/test_run_barrier.py"
+check = "uv run pytest -q tests/completion/test_run_barrier.py"
 
 [[contracts]]
 title = "Run completion is outside item pipelines"
@@ -140,7 +140,7 @@ Keeping fan-in beside the linear item pipeline adds a reusable completeness \
 primitive without turning the platform into a graph engine or importing \
 storage, provider, evaluation, or analysis policy."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/pipeline/test_definitions.py tests/completion/test_run_payload.py"
+check = "uv run pytest -q tests/pipeline/test_definitions.py tests/completion/test_run_execution.py -k 'completion'"
 
 [[contracts]]
 title = "Aggregate artifacts preserve consumed provenance"
@@ -154,7 +154,7 @@ Release facts can remain a compact edge-triggered snapshot while the aggregate \
 stays reproducible after later member transitions, without platform-owned \
 per-member snapshots or result listing."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/qualification/test_run_completion_artifact.py"
+check = "uv run pytest -q tests/completion/test_run_completion_dbos.py"
 
 [[contracts]]
 title = "Run completion records one outcome"
@@ -168,4 +168,4 @@ rationale = """
 This provides truthful durable fan-in without retry, cancellation, controls, \
 sweep, attempt history, or workflow runtime state projection."""
 date = "2026-08-08"
-check = "planned: uv run pytest -q tests/completion/test_run_execution.py"
+check = "uv run pytest -q tests/completion/test_run_execution.py"

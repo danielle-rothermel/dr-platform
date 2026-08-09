@@ -5,6 +5,26 @@ All notable changes to `dr-platform` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.0 - 2026-08-09
+
+### Added
+
+- Added declared ordered run membership, canonical membership digests,
+  set-oriented registration, stable closure receipts, and membership-based
+  bulk run inspection.
+- Added optional run completion with independent barrier reconciliation,
+  immutable one-time release facts, stable durable workflow identity, and
+  application-outcome inspection.
+
+### Changed
+
+- Made application stage and run completion workflows async.
+- Moved argument derivation into durable wrappers so dispatcher transactions
+  enqueue only compact validated platform payloads.
+- Replaced the development schema baseline with the fresh membership and
+  completion schema; existing valuable databases require archival before an
+  explicit reset.
+
 ## 0.1.1 - 2026-08-05
 
 ### Changed

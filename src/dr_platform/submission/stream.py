@@ -1,21 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import UNIQUE, StrEnum, verify
 from typing import TYPE_CHECKING
+
+from dr_serialize import canonical_json_bytes
+from sqlalchemy import or_, select
+from sqlalchemy.dialects.postgresql import insert
 
 from dr_platform._core.frozen import immutable_mapping
 from dr_platform._core.identities import (
     CampaignKey,
+    CampaignWorkIdentity,
     RunKey,
-    StageKey,
     WorkKey,
 )
-from dr_platform._core.ledger.executions import insert_stage_execution
 from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.validation import (
     validate_labels,
     validate_non_empty_string,
+    validate_nonnegative_integer,
     validate_positive_integer,
 )
 from dr_platform.pipeline.definitions import (
@@ -23,20 +30,34 @@ from dr_platform.pipeline.definitions import (
     validate_pipeline_identity,
 )
 from dr_platform.submission.runs import (
+    PipelineRunRecord,
+    close_registration,
     get_pipeline_run,
     insert_pipeline_run,
-    mark_submission_completed,
 )
-from dr_platform.submission.work_items import insert_work_item_with_result
+from dr_platform.submission.work_items import stable_random_rank
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
 
     from dr_platform.pipeline.registry import PipelineRegistry
 
 DEFAULT_CHUNK_SIZE = 500
+MEMBERSHIP_DIGEST_SCHEMA = "dr-platform/run-membership/v1"
+
+
+@verify(UNIQUE)
+class MembershipDigestField(StrEnum):
+    """Persisted digest keys; spell them out at encoding sites."""
+
+    ENTRIES = "entries"
+    EXPECTED_MEMBER_COUNT = "expected_member_count"
+    SCHEMA = "schema"
+    INPUT_REFERENCE = "input_reference"
+    ORDINAL = "ordinal"
+    WORK_KEY = "work_key"
 
 
 def _utc_now() -> datetime:
@@ -74,10 +95,101 @@ class WorkInput:
 
 
 @dataclass(frozen=True, slots=True)
+class RunMemberInput:
+    ordinal: int
+    work: WorkInput
+
+    def __post_init__(self) -> None:
+        validate_nonnegative_integer(self.ordinal, label="member ordinal")
+        if not isinstance(self.work, WorkInput):
+            raise TypeError("run member work must be a WorkInput")
+
+
+@dataclass(frozen=True, slots=True)
+class RunRegistrationDeclaration:
+    expected_member_count: int
+    manifest_reference: str | None = None
+    membership_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        validate_nonnegative_integer(
+            self.expected_member_count, label="expected member count"
+        )
+        if (self.manifest_reference is None) != (
+            self.membership_digest is None
+        ):
+            raise ValueError(
+                "manifest reference and membership digest must be supplied "
+                "together"
+            )
+        if self.manifest_reference is not None:
+            validate_non_empty_string(
+                self.manifest_reference, label="manifest reference"
+            )
+            validate_non_empty_string(
+                self.membership_digest, label="membership digest"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class SubmissionReceipt:
     run_key: RunKey
-    inserted_count: int
-    already_existing_count: int
+    membership_digest: str | None
+    registered_member_count: int
+    created_work_count: int
+    reused_work_count: int
+    registration_closed_at: datetime
+
+
+class RegistrationClosureError(RuntimeError):
+    pass
+
+
+class RunMembershipConflictError(RuntimeError):
+    pass
+
+
+class _MembershipDigester:
+    def __init__(self, *, expected_member_count: int) -> None:
+        self._hash = hashlib.sha256()
+        self._first = True
+        self._hash.update(b'{"entries":[')
+        self._expected_member_count = expected_member_count
+
+    def add(
+        self, *, ordinal: int, work_key: str, input_reference: str
+    ) -> None:
+        if not self._first:
+            self._hash.update(b",")
+        self._first = False
+        self._hash.update(b'{"input_reference":')
+        self._hash.update(canonical_json_bytes(input_reference))
+        self._hash.update(b',"ordinal":')
+        self._hash.update(canonical_json_bytes(ordinal))
+        self._hash.update(b',"work_key":')
+        self._hash.update(canonical_json_bytes(work_key))
+        self._hash.update(b"}")
+
+    def finish(self) -> str:
+        self._hash.update(b'],"expected_member_count":')
+        self._hash.update(canonical_json_bytes(self._expected_member_count))
+        self._hash.update(b',"schema":')
+        self._hash.update(canonical_json_bytes(MEMBERSHIP_DIGEST_SCHEMA))
+        self._hash.update(b"}")
+        return self._hash.hexdigest()
+
+
+def _membership_digest_for_inputs(
+    members: Iterable[RunMemberInput], *, expected_member_count: int
+) -> str:
+    digester = _MembershipDigester(expected_member_count=expected_member_count)
+    for member in members:
+        digester.add(
+            ordinal=member.ordinal,
+            work_key=member.work.work_key.value,
+            input_reference=member.work.input_reference,
+        )
+    return digester.finish()
 
 
 def submit(  # noqa: PLR0913 -- explicit submission boundary
@@ -86,16 +198,19 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
     run_key: RunKey | str,
     pipeline: PipelineIdentity,
     execution_config_reference: str,
-    items: Iterable[WorkInput],
+    declaration: RunRegistrationDeclaration,
+    members: Iterable[RunMemberInput],
     registry: PipelineRegistry,
     engine: Engine,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     clock: Callable[[], datetime] = _utc_now,
     schema: StagingSchema | None = None,
 ) -> SubmissionReceipt:
-    """Incrementally commit campaign work from an arbitrary iterable."""
+    """Register one complete ordered membership in bounded transactions."""
     validate_positive_integer(chunk_size, label="chunk size")
     validate_pipeline_identity(pipeline)
+    if not isinstance(declaration, RunRegistrationDeclaration):
+        raise TypeError("declaration must be a RunRegistrationDeclaration")
     selected_schema = schema or StagingSchema()
     normalized_campaign_key = (
         campaign_key
@@ -109,68 +224,96 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
         key=pipeline.key,
         version=pipeline.version,
     )
-    first_stage = pipeline_definition.stages[0]
+    completion = pipeline_definition.run_completion
+    if completion is not None and declaration.manifest_reference is None:
+        raise ValueError(
+            "a completion-enabled pipeline requires a manifest reference "
+            "and membership digest"
+        )
 
     with engine.begin() as connection:
-        insert_pipeline_run(
+        run = insert_pipeline_run(
             connection,
             run_key=normalized_run_key,
             campaign_key=normalized_campaign_key,
             pipeline_key=pipeline_definition.key.value,
             pipeline_version=pipeline_definition.version,
             execution_config_reference=execution_config_reference,
+            expected_member_count=declaration.expected_member_count,
+            manifest_reference=declaration.manifest_reference,
+            membership_digest=declaration.membership_digest,
+            run_completion_key=(
+                None if completion is None else completion.key.value
+            ),
             created_at=clock(),
             schema=selected_schema,
         )
+        if run.registration_closed_at is not None:
+            return _receipt(run)
 
-    inserted_count = 0
-    already_existing_count = 0
-    chunk: list[WorkInput] = []
-    for item in items:
-        if not isinstance(item, WorkInput):
-            raise TypeError("items must yield WorkInput values")
-        chunk.append(item)
+    chunk: list[RunMemberInput] = []
+    for member in members:
+        if not isinstance(member, RunMemberInput):
+            raise TypeError("members must yield RunMemberInput values")
+        chunk.append(member)
         if len(chunk) < chunk_size:
             continue
-        inserted, existing = _commit_chunk(
+        _commit_chunk(
             engine=engine,
             schema=selected_schema,
             campaign_key=normalized_campaign_key,
             run_key=normalized_run_key,
-            first_stage_key=first_stage.key,
+            first_stage_key=pipeline_definition.stages[0].key.value,
             chunk=chunk,
             clock=clock,
         )
-        inserted_count += inserted
-        already_existing_count += existing
         chunk.clear()
-
     if chunk:
-        inserted, existing = _commit_chunk(
+        _commit_chunk(
             engine=engine,
             schema=selected_schema,
             campaign_key=normalized_campaign_key,
             run_key=normalized_run_key,
-            first_stage_key=first_stage.key,
+            first_stage_key=pipeline_definition.stages[0].key.value,
             chunk=chunk,
             clock=clock,
         )
-        inserted_count += inserted
-        already_existing_count += existing
 
     with engine.begin() as connection:
-        mark_submission_completed(
+        run = get_pipeline_run(
             connection,
             run_key=normalized_run_key,
-            completed_at=clock(),
+            for_update=True,
             schema=selected_schema,
         )
-
-    return SubmissionReceipt(
-        run_key=normalized_run_key,
-        inserted_count=inserted_count,
-        already_existing_count=already_existing_count,
-    )
+        if run is None:
+            raise LookupError(f"pipeline run does not exist: {run_key}")
+        if run.registration_closed_at is not None:
+            return _receipt(run)
+        digest, member_count, created_count = _validate_membership_for_closure(
+            connection,
+            run=run,
+            schema=selected_schema,
+        )
+        if declaration.membership_digest is not None:
+            if digest != declaration.membership_digest:
+                raise RegistrationClosureError(
+                    "persisted membership digest does not match declaration"
+                )
+            stored_digest: str | None = digest
+        else:
+            stored_digest = None
+        run = close_registration(
+            connection,
+            run_key=normalized_run_key,
+            membership_digest=stored_digest,
+            member_count=member_count,
+            created_work_count=created_count,
+            reused_work_count=member_count - created_count,
+            closed_at=clock(),
+            schema=selected_schema,
+        )
+    return _receipt(run)
 
 
 def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
@@ -179,39 +322,245 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
     schema: StagingSchema,
     campaign_key: CampaignKey,
     run_key: RunKey,
-    first_stage_key: StageKey,
-    chunk: list[WorkInput],
+    first_stage_key: str,
+    chunk: list[RunMemberInput],
     clock: Callable[[], datetime],
-) -> tuple[int, int]:
-    inserted_count = 0
-    already_existing_count = 0
+) -> None:
+    work_keys = [member.work.work_key.value for member in chunk]
+    if len(work_keys) != len(set(work_keys)):
+        raise RunMembershipConflictError(
+            "a registration chunk contains duplicate work identities"
+        )
+    ordinals = [member.ordinal for member in chunk]
+    if len(ordinals) != len(set(ordinals)):
+        raise RunMembershipConflictError(
+            "a registration chunk contains duplicate member ordinals"
+        )
+
     with engine.begin() as connection:
-        created_at = clock()
-        # Resolve the immutable run once per chunk, not once per item.
-        run = get_pipeline_run(connection, run_key=run_key, schema=schema)
+        run = get_pipeline_run(
+            connection,
+            run_key=run_key,
+            for_update=True,
+            schema=schema,
+        )
         if run is None:
             raise LookupError(f"pipeline run does not exist: {run_key}")
-        for item in chunk:
-            result = insert_work_item_with_result(
-                connection,
-                campaign_key=campaign_key,
-                work_key=item.work_key,
-                origin_run_key=run_key,
-                input_reference=item.input_reference,
-                labels=item.labels,
-                schema=schema,
-                pipeline_run=run,
+        if run.registration_closed_at is not None:
+            raise RunMembershipConflictError(
+                "closed run membership cannot be changed"
             )
-            if not result.inserted:
-                already_existing_count += 1
-                continue
-            insert_stage_execution(
-                connection,
-                work_item_id=result.work_item.work_item_id,
-                stage_key=first_stage_key,
-                stage_index=0,
-                created_at=created_at,
-                schema=schema,
+
+        work_items = schema.work_items
+        inserted_rows = connection.execute(
+            insert(work_items)
+            .values(
+                [
+                    {
+                        "campaign_key": campaign_key.value,
+                        "work_key": member.work.work_key.value,
+                        "origin_run_key": run_key.value,
+                        "input_reference": member.work.input_reference,
+                        "labels": dict(member.work.labels),
+                        "rank": stable_random_rank(
+                            work_identity=CampaignWorkIdentity(
+                                campaign_key, member.work.work_key
+                            )
+                        ),
+                    }
+                    for member in chunk
+                ]
             )
-            inserted_count += 1
-    return inserted_count, already_existing_count
+            .on_conflict_do_nothing(
+                index_elements=["campaign_key", "work_key"]
+            )
+            .returning(work_items.c.work_item_id)
+        ).scalars()
+        inserted_ids = frozenset(inserted_rows)
+
+        origin_runs = schema.pipeline_runs.alias("origin_runs")
+        rows = connection.execute(
+            select(
+                work_items,
+                origin_runs.c.pipeline_key.label("origin_pipeline_key"),
+                origin_runs.c.pipeline_version.label(
+                    "origin_pipeline_version"
+                ),
+                origin_runs.c.execution_config_reference.label(
+                    "origin_execution_config_reference"
+                ),
+            )
+            .select_from(
+                work_items.join(
+                    origin_runs,
+                    work_items.c.origin_run_key == origin_runs.c.run_key,
+                )
+            )
+            .where(
+                work_items.c.campaign_key == campaign_key.value,
+                work_items.c.work_key.in_(work_keys),
+            )
+        ).mappings()
+        by_key = {row["work_key"]: row for row in rows}
+        if len(by_key) != len(chunk):
+            raise RuntimeError(
+                "bulk work read-back did not resolve every item"
+            )
+        for member in chunk:
+            row = by_key[member.work.work_key.value]
+            expected_rank = stable_random_rank(
+                work_identity=CampaignWorkIdentity(
+                    campaign_key, member.work.work_key
+                )
+            )
+            if (
+                row["input_reference"] != member.work.input_reference
+                or dict(row["labels"]) != dict(member.work.labels)
+                or row["rank"] != expected_rank
+            ):
+                raise RunMembershipConflictError(
+                    "campaign/work identity is bound to different immutable "
+                    "facts"
+                )
+            if (
+                row["origin_pipeline_key"] != run.pipeline_key
+                or row["origin_pipeline_version"] != run.pipeline_version
+                or row["origin_execution_config_reference"]
+                != run.execution_config_reference
+            ):
+                raise RunMembershipConflictError(
+                    "reused work has incompatible execution provenance"
+                )
+
+        memberships = schema.run_memberships
+        expected_memberships = [
+            {
+                "run_key": run_key.value,
+                "member_ordinal": member.ordinal,
+                "work_item_id": by_key[member.work.work_key.value][
+                    "work_item_id"
+                ],
+            }
+            for member in chunk
+        ]
+        connection.execute(
+            insert(memberships)
+            .values(expected_memberships)
+            .on_conflict_do_nothing()
+        )
+        work_item_ids = [item["work_item_id"] for item in expected_memberships]
+        membership_rows = tuple(
+            connection.execute(
+                select(memberships).where(
+                    memberships.c.run_key == run_key.value,
+                    or_(
+                        memberships.c.member_ordinal.in_(ordinals),
+                        memberships.c.work_item_id.in_(work_item_ids),
+                    ),
+                )
+            ).mappings()
+        )
+        actual_pairs = {
+            (row["member_ordinal"], row["work_item_id"])
+            for row in membership_rows
+        }
+        expected_pairs = {
+            (item["member_ordinal"], item["work_item_id"])
+            for item in expected_memberships
+        }
+        if actual_pairs != expected_pairs:
+            raise RunMembershipConflictError(
+                "member ordinal or work identity conflicts with persisted "
+                "membership"
+            )
+
+        if inserted_ids:
+            created_at = clock()
+            connection.execute(
+                insert(schema.stage_executions).values(
+                    [
+                        {
+                            "work_item_id": row["work_item_id"],
+                            "stage_key": first_stage_key,
+                            "stage_index": 0,
+                            "state": StageExecutionState.READY.value,
+                            "current_attempt": 0,
+                            "rank": row["rank"],
+                            "output_reference": None,
+                            "created_at": created_at,
+                            "updated_at": created_at,
+                        }
+                        for row in by_key.values()
+                        if row["work_item_id"] in inserted_ids
+                    ]
+                )
+            )
+
+
+def _validate_membership_for_closure(
+    connection: Connection,
+    *,
+    run: PipelineRunRecord,
+    schema: StagingSchema,
+) -> tuple[str, int, int]:
+    memberships = schema.run_memberships
+    work_items = schema.work_items
+    statement = (
+        select(
+            memberships.c.member_ordinal,
+            work_items.c.work_key,
+            work_items.c.input_reference,
+            work_items.c.origin_run_key,
+        )
+        .select_from(
+            memberships.join(
+                work_items,
+                memberships.c.work_item_id == work_items.c.work_item_id,
+            )
+        )
+        .where(memberships.c.run_key == run.run_key.value)
+        .order_by(memberships.c.member_ordinal)
+    )
+    digester = _MembershipDigester(
+        expected_member_count=run.expected_member_count
+    )
+    member_count = 0
+    created_count = 0
+    for row in connection.execute(
+        statement.execution_options(yield_per=DEFAULT_CHUNK_SIZE)
+    ).mappings():
+        if row["member_ordinal"] != member_count:
+            raise RegistrationClosureError(
+                "persisted member ordinals must be contiguous from zero"
+            )
+        digester.add(
+            ordinal=row["member_ordinal"],
+            work_key=row["work_key"],
+            input_reference=row["input_reference"],
+        )
+        member_count += 1
+        if row["origin_run_key"] == run.run_key.value:
+            created_count += 1
+    if member_count != run.expected_member_count:
+        raise RegistrationClosureError(
+            "persisted member count does not match declaration"
+        )
+    return digester.finish(), member_count, created_count
+
+
+def _receipt(run: PipelineRunRecord) -> SubmissionReceipt:
+    if (
+        run.registration_closed_at is None
+        or run.registered_member_count is None
+        or run.created_work_count is None
+        or run.reused_work_count is None
+    ):
+        raise RuntimeError("open run has no closure receipt")
+    return SubmissionReceipt(
+        run_key=run.run_key,
+        membership_digest=run.membership_digest,
+        registered_member_count=run.registered_member_count,
+        created_work_count=run.created_work_count,
+        reused_work_count=run.reused_work_count,
+        registration_closed_at=run.registration_closed_at,
+    )
