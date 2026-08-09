@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
-from sqlalchemy import Engine, exists, func, select, update
+from sqlalchemy import Engine, func, select, true, update
 from sqlalchemy.dialects.postgresql import insert
 
 from dr_platform._core.identities import (
@@ -80,6 +80,12 @@ class _Candidate:
     expected_member_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class _CandidatePage:
+    last_run_key: str | None
+    locked_eligible: tuple[_Candidate, ...]
+
+
 def run_barrier_pass(  # noqa: PLR0913 -- explicit reconciliation boundary
     database: Engine | Connection,
     *,
@@ -127,7 +133,7 @@ def _run_in_transaction(  # noqa: PLR0913
     considered_limit = batch_size + MAX_RUN_BARRIER_FAILURES_PER_PASS
     after: str | None = None
     while len(releases) < batch_size and considered < considered_limit:
-        candidates = _lock_eligible_page(
+        page = _lock_eligible_page(
             connection,
             schema=schema,
             limit=min(
@@ -135,10 +141,13 @@ def _run_in_transaction(  # noqa: PLR0913
             ),
             after=after,
         )
-        if not candidates:
+        if page.last_run_key is None:
             break
+        after = page.last_run_key
+        candidates = page.locked_eligible
+        if not candidates:
+            continue
         considered += len(candidates)
-        after = candidates[-1].run_key
         counts = _terminal_counts(
             connection,
             schema=schema,
@@ -179,14 +188,21 @@ def _lock_eligible_page(
     schema: StagingSchema,
     limit: int,
     after: str | None,
-) -> tuple[_Candidate, ...]:
+) -> _CandidatePage:
     statement = _eligible_runs_statement(
         schema=schema,
         limit=limit,
         after=after,
     )
-    rows = connection.execute(statement).mappings()
-    return tuple(_decode_candidate(row) for row in rows)
+    rows = tuple(connection.execute(statement).mappings())
+    return _CandidatePage(
+        last_run_key=rows[-1]["run_key"] if rows else None,
+        locked_eligible=tuple(
+            _decode_candidate(row)
+            for row in rows
+            if row["eligible"] and row["locked"]
+        ),
+    )
 
 
 def _eligible_runs_statement(
@@ -198,26 +214,12 @@ def _eligible_runs_statement(
     runs = schema.pipeline_runs
     memberships = schema.run_memberships
     executions = schema.stage_executions
-    nonterminal = exists(
-        select(1)
-        .select_from(
-            memberships.join(
-                executions,
-                memberships.c.work_item_id == executions.c.work_item_id,
-            )
-        )
-        .where(
-            memberships.c.run_key == runs.c.run_key,
-            executions.c.state.in_(
-                (
-                    StageExecutionState.READY.value,
-                    StageExecutionState.ADMITTED.value,
-                )
-            ),
-        )
-        .correlate(runs)
+    candidate_predicates = (
+        runs.c.registration_closed_at.is_not(None),
+        runs.c.run_completion_key.is_not(None),
+        runs.c.released_at.is_(None),
     )
-    statement = (
+    candidate_runs_statement = (
         select(
             runs.c.run_key,
             runs.c.campaign_key,
@@ -229,19 +231,73 @@ def _eligible_runs_statement(
             runs.c.run_completion_key,
             runs.c.expected_member_count,
         )
-        .where(
-            runs.c.registration_closed_at.is_not(None),
-            runs.c.run_completion_key.is_not(None),
-            runs.c.released_at.is_(None),
-            ~nonterminal,
-        )
+        .where(*candidate_predicates)
         .order_by(runs.c.run_key)
         .limit(limit)
-        .with_for_update(of=runs, skip_locked=True)
     )
     if after is not None:
-        statement = statement.where(runs.c.run_key > after)
-    return statement
+        candidate_runs_statement = candidate_runs_statement.where(
+            runs.c.run_key > after
+        )
+    candidate_runs = candidate_runs_statement.cte(
+        "candidate_runs"
+    ).prefix_with("MATERIALIZED")
+    nonterminal = (
+        select(true().label("present"))
+        .select_from(
+            memberships.join(
+                executions,
+                memberships.c.work_item_id == executions.c.work_item_id,
+            )
+        )
+        .where(
+            memberships.c.run_key == candidate_runs.c.run_key,
+            executions.c.state.in_(
+                (
+                    StageExecutionState.READY.value,
+                    StageExecutionState.ADMITTED.value,
+                )
+            ),
+        )
+        .limit(1)
+        .lateral("nonterminal")
+    )
+    evaluated_runs = (
+        select(
+            *candidate_runs.c,
+            nonterminal.c.present.is_(None).label("eligible"),
+        )
+        .select_from(candidate_runs.outerjoin(nonterminal, true()))
+        .cte("evaluated_runs")
+        .prefix_with("MATERIALIZED")
+    )
+    locked_runs = (
+        select(runs.c.run_key)
+        .select_from(
+            runs.join(
+                evaluated_runs,
+                runs.c.run_key == evaluated_runs.c.run_key,
+            )
+        )
+        .where(evaluated_runs.c.eligible.is_(True), *candidate_predicates)
+        .order_by(runs.c.run_key)
+        .with_for_update(of=runs, skip_locked=True)
+        .cte("locked_runs")
+        .prefix_with("MATERIALIZED")
+    )
+    return (
+        select(
+            *evaluated_runs.c,
+            locked_runs.c.run_key.is_not(None).label("locked"),
+        )
+        .select_from(
+            evaluated_runs.outerjoin(
+                locked_runs,
+                evaluated_runs.c.run_key == locked_runs.c.run_key,
+            )
+        )
+        .order_by(evaluated_runs.c.run_key)
+    )
 
 
 def _terminal_counts(

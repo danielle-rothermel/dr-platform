@@ -115,7 +115,7 @@ class PlannerResult:
     result_keys: tuple[str, ...]
     execution_ms: float
     index_names: tuple[str, ...]
-    visited_rows: Mapping[str, int]
+    rounded_plan_row_estimates: Mapping[str, int]
     qualified: bool
 
 
@@ -1150,7 +1150,7 @@ def _collect_plan(
     value: object,
 ) -> tuple[set[str], dict[str, int], float]:
     index_names: set[str] = set()
-    visited_rows: dict[str, int] = {}
+    rounded_row_estimates: dict[str, int] = {}
 
     def visit(node: object) -> None:
         if isinstance(node, dict):
@@ -1165,9 +1165,11 @@ def _collect_plan(
                 and isinstance(actual_rows, int | float)
                 and isinstance(actual_loops, int | float)
             ):
-                visited_rows[relation_name] = visited_rows.get(
-                    relation_name, 0
-                ) + int(actual_rows * actual_loops)
+                # PostgreSQL rounds Actual Rows to a per-loop average.
+                rounded_row_estimates[relation_name] = (
+                    rounded_row_estimates.get(relation_name, 0)
+                    + int(actual_rows * actual_loops)
+                )
             for child in node.values():
                 visit(child)
         elif isinstance(node, list):
@@ -1177,7 +1179,149 @@ def _collect_plan(
     visit(value)
     root = cast("list[dict[str, Any]]", value)[0]
     execution_ms = float(root.get("Execution Time", 0.0))
-    return index_names, visited_rows, execution_ms
+    return index_names, rounded_row_estimates, execution_ms
+
+
+def _plan_nodes(value: object) -> Iterator[dict[str, Any]]:
+    if isinstance(value, dict):
+        if isinstance(value.get("Node Type"), str):
+            yield cast("dict[str, Any]", value)
+        for child in value.values():
+            yield from _plan_nodes(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _plan_nodes(child)
+
+
+def _barrier_plan_topology_is_bounded(
+    plan: object,
+    *,
+    evaluated_count: int,
+    page_limit: int,
+) -> bool:
+    nodes = tuple(_plan_nodes(plan))
+    candidate_nodes = tuple(
+        node
+        for node in nodes
+        if node.get("Subplan Name") == "CTE candidate_runs"
+    )
+    evaluated_nodes = tuple(
+        node
+        for node in nodes
+        if node.get("Subplan Name") == "CTE evaluated_runs"
+    )
+    membership_nodes = tuple(
+        node
+        for node in nodes
+        if node.get("Relation Name") == "platform_run_memberships"
+    )
+    execution_nodes = tuple(
+        node
+        for node in nodes
+        if node.get("Relation Name") == "platform_stage_executions"
+    )
+    if not (
+        len(candidate_nodes)
+        == len(evaluated_nodes)
+        == len(membership_nodes)
+        == len(execution_nodes)
+        == 1
+    ):
+        return False
+    candidate = candidate_nodes[0]
+    evaluated = evaluated_nodes[0]
+    evaluated_plans = evaluated.get("Plans")
+    if not isinstance(evaluated_plans, list):
+        return False
+    lateral_limits = tuple(
+        node
+        for node in evaluated_plans
+        if isinstance(node, dict)
+        and node.get("Node Type") == "Limit"
+        and node.get("Parent Relationship") == "Inner"
+    )
+    if len(lateral_limits) != 1:
+        return False
+    lateral_limit = lateral_limits[0]
+    lateral_node_ids = {id(node) for node in _plan_nodes(lateral_limit)}
+    membership = membership_nodes[0]
+    execution = execution_nodes[0]
+    candidate_scans = tuple(
+        node
+        for node in _plan_nodes(evaluated)
+        if node.get("Node Type") == "CTE Scan"
+        and node.get("CTE Name") == "candidate_runs"
+    )
+    membership_index = membership.get("Index Name")
+    membership_condition = membership.get("Index Cond")
+    execution_index = execution.get("Index Name")
+    execution_condition = execution.get("Index Cond")
+    execution_loops = execution.get("Actual Loops")
+    return bool(
+        candidate.get("Node Type") == "Limit"
+        and candidate.get("Actual Loops") == 1
+        and candidate.get("Actual Rows") == evaluated_count
+        and evaluated_count <= page_limit
+        and evaluated.get("Node Type") == "Nested Loop"
+        and evaluated.get("Join Type") == "Left"
+        and evaluated.get("Actual Loops") == 1
+        and evaluated.get("Actual Rows") == evaluated_count
+        and len(candidate_scans) == 1
+        and candidate_scans[0].get("Actual Loops") == 1
+        and candidate_scans[0].get("Actual Rows") == evaluated_count
+        and lateral_limit.get("Actual Loops") == evaluated_count
+        and id(membership) in lateral_node_ids
+        and id(execution) in lateral_node_ids
+        and isinstance(membership_index, str)
+        and membership_index.endswith("_run_work")
+        and isinstance(membership_condition, str)
+        and "run_key = candidate_runs.run_key" in membership_condition
+        and membership.get("Actual Loops") == evaluated_count
+        and isinstance(execution_index, str)
+        and execution_index.endswith("ix_stage_executions_nonterminal_work")
+        and isinstance(execution_condition, str)
+        and "platform_run_memberships.work_item_id" in execution_condition
+        and isinstance(execution_loops, int | float)
+        and 0 < execution_loops <= evaluated_count
+    )
+
+
+def _list_runs_plan_topology_is_bounded(
+    plan: object,
+    *,
+    selected_count: int,
+    page_limit: int,
+) -> bool:
+    nodes = tuple(_plan_nodes(plan))
+    run_nodes = tuple(
+        node
+        for node in nodes
+        if node.get("Relation Name") == "platform_pipeline_runs"
+    )
+    membership_nodes = tuple(
+        node
+        for node in nodes
+        if node.get("Relation Name") == "platform_run_memberships"
+    )
+    if len(run_nodes) != 1 or len(membership_nodes) != 1:
+        return False
+    run_node = run_nodes[0]
+    membership_node = membership_nodes[0]
+    run_index = run_node.get("Index Name")
+    membership_index = membership_node.get("Index Name")
+    membership_condition = membership_node.get("Index Cond")
+    return bool(
+        run_node.get("Actual Loops") == 1
+        and run_node.get("Actual Rows") == selected_count
+        and selected_count <= page_limit
+        and isinstance(run_index, str)
+        and run_index.endswith("ix_pipeline_runs_campaign_cursor")
+        and membership_node.get("Actual Loops") == selected_count
+        and isinstance(membership_index, str)
+        and membership_index.endswith("_run_work")
+        and isinstance(membership_condition, str)
+        and "run_key = platform_pipeline_runs.run_key" in membership_condition
+    )
 
 
 def _insert_barrier_backlog(engine: Engine) -> None:
@@ -1193,28 +1337,15 @@ def _insert_barrier_backlog(engine: Engine) -> None:
                     run_key, campaign_key, pipeline_key, pipeline_version,
                     execution_config_reference, expected_member_count,
                     manifest_reference, membership_digest,
-                    run_completion_key, created_at,
-                    registration_closed_at, registered_member_count,
-                    created_work_count, reused_work_count,
-                    released_at, release_terminal_state_counts
+                    run_completion_key, created_at
                 )
                 SELECT
                     'planner-released-' || lpad(i::text, 5, '0'),
                     'planner-barrier', 'planner-pipeline', 1,
-                    'config:planner', 0,
+                    'config:planner', 1,
                     'manifest:released:' || i::text,
                     'digest:released:' || i::text,
-                    'aggregate', :created_at, :closed_at, 0, 0, 0,
-                    :released_at,
-                    jsonb_build_array(
-                        jsonb_build_object(
-                            'state', 'succeeded', 'count', 0
-                        ),
-                        jsonb_build_object('state', 'failed', 'count', 0),
-                        jsonb_build_object(
-                            'state', 'cancelled', 'count', 0
-                        )
-                    )
+                    'aggregate', :created_at
                 FROM generate_series(0, :last_index) AS i
                 """
             ),
@@ -1224,6 +1355,68 @@ def _insert_barrier_backlog(engine: Engine) -> None:
                 "released_at": released_at,
                 "last_index": BARRIER_RELEASED_RUNS - 1,
             },
+        )
+        connection.execute(
+            text(
+                """
+                WITH inserted_work AS (
+                    INSERT INTO platform_work_items (
+                        campaign_key, work_key, origin_run_key,
+                        input_reference, labels, rank
+                    )
+                    SELECT
+                        'planner-barrier',
+                        'planner-released-work-' || lpad(i::text, 5, '0'),
+                        'planner-released-' || lpad(i::text, 5, '0'),
+                        'input:planner-released:' || i::text,
+                        '{}'::jsonb, i + 3000000
+                    FROM generate_series(0, :last_index) AS i
+                    RETURNING work_item_id, origin_run_key, rank
+                ), inserted_membership AS (
+                    INSERT INTO platform_run_memberships (
+                        run_key, member_ordinal, work_item_id
+                    )
+                    SELECT origin_run_key, 0, work_item_id
+                    FROM inserted_work
+                )
+                INSERT INTO platform_stage_executions (
+                    work_item_id, stage_key, stage_index, state,
+                    current_attempt, rank, created_at, updated_at
+                )
+                SELECT
+                    work_item_id, 'execute', 0, 'ready', 0, rank,
+                    :created_at, :created_at
+                FROM inserted_work
+                """
+            ),
+            {
+                "created_at": created_at,
+                "last_index": BARRIER_RELEASED_RUNS - 1,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE platform_pipeline_runs
+                SET
+                    registration_closed_at = :closed_at,
+                    registered_member_count = 1,
+                    created_work_count = 1,
+                    reused_work_count = 0,
+                    released_at = :released_at,
+                    release_terminal_state_counts = jsonb_build_array(
+                        jsonb_build_object(
+                            'state', 'succeeded', 'count', 0
+                        ),
+                        jsonb_build_object('state', 'failed', 'count', 1),
+                        jsonb_build_object(
+                            'state', 'cancelled', 'count', 0
+                        )
+                    )
+                WHERE run_key LIKE 'planner-released-%'
+                """
+            ),
+            {"closed_at": closed_at, "released_at": released_at},
         )
         connection.execute(
             text(
@@ -1370,7 +1563,7 @@ def _insert_barrier_backlog(engine: Engine) -> None:
         )
         connection.execute(
             schema.pipeline_runs.insert().values(
-                run_key="planner-zz-eligible",
+                run_key="planner-00000-eligible",
                 campaign_key="planner-barrier",
                 pipeline_key="planner-pipeline",
                 pipeline_version=1,
@@ -1409,13 +1602,23 @@ def _qualify_barrier_planner(engine: Engine) -> PlannerResult:
                 schema.run_memberships.c.run_key == "planner-large-nonterminal"
             )
         ).scalar_one()
-        eligible_keys = tuple(connection.execute(statement).scalars())
+        unrelated_history_members = connection.execute(
+            select(func.count())
+            .select_from(schema.run_memberships)
+            .where(schema.run_memberships.c.run_key.like("planner-released-%"))
+        ).scalar_one()
+        evaluated = tuple(connection.execute(statement).mappings())
+        eligible_keys = tuple(
+            row["run_key"]
+            for row in evaluated
+            if row["eligible"] and row["locked"]
+        )
         plan = connection.execute(
             text(
                 f"EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, TIMING OFF) {sql}"
             )
         ).scalar_one()
-    indexes, visited, execution_ms = _collect_plan(plan)
+    indexes, rounded_row_estimates, execution_ms = _collect_plan(plan)
     candidate_index = any(
         name.endswith("ix_pipeline_runs_completion_candidates")
         for name in indexes
@@ -1428,23 +1631,34 @@ def _qualify_barrier_planner(engine: Engine) -> PlannerResult:
         "run_memberships" in name and name.endswith(("_pkey", "_run_work"))
         for name in indexes
     )
+    plan_topology_bounded = _barrier_plan_topology_is_bounded(
+        plan,
+        evaluated_count=len(evaluated),
+        page_limit=BARRIER_BATCH_SIZE,
+    )
     return PlannerResult(
         backlog={
-            "released_history_runs": BARRIER_RELEASED_RUNS,
-            "nonterminal_candidate_runs": BARRIER_WAITING_RUNS,
-            "large_nonterminal_run_members": large_run_members,
-            "eligible_runs": len(eligible_keys),
+            "candidate_nonterminal_runs": BARRIER_WAITING_RUNS,
+            "candidate_large_nonterminal_members": large_run_members,
+            "evaluated_candidate_page_rows": len(evaluated),
+            "unrelated_released_history_runs": BARRIER_RELEASED_RUNS,
+            "unrelated_released_history_memberships": (
+                unrelated_history_members
+            ),
+            "locked_eligible_runs": len(eligible_keys),
         },
         result_keys=eligible_keys,
         execution_ms=round(execution_ms, 3),
         index_names=tuple(sorted(indexes)),
-        visited_rows=visited,
+        rounded_plan_row_estimates=rounded_row_estimates,
         qualified=(
-            large_run_members >= BARRIER_LARGE_RUN_MEMBERS
+            large_run_members == BARRIER_LARGE_RUN_MEMBERS
             and candidate_index
             and nonterminal_index
             and membership_index
-            and eligible_keys == ("planner-zz-eligible",)
+            and plan_topology_bounded
+            and unrelated_history_members == BARRIER_RELEASED_RUNS
+            and eligible_keys == ("planner-00000-eligible",)
         ),
     )
 
@@ -1599,9 +1813,12 @@ def _qualify_list_runs_planner(engine: Engine) -> PlannerResult:
                 f"EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, TIMING OFF) {sql}"
             )
         ).scalar_one()
-    indexes, visited, execution_ms = _collect_plan(plan)
-    run_rows = visited.get("platform_pipeline_runs", 0)
-    membership_rows = visited.get("platform_run_memberships", 0)
+    indexes, rounded_row_estimates, execution_ms = _collect_plan(plan)
+    plan_topology_bounded = _list_runs_plan_topology_is_bounded(
+        plan,
+        selected_count=len(page),
+        page_limit=LIST_PAGE_SIZE,
+    )
     return PlannerResult(
         backlog={
             "historical_runs": LIST_HISTORY_RUNS,
@@ -1616,11 +1833,8 @@ def _qualify_list_runs_planner(engine: Engine) -> PlannerResult:
         result_keys=tuple(str(run.run_key) for run in page),
         execution_ms=round(execution_ms, 3),
         index_names=tuple(sorted(indexes)),
-        visited_rows=visited,
-        qualified=(
-            run_rows <= LIST_PAGE_SIZE
-            and membership_rows <= LIST_PAGE_SIZE * LIST_PAGE_MEMBERS_PER_RUN
-        ),
+        rounded_plan_row_estimates=rounded_row_estimates,
+        qualified=plan_topology_bounded,
     )
 
 
@@ -1684,7 +1898,7 @@ def _run(database_url: str) -> QualificationResult:
             "database": database,
         }
         return QualificationResult(
-            schema_version=3,
+            schema_version=4,
             qualified=qualified,
             run_at=datetime.now(UTC).isoformat(),
             provenance=provenance,

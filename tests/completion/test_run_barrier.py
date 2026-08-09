@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Barrier, Lock
-from typing import TYPE_CHECKING, cast
+from threading import Event, Lock
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import Engine, create_engine, select, text, update
 
@@ -40,6 +40,8 @@ from dr_platform.submission.stream import (
 from tests.conftest import NOW, _migrate, engine_dsn
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from dbos import DBOSClient, EnqueueOptions
     from sqlalchemy import Connection
 
@@ -179,6 +181,17 @@ class _RecordingClient:
         return object()
 
 
+def _plan_nodes(value: object) -> Iterator[dict[str, Any]]:
+    if isinstance(value, dict):
+        if isinstance(value.get("Node Type"), str):
+            yield cast("dict[str, Any]", value)
+        for child in value.values():
+            yield from _plan_nodes(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _plan_nodes(child)
+
+
 def test_barrier_releases_once_with_compact_immutable_facts(
     pg_engine: Engine,
 ) -> None:
@@ -314,6 +327,42 @@ def test_failure_isolated_keyset_continuation_fills_enqueue_batch(
     assert [payload["run_key"] for _, payload in client.enqueued] == ["run-b"]
 
 
+def test_all_blocked_first_page_advances_to_later_eligible_run(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry("barrier-blocked-page")
+    _submit_run(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-a-blocked",
+        members=_members(0),
+    )
+    _submit_run(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-b-eligible",
+        members=_members(1),
+    )
+    _set_states(pg_engine, {"work-1": StageExecutionState.SUCCEEDED})
+    client = _RecordingClient()
+
+    summary = run_barrier_pass(
+        pg_engine,
+        client=cast("DBOSClient", client),
+        registry=registry,
+        batch_size=1,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+
+    assert summary.failures == ()
+    assert [release.run_key for release in summary.releases] == [
+        RunKey("run-b-eligible")
+    ]
+
+
 def test_overlapping_runs_each_release(pg_engine: Engine) -> None:
     _migrate(pg_engine)
     registry, pipeline = _registry("barrier-overlap")
@@ -352,7 +401,7 @@ def test_overlapping_runs_each_release(pg_engine: Engine) -> None:
     }
 
 
-def test_concurrent_reconcilers_create_one_execution(
+def test_lock_skipped_page_advances_and_concurrent_reconcilers_release_once(
     pg_engine: Engine,
 ) -> None:
     _migrate(pg_engine)
@@ -361,38 +410,87 @@ def test_concurrent_reconcilers_create_one_execution(
         pg_engine,
         registry,
         pipeline,
-        run_key="run-1",
+        run_key="run-a",
         members=_members(0),
     )
-    _set_states(pg_engine, {"work-0": StageExecutionState.SUCCEEDED})
-    start = Barrier(2)
-    client = _RecordingClient()
+    _submit_run(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-b",
+        members=_members(1),
+    )
+    _set_states(
+        pg_engine,
+        {
+            "work-0": StageExecutionState.SUCCEEDED,
+            "work-1": StageExecutionState.SUCCEEDED,
+        },
+    )
+
+    class GatedClient(_RecordingClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_transaction_entered = Event()
+            self.release_first_transaction = Event()
+
+        def enqueue_in_transaction(
+            self,
+            _connection: Connection,
+            options: EnqueueOptions,
+            payload: dict[str, object],
+        ) -> object:
+            if payload["run_key"] == "run-a":
+                self.first_transaction_entered.set()
+                if not self.release_first_transaction.wait(timeout=10):
+                    raise TimeoutError("first reconciler was not released")
+            return super().enqueue_in_transaction(
+                _connection, options, payload
+            )
+
+    client = GatedClient()
     engines = (
         create_engine(engine_dsn(pg_engine)),
         create_engine(engine_dsn(pg_engine)),
     )
 
-    def reconcile(engine: Engine):
-        start.wait(timeout=10)
+    def reconcile_first():
         return run_barrier_pass(
-            engine,
+            engines[0],
             client=cast("DBOSClient", client),
             registry=registry,
+            batch_size=1,
             clock=lambda: NOW + timedelta(seconds=1),
         )
 
     try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = tuple(
-                executor.submit(reconcile, engine) for engine in engines
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(reconcile_first)
+            assert client.first_transaction_entered.wait(timeout=10)
+            second = run_barrier_pass(
+                engines[1],
+                client=cast("DBOSClient", client),
+                registry=registry,
+                batch_size=1,
+                clock=lambda: NOW + timedelta(seconds=1),
             )
-            summaries = tuple(future.result() for future in futures)
+            client.release_first_transaction.set()
+            summaries = (first.result(), second)
     finally:
+        client.release_first_transaction.set()
         for engine in engines:
             engine.dispose()
 
-    assert sum(len(summary.releases) for summary in summaries) == 1
-    assert len(client.enqueued) == 1
+    assert all(summary.failures == () for summary in summaries)
+    assert {
+        release.run_key
+        for summary in summaries
+        for release in summary.releases
+    } == {RunKey("run-a"), RunKey("run-b")}
+    assert sorted(payload["run_key"] for _, payload in client.enqueued) == [
+        "run-a",
+        "run-b",
+    ]
 
 
 def test_post_release_member_change_does_not_repeat_completion(
@@ -471,20 +569,19 @@ def test_empty_completion_run_is_immediately_eligible(
     ]
 
 
-def test_barrier_candidate_and_anti_join_indexes_with_sparse_history(
+def test_barrier_candidate_page_and_probes_are_row_bounded(  # noqa: PLR0915 -- PostgreSQL plan fixture
     pg_engine: Engine,
 ) -> None:
     schema = _migrate(pg_engine)
     registry, pipeline = _registry("barrier-plan")
     completion = pipeline.run_completion
     assert completion is not None
-    history_size = 2_000
-    terminal_history_size = 500
+    history_size = 500
     closed_at = NOW + timedelta(seconds=1)
     released_at = NOW + timedelta(seconds=2)
     released_counts = [
         {"state": "succeeded", "count": 0},
-        {"state": "failed", "count": 0},
+        {"state": "failed", "count": 1},
         {"state": "cancelled", "count": 0},
     ]
     history_run = {
@@ -498,16 +595,10 @@ def test_barrier_candidate_and_anti_join_indexes_with_sparse_history(
         history_run
         | {
             "run_key": f"released-{index:04d}",
-            "expected_member_count": 0,
+            "expected_member_count": 1,
             "manifest_reference": f"manifest:released-{index}",
             "membership_digest": f"digest:released-{index}",
             "run_completion_key": completion.key.value,
-            "registration_closed_at": closed_at,
-            "registered_member_count": 0,
-            "created_work_count": 0,
-            "reused_work_count": 0,
-            "released_at": released_at,
-            "release_terminal_state_counts": released_counts,
         }
         for index in range(history_size)
     ]
@@ -515,11 +606,7 @@ def test_barrier_candidate_and_anti_join_indexes_with_sparse_history(
         history_run
         | {
             "run_key": f"item-only-{index:04d}",
-            "expected_member_count": 0,
-            "registration_closed_at": closed_at,
-            "registered_member_count": 0,
-            "created_work_count": 0,
-            "reused_work_count": 0,
+            "expected_member_count": 1,
         }
         for index in range(history_size)
     ]
@@ -527,7 +614,7 @@ def test_barrier_candidate_and_anti_join_indexes_with_sparse_history(
         history_run
         | {
             "run_key": f"open-{index:04d}",
-            "expected_member_count": int(index < terminal_history_size),
+            "expected_member_count": 1,
             "manifest_reference": f"manifest:open-{index}",
             "membership_digest": f"digest:open-{index}",
             "run_completion_key": completion.key.value,
@@ -541,19 +628,24 @@ def test_barrier_candidate_and_anti_join_indexes_with_sparse_history(
         connection.execute(
             text(
                 """
-                WITH inserted_work AS (
+                WITH history_kind(kind) AS (
+                VALUES ('released'), ('item-only'), ('open')
+                ), inserted_work AS (
                 INSERT INTO platform_work_items (
                     campaign_key, work_key, origin_run_key,
                     input_reference, labels, rank
                 )
                 SELECT
                     'campaign-history',
-                    'open-work-' || lpad(history_index::text, 4, '0'),
-                    'open-' || lpad(history_index::text, 4, '0'),
-                    'input:open-' || history_index::text,
+                    kind || '-work-' || lpad(history_index::text, 4, '0'),
+                    kind || '-' || lpad(history_index::text, 4, '0'),
+                    'input:' || kind || '-' || history_index::text,
                     '{}'::jsonb,
-                    history_index + 1
-                FROM generate_series(0, :last_history_index) AS history_index
+                    row_number() OVER (ORDER BY kind, history_index)
+                FROM history_kind
+                CROSS JOIN generate_series(
+                    0, :last_history_index
+                ) AS history_index
                 RETURNING work_item_id, origin_run_key, rank
                 ), inserted_memberships AS (
                 INSERT INTO platform_run_memberships (
@@ -567,15 +659,37 @@ def test_barrier_candidate_and_anti_join_indexes_with_sparse_history(
                     current_attempt, rank, created_at, updated_at
                 )
                 SELECT
-                    work_item_id, 'execute', 0, 'failed',
+                    work_item_id, 'execute', 0, 'ready',
                     0, rank, :created_at, :created_at
                 FROM inserted_work
                 """
             ),
             {
                 "created_at": NOW,
-                "last_history_index": terminal_history_size - 1,
+                "last_history_index": history_size - 1,
             },
+        )
+        connection.execute(
+            update(schema.pipeline_runs)
+            .where(schema.pipeline_runs.c.run_key.like("item-only-%"))
+            .values(
+                registration_closed_at=closed_at,
+                registered_member_count=1,
+                created_work_count=1,
+                reused_work_count=0,
+            )
+        )
+        connection.execute(
+            update(schema.pipeline_runs)
+            .where(schema.pipeline_runs.c.run_key.like("released-%"))
+            .values(
+                registration_closed_at=closed_at,
+                registered_member_count=1,
+                created_work_count=1,
+                reused_work_count=0,
+                released_at=released_at,
+                release_terminal_state_counts=released_counts,
+            )
         )
     _submit_run(
         pg_engine,
@@ -593,9 +707,10 @@ def test_barrier_candidate_and_anti_join_indexes_with_sparse_history(
     )
     _set_states(pg_engine, {"work-3001": StageExecutionState.SUCCEEDED})
 
+    page_size = 100
     statement = _eligible_runs_statement(
         schema=schema,
-        limit=100,
+        limit=page_size,
         after=None,
     )
     sql = str(
@@ -606,29 +721,110 @@ def test_barrier_candidate_and_anti_join_indexes_with_sparse_history(
     )
     with pg_engine.begin() as connection:
         connection.execute(text("ANALYZE"))
+        evaluated = tuple(connection.execute(statement).mappings())
         plan = connection.execute(
-            text(f"EXPLAIN (FORMAT JSON, COSTS OFF) {sql}")
+            text(
+                "EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, "
+                f"TIMING OFF, SUMMARY OFF) {sql}"
+            )
         ).scalar_one()
 
-    index_names: set[str] = set()
-
-    def collect(value: object) -> None:
-        if isinstance(value, dict):
-            index_name = value.get("Index Name")
-            if isinstance(index_name, str):
-                index_names.add(index_name)
-            for child in value.values():
-                collect(child)
-        elif isinstance(value, list):
-            for child in value:
-                collect(child)
-
-    collect(plan)
-    assert any(
-        name.endswith("ix_pipeline_runs_completion_candidates")
-        for name in index_names
+    nodes = tuple(_plan_nodes(plan))
+    candidate_nodes = tuple(
+        node
+        for node in nodes
+        if node.get("Subplan Name") == "CTE candidate_runs"
     )
-    assert any(
-        name.endswith("ix_stage_executions_nonterminal_work")
-        for name in index_names
+    evaluated_nodes = tuple(
+        node
+        for node in nodes
+        if node.get("Subplan Name") == "CTE evaluated_runs"
     )
+    locked_nodes = tuple(
+        node for node in nodes if node.get("Subplan Name") == "CTE locked_runs"
+    )
+    membership_nodes = tuple(
+        node
+        for node in nodes
+        if node.get("Relation Name") == "platform_run_memberships"
+    )
+    execution_nodes = tuple(
+        node
+        for node in nodes
+        if node.get("Relation Name") == "platform_stage_executions"
+    )
+    assert len(candidate_nodes) == 1
+    assert len(evaluated_nodes) == 1
+    assert len(locked_nodes) == 1
+    assert len(membership_nodes) == 1
+    assert len(execution_nodes) == 1
+    candidate = candidate_nodes[0]
+    evaluated_cte = evaluated_nodes[0]
+    locked_cte = locked_nodes[0]
+    evaluated_plans = evaluated_cte.get("Plans")
+    assert isinstance(evaluated_plans, list)
+    lateral_limits = tuple(
+        node
+        for node in evaluated_plans
+        if isinstance(node, dict)
+        and node.get("Node Type") == "Limit"
+        and node.get("Parent Relationship") == "Inner"
+    )
+    assert len(lateral_limits) == 1
+    lateral_limit = lateral_limits[0]
+    lateral_node_ids = {id(node) for node in _plan_nodes(lateral_limit)}
+    candidate_scans = tuple(
+        node
+        for node in _plan_nodes(evaluated_cte)
+        if node.get("Node Type") == "CTE Scan"
+        and node.get("CTE Name") == "candidate_runs"
+    )
+    candidate_relation_nodes = tuple(
+        node
+        for node in _plan_nodes(candidate)
+        if node.get("Relation Name") == "platform_pipeline_runs"
+    )
+    membership = membership_nodes[0]
+    execution = execution_nodes[0]
+    assert [row["run_key"] for row in evaluated] == [
+        "run-eligible",
+        "run-waiting",
+    ]
+    assert [row["eligible"] for row in evaluated] == [True, False]
+    assert [row["locked"] for row in evaluated] == [True, False]
+    assert candidate.get("Node Type") == "Limit"
+    assert candidate.get("Actual Loops") == 1
+    assert candidate.get("Actual Rows") == len(evaluated) <= page_size
+    assert len(candidate_relation_nodes) == 1
+    assert (
+        candidate_relation_nodes[0]
+        .get("Index Name", "")
+        .endswith("ix_pipeline_runs_completion_candidates")
+    )
+    assert evaluated_cte.get("Node Type") == "Nested Loop"
+    assert evaluated_cte.get("Join Type") == "Left"
+    assert evaluated_cte.get("Actual Loops") == 1
+    assert evaluated_cte.get("Actual Rows") == len(evaluated)
+    assert len(candidate_scans) == 1
+    assert candidate_scans[0].get("Actual Loops") == 1
+    assert candidate_scans[0].get("Actual Rows") == len(evaluated)
+    assert lateral_limit.get("Actual Loops") == len(evaluated)
+    assert id(membership) in lateral_node_ids
+    assert membership.get("Node Type") == "Index Only Scan"
+    assert membership.get("Index Name", "").endswith("_run_work")
+    assert "run_key = candidate_runs.run_key" in membership.get(
+        "Index Cond", ""
+    )
+    assert membership.get("Actual Loops") == len(evaluated)
+    assert id(execution) in lateral_node_ids
+    assert execution.get("Node Type") == "Index Only Scan"
+    assert execution.get("Index Name", "").endswith(
+        "ix_stage_executions_nonterminal_work"
+    )
+    assert "platform_run_memberships.work_item_id" in execution.get(
+        "Index Cond", ""
+    )
+    assert execution.get("Actual Loops") == len(evaluated)
+    assert locked_cte.get("Node Type") == "LockRows"
+    assert locked_cte.get("Actual Loops") == 1
+    assert locked_cte.get("Actual Rows") == 1
