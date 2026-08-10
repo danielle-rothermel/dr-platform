@@ -1,0 +1,78 @@
+#:schema ../../../.defs/terms.schema.json
+
+# Planning-stage selections for async stages and run fan-in. Their binding
+# forms live in ../../../.defs/terms.toml.
+
+[[terms]]
+name = "run registration declaration"
+definition = """
+The immutable declaration fixing a submission run's expected member count and \
+optional manifest binding before registration."""
+exported_symbols = ["RunRegistrationDeclaration"]
+part_of = ["submission run"]
+
+[[terms]]
+name = "run member"
+definition = """
+One work item's ordered inclusion in a submission run, binding it to one \
+ordinal independently of its origin run."""
+exported_symbols = ["RunMemberInput"]
+part_of = ["run membership"]
+
+[[terms]]
+name = "run membership"
+definition = """
+A submission run's ordered member set, append-only during registration and \
+immutable after closure. Work appears at most once per run but may belong to \
+multiple compatible runs."""
+part_of = ["submission run"]
+
+[[terms]]
+name = "run membership digest"
+definition = """
+The canonical identity binding a submission run's expected member count and \
+ordered member ordinals, work identities, and input references."""
+exported_symbols = ["compute_run_membership_digest"]
+part_of = ["run registration declaration", "run completion payload"]
+
+[[terms]]
+name = "run barrier"
+definition = """
+The one-time eligibility boundary reached when registration is complete and \
+every member's current stage execution is terminal. Its release facts remain \
+fixed if a member later changes state."""
+part_of = ["submission run"]
+
+[[terms]]
+name = "run completion"
+definition = """
+An optional pipeline-declared durable operation for one submission run, \
+eligible after the run barrier. It is neither a pipeline stage nor a graph \
+node."""
+exported_symbols = ["RunCompletionDefinition", "RunCompletionKey"]
+part_of = ["pipeline definition"]
+
+[[terms]]
+name = "run completion execution"
+definition = """
+The sole durable execution of a run completion for one submission run, \
+identified by a stable workflow identity."""
+part_of = ["run completion", "submission run"]
+
+[[terms]]
+name = "run completion execution state"
+definition = """
+The platform-recorded state of a run completion execution: enqueued, \
+succeeded, or failed. Enqueued means durably submitted without a recorded \
+application outcome, not necessarily active."""
+exported_symbols = ["RunCompletionExecutionState"]
+part_of = ["run completion execution"]
+
+[[terms]]
+name = "run completion payload"
+definition = """
+The compact immutable membership binding and release facts used to derive run \
+completion arguments; it neither contains nor resolves application-owned \
+member outputs."""
+exported_symbols = ["RunCompletionPayload"]
+part_of = ["run completion execution"]

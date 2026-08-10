@@ -13,6 +13,8 @@ from dr_platform import (
     PipelineKey,
     PipelineRegistry,
     PlatformDbosConfig,
+    RunMemberInput,
+    RunRegistrationDeclaration,
     StageDefinition,
     StageExecutionState,
     StageKey,
@@ -75,13 +77,13 @@ def test_root_contract_defines_submits_executes_and_inspects(
     def args_for(payload: AdmissionPayload) -> tuple[object, ...]:
         return (payload.input_reference,)
 
-    def prepare(input_reference: str) -> str:
+    async def prepare(input_reference: str) -> str:
         return f"prepared:{input_reference}"
 
-    def execute(input_reference: str) -> str:
+    async def execute(input_reference: str) -> str:
         return f"executed:{input_reference}"
 
-    def score(input_reference: str) -> str:
+    async def score(input_reference: str) -> str:
         return f"scored:{input_reference}"
 
     declared = PipelineDefinition(
@@ -136,13 +138,17 @@ def test_root_contract_defines_submits_executes_and_inspects(
         run_key=f"run-{suffix}",
         pipeline=pipeline.identity,
         execution_config_reference="config:public-contract",
-        items=items(),
+        declaration=RunRegistrationDeclaration(len(work_keys)),
+        members=(
+            RunMemberInput(ordinal=index, work=item)
+            for index, item in enumerate(items())
+        ),
         registry=registry,
         engine=pg_engine,
         chunk_size=1,
     )
     assert yielded == list(work_keys)
-    assert receipt.inserted_count == 2
+    assert receipt.created_work_count == 2
 
     platform_config = PlatformDbosConfig(
         database_url=clean_pg,

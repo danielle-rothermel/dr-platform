@@ -1,7 +1,7 @@
 [project]
 name = "dr-platform"
-version = "0.1.1"
-description = "A durable staged-work funnel built on PostgreSQL and DBOS."
+version = "0.2.0"
+description = "Durable staged pipelines and run fan-in on PostgreSQL and DBOS."
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -50,7 +50,7 @@ only-include = ["src"]
 testpaths = ["tests"]
 
 [tool.ruff]
-include = ["src/**/*.py", "tests/**/*.py"]
+include = ["qualification/**/*.py", "src/**/*.py", "tests/**/*.py"]
 line-length = 79
 
 [tool.ruff.lint]
@@ -101,4 +101,4 @@ ignore = ["PLR1711", "S101", "TRY003"]
 "tests/**/*.py" = ["PLR2004", "PLC0415", "ARG001", "ARG005", "S603", "TC002", "TC003"]
 
 [tool.ty.src]
-include = ["src", "tests"]
+include = ["qualification", "src", "tests"]

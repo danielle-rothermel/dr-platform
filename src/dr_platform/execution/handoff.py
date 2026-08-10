@@ -15,10 +15,18 @@ from dr_platform._core.ledger.executions import (
 )
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform.admission.runner import AdmissionPayload
+from dr_platform.completion.execution import (
+    is_run_completion_wrapped,
+    wrap_run_completion,
+)
+from dr_platform.execution._checkpoint import (
+    _require_ledger_checkpoint_executor,
+)
 from dr_platform.pipeline.definitions import (
+    AsyncWorkflowCallable,
     PipelineDefinition,
     StageDefinition,
-    WorkflowCallable,
 )
 
 if TYPE_CHECKING:
@@ -39,9 +47,23 @@ class StageHandoffMismatchError(RuntimeError):
 
 def is_pipeline_wrapped(pipeline: PipelineDefinition) -> bool:
     """Only wrapped definitions run completion; raw ones remain ADMITTED."""
-    return all(
+    stages_wrapped = all(
         getattr(stage.workflow, _WRAPPED_STAGE_MARKER, False)
         for stage in pipeline.stages
+    )
+    completion = pipeline.run_completion
+    return stages_wrapped and (
+        completion is None or is_run_completion_wrapped(completion)
+    )
+
+
+def _pipeline_checkpoint_workflows(
+    pipeline: PipelineDefinition,
+) -> tuple[AsyncWorkflowCallable, ...]:
+    completion = pipeline.run_completion
+    return (
+        *(stage.workflow for stage in pipeline.stages),
+        *(() if completion is None else (completion.workflow,)),
     )
 
 
@@ -84,6 +106,16 @@ def wrap_pipeline_workflows(
         key=pipeline.key,
         version=pipeline.version,
         stages=wrapped_stages,
+        run_completion=(
+            None
+            if pipeline.run_completion is None
+            else wrap_run_completion(
+                pipeline.run_completion,
+                pipeline_key=pipeline.key,
+                pipeline_version=pipeline.version,
+                clock=clock,
+            )
+        ),
     )
 
 
@@ -92,7 +124,7 @@ def _wrap_stage_workflow(
     pipeline: PipelineDefinition,
     stage_index: int,
     clock: Callable[[], datetime],
-) -> WorkflowCallable:
+) -> AsyncWorkflowCallable:
     stage = pipeline.stages[stage_index]
     next_stage = (
         pipeline.stages[stage_index + 1]
@@ -136,20 +168,25 @@ def _wrap_stage_workflow(
             completed_at=clock(),
         )
 
-    complete_stage = DBOS.transaction(name=f"{workflow_name}_complete")(
-        _complete_stage_transaction
-    )
+    complete_stage = DBOS.transaction(
+        isolation_level="READ COMMITTED",
+        name=f"{workflow_name}_complete",
+    )(_complete_stage_transaction)
 
     @DBOS.workflow(name=workflow_name)
-    def run_stage(*args: object) -> str | None:
+    async def run_stage(payload_data: dict[str, object]) -> str | None:
+        checkpoint_executor = _require_ledger_checkpoint_executor(run_stage)
         workflow_id = _current_workflow_id()
+        payload = AdmissionPayload.model_validate(payload_data)
         try:
+            workflow_args = _validate_workflow_args(stage.args_for(payload))
             output_reference = _validate_output_reference(
-                stage.workflow(*args)
+                await stage.workflow(*workflow_args)
             )
         except Exception as error:  # noqa: BLE001 -- application boundary
             error_type = f"{type(error).__module__}.{type(error).__qualname__}"
-            complete_stage(
+            await checkpoint_executor.run(
+                complete_stage,
                 workflow_id=workflow_id,
                 pipeline_key=pipeline.key.value,
                 pipeline_version=pipeline.version,
@@ -170,7 +207,8 @@ def _wrap_stage_workflow(
             )
             return None
 
-        complete_stage(
+        await checkpoint_executor.run(
+            complete_stage,
             workflow_id=workflow_id,
             pipeline_key=pipeline.key.value,
             pipeline_version=pipeline.version,
@@ -189,7 +227,7 @@ def _wrap_stage_workflow(
 
     # Dispatcher rejects declarations lacking this package-owned marker.
     setattr(run_stage, _WRAPPED_STAGE_MARKER, True)
-    return cast("WorkflowCallable", run_stage)
+    return cast("AsyncWorkflowCallable", run_stage)
 
 
 def _complete_stage_in_transaction(  # noqa: PLR0913
@@ -361,6 +399,12 @@ def _validate_output_reference(value: object) -> str:
             "stage application logic must return a non-empty "
             "output-reference string"
         )
+    return value
+
+
+def _validate_workflow_args(value: object) -> tuple[object, ...]:
+    if not isinstance(value, tuple):
+        raise TypeError("stage args_for must return a tuple")
     return value
 
 

@@ -1,6 +1,7 @@
 from dr_platform._core.identities import (
     CampaignKey,
     PipelineKey,
+    RunCompletionKey,
     RunKey,
     StageKey,
     WorkKey,
@@ -8,7 +9,10 @@ from dr_platform._core.identities import (
 from dr_platform._core.ledger.attempts import StageAttemptRecord
 from dr_platform._core.ledger.executions import StageExecutionRecord
 from dr_platform._core.ledger.schema import StagingSchema
-from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.states import (
+    RunCompletionExecutionState,
+    StageExecutionState,
+)
 from dr_platform.admission.controls import (
     StageControlRecord,
     pause,
@@ -18,6 +22,11 @@ from dr_platform.admission.controls import (
     set_stage_capacity,
 )
 from dr_platform.admission.runner import AdmissionPayload
+from dr_platform.completion.execution import (
+    RunCompletionExecutionRecord,
+    RunCompletionPayload,
+    inspect_run_completion,
+)
 from dr_platform.execution.handoff import (
     StageHandoffMismatchError,
     wrap_pipeline_workflows,
@@ -33,6 +42,7 @@ from dr_platform.inspection.statuses import (
     BulkStatusResult,
     BulkWorkStatus,
     StateCount,
+    bulk_run_state_counts,
     bulk_work_statuses,
     campaign_state_counts,
     run_state_counts,
@@ -46,6 +56,7 @@ from dr_platform.inspection.work_items import (
 from dr_platform.pipeline.definitions import (
     PipelineDefinition,
     PipelineIdentity,
+    RunCompletionDefinition,
     StageDefinition,
 )
 from dr_platform.pipeline.registry import (
@@ -81,8 +92,13 @@ from dr_platform.runtime.telemetry import (
 )
 from dr_platform.submission.runs import PipelineRunConflictError
 from dr_platform.submission.stream import (
+    RegistrationClosureError,
+    RunMemberInput,
+    RunMembershipConflictError,
+    RunRegistrationDeclaration,
     SubmissionReceipt,
     WorkInput,
+    compute_run_membership_digest,
     submit,
 )
 from dr_platform.submission.work_items import WorkItemConflictError
@@ -102,7 +118,16 @@ __all__ = [
     "PipelineRegistry",
     "PipelineRunConflictError",
     "PlatformDbosConfig",
+    "RegistrationClosureError",
+    "RunCompletionDefinition",
+    "RunCompletionExecutionRecord",
+    "RunCompletionExecutionState",
+    "RunCompletionKey",
+    "RunCompletionPayload",
     "RunKey",
+    "RunMemberInput",
+    "RunMembershipConflictError",
+    "RunRegistrationDeclaration",
     "RunSummary",
     "StageAttemptRecord",
     "StageControlRecord",
@@ -127,13 +152,16 @@ __all__ = [
     "WorkKey",
     "WorkflowCanceller",
     "build_platform_dbos_config",
+    "bulk_run_state_counts",
     "bulk_work_statuses",
     "campaign_state_counts",
     "cancel_work",
+    "compute_run_membership_digest",
     "get_work_item_stages",
     "initialize_dbos_runtime",
     "initialize_telemetry_safely",
     "inspect_campaign",
+    "inspect_run_completion",
     "list_campaigns",
     "list_runs",
     "list_work_items",

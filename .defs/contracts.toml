@@ -15,16 +15,179 @@ date = "2026-08-05"
 check = "uv run pytest -q tests/execution/test_handoff.py -k 'sweep_race'"
 
 [[contracts]]
+title = "Application workflows are async"
+statement = """
+Platform-managed stage and run completion workflows are async and awaited by \
+platform wrappers. Argument derivation and ledger mutation remain synchronous, \
+and coroutine cancellation is not an application failure."""
+rationale = """
+One async application boundary supports loop-affine resources without \
+duplicating the synchronous ledger or holding its transactions across \
+application effects."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/pipeline/test_definitions.py tests/execution/test_async_workflow.py"
+
+[[contracts]]
+title = "Applications own workflow resources"
+statement = """
+Applications create and close workflow resources; the platform does not \
+construct, resolve, or close storage, provider, or process clients."""
+rationale = """
+Resource owners know their client and shutdown semantics; the platform promises \
+no event-loop or shutdown sequence."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/execution/test_async_workflow.py -k 'loop_affine_resource'"
+
+[[contracts]]
+title = "Dispatcher transactions execute platform code only"
+statement = """
+Admission and run-barrier transactions enqueue compact validated platform \
+payloads without calling application code. Durable wrappers reconstruct typed \
+payloads and record argument-derivation or workflow exceptions other than \
+coroutine cancellation as application failure. Argument derivation is \
+deterministic, replay-safe, external-I/O-free, and bounded."""
+rationale = """
+Application callbacks inside dispatcher transactions lengthen lock time and \
+repeatable callback errors can poison every pass. Durable execution bounds \
+transaction work and records one attributable outcome."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/admission/test_runner.py tests/execution/test_async_workflow.py -k 'serialized_platform_payload or args_for_failure'"
+
+[[contracts]]
+title = "Registration closes ordered membership"
+statement = """
+Before registration, a submission run declares its expected member count. A \
+run with completion also declares its manifest reference and membership \
+digest; a run without completion supplies both or neither. Registration \
+closes after normal stream exhaustion only when persisted membership has the \
+declared count, contiguous ordinals, unique work items, and declared digest. \
+Closure freezes membership; matching closed replay returns the same receipt \
+without consuming another member stream."""
+rationale = """
+Normal exhaustion and full validation distinguish a complete stream from a \
+partial prefix. The digest binds closed membership to the application manifest \
+without a member-listing API or per-member outcome snapshot."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/submission/test_stream.py -k 'interrupted_registration or closed_replay or digest or invalid_membership or database_mutation'"
+
+[[contracts]]
+title = "Registration is set-oriented"
+statement = """
+Each bounded registration chunk uses a fixed upper bound of database statements \
+independent of member count and performs no per-member SQL. Closure may make \
+one indexed ordered pass over the run membership."""
+rationale = """
+Set-oriented chunk work preserves streaming and exact validation without \
+serial database round trips."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/submission/test_stream.py -k 'statement_count'"
+
+[[contracts]]
+title = "Membership is distinct from origin"
+statement = """
+Every submission run records its own membership edges, including edges to \
+compatible work created by another run. Origin records creation provenance \
+only; it neither substitutes for membership nor authorizes inferred historical \
+membership."""
+rationale = """
+Overlapping runs need independent complete memberships and counts, while work \
+creation provenance remains immutable."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/submission/test_stream.py tests/inspection/test_run_membership.py -k 'overlapping'"
+
+[[contracts]]
+title = "Work reuse preserves execution provenance"
+statement = """
+A run may reuse an existing campaign-and-work identity only when its pipeline \
+key, pipeline version, and execution-configuration reference match the work's \
+origin run. Different execution facts require a different work identity."""
+rationale = """
+One work item has one stage history. Reinterpreting that history under different \
+execution facts would make its outcome ambiguous."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/submission/test_stream.py -k 'execution_provenance'"
+
+[[contracts]]
+title = "Run inspection follows membership"
+statement = """
+Counts, status queries, and completion eligibility derive through run \
+membership rather than work origin. Bulk run state counts use one aggregate \
+query per bounded input chunk and distinguish missing from present empty runs; \
+the platform exposes no general member-listing API."""
+rationale = """
+Membership is the authoritative run scope, including for reused work. A narrow \
+inspection surface avoids unbounded result sets and premature pagination."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/inspection/test_run_membership.py"
+
+[[contracts]]
+title = "Run barrier releases completion once"
+statement = """
+A closed run that declares completion releases once when every member's current \
+stage is succeeded, failed, or cancelled. Each scanning pass exclusively \
+advances one \
+persisted barrier cursor, examines at most its candidate budget, and rotates \
+past ineligible, lock-skipped, or failed candidates. Release time and terminal \
+state counts are immutable; later member transitions neither invalidate release \
+nor create another completion execution."""
+rationale = """
+Immutable edge-triggered release provides durable terminality evidence without \
+duplicate aggregation, while the bounded fair cursor prevents a permanently \
+nonterminal prefix from starving later runs."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/completion/test_run_barrier.py"
+
+[[contracts]]
+title = "Run completion is outside item pipelines"
+statement = """
+Run completion is one optional execution for a submission run after its members \
+settle, not a pipeline stage or graph edge. Its payload contains the manifest \
+reference, membership digest, and compact release facts; applications resolve \
+member results and own aggregate and acceptance semantics."""
+rationale = """
+Fan-in beside the linear item pipeline adds completeness without turning the \
+platform into a graph engine or importing application policy."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/pipeline/test_definitions.py tests/completion/test_run_execution.py -k 'completion'"
+
+[[contracts]]
+title = "Aggregate artifacts preserve consumed provenance"
+statement = """
+Before aggregation, the application validates that its immutable manifest \
+contains the completion payload's membership digest. Its immutable aggregate \
+artifact records the exact member outcomes and output references consumed."""
+rationale = """
+This keeps compact release facts while making the aggregate reproducible after \
+later member transitions."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/completion/test_run_completion_dbos.py"
+
+[[contracts]]
+title = "Run completion records one outcome"
+statement = """
+Run completion uses one stable workflow identity. Enqueued means durably \
+submitted without a recorded application outcome, not necessarily active; it \
+may record at most one success or application failure. Success requires a \
+non-empty output reference, failure means application failure only, and replay \
+preserves identity."""
+rationale = """
+This is a truthful durable fan-in ledger without retry, cancellation, controls, \
+sweep, attempt history, or workflow-runtime state projection."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/completion/test_run_execution.py"
+
+[[contracts]]
 title = "Pipeline declarations are immutable and linear"
 statement = """
 A pipeline definition contains a non-empty ordered sequence of uniquely keyed \
-stages and a positive version; one registry binds each pipeline identity to \
-exactly one definition and rejects a differing definition at that identity."""
+stages, at most one optional run completion, and a positive version; one \
+registry binds each pipeline identity to exactly one definition and rejects a \
+differing definition at that identity."""
 rationale = """
 A closed linear order gives submission, admission, and handoff one stable \
 interpretation. Mutable or graph-shaped declarations would make persisted \
 stage positions and replayed identities ambiguous."""
-date = "2026-08-05"
+date = "2026-08-09"
 check = "uv run pytest -q tests/pipeline/test_definitions.py tests/pipeline/test_registry.py"
 
 [[contracts]]
@@ -103,10 +266,10 @@ most its configured batch size, examines only its bounded candidate budget, \
 and rolls back a failing candidate without aborting unrelated candidates."""
 rationale = """
 A shared dispatcher must make deterministic progress without letting one \
-unhealthy stage, malformed argument adapter, or repeatedly failing item stop \
-the rest of the pass."""
-date = "2026-08-05"
-check = "uv run pytest -q tests/admission/test_runner.py -k 'stable_rank or isolates_to_its_stage or rolls_back_candidate_and_continues_same_stage or backlog_cannot_exhaust'"
+unhealthy stage or failing enqueue stop the rest of the pass. Application \
+callbacks run only inside the durable workflow."""
+date = "2026-08-09"
+check = "uv run pytest -q tests/admission/test_runner.py -k 'stable_rank or enqueue_failure or backlog_cannot_exhaust'"
 
 [[contracts]]
 title = "Pause controls future admission only"
@@ -211,16 +374,16 @@ date = "2026-08-05"
 check = "uv run pytest -q tests/runtime/test_dbos.py -k 'colocated or split or query_routing' tests/runtime/test_dispatcher.py::test_registration_owns_colocated_client_and_wrapper_is_thin"
 
 [[contracts]]
-title = "The platform baseline is irreversible"
+title = "The platform baseline is a non-destructive hard cut"
 statement = """
 The root platform schema migration only upgrades: its downgrade entrypoint \
 always refuses and no supported migration command deletes the ledger created \
-by that baseline."""
+by that baseline. Development databases worth retaining are archived before \
+an explicit reset to the current schema."""
 rationale = """
-The ledger contains run provenance, work identity, attempts, outcomes, and \
-operator controls. A reset-style downgrade is rejected because schema rollback \
-must not silently destroy recorded platform data; replacement requires an \
-explicit data-preserving migration."""
+The development schema may cut over without compatibility or historical \
+backfill, while valuable recorded evidence must not disappear through an \
+ordinary schema command."""
 date = "2026-08-05"
 check = "uv run pytest -q tests/core/test_ledger.py::test_baseline_downgrade_is_irreversible"
 

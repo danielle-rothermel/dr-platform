@@ -20,8 +20,15 @@ from dr_platform.pipeline.definitions import (
 )
 from dr_platform.pipeline.registry import PipelineRegistry
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
-from dr_platform.submission.stream import WorkInput, submit
-from tests.conftest import _args_for, dbos_config, initialize_dbos_schema
+from dr_platform.runtime.dbos import PlatformDbosConfig
+from dr_platform.runtime.dispatcher import register_scheduled_dispatcher
+from dr_platform.submission.stream import WorkInput
+from tests.conftest import (
+    _args_for,
+    dbos_config,
+    initialize_dbos_schema,
+    submit_items,
+)
 
 _HARD_EXIT_CODE = 86
 _WORKER_TIMEOUT_SECONDS = 10
@@ -29,7 +36,7 @@ _WORKER_JOIN_TIMEOUT_SECONDS = 20
 _PROBE_ROW_ID = 1
 
 
-def _recovery_probe_stage(database_url: str) -> str:
+async def _recovery_probe_stage(database_url: str) -> str:
     engine = create_engine(database_url)
     try:
         with engine.begin() as connection:
@@ -109,12 +116,15 @@ def _run_recovery_worker(
     application_name: str,
     application_version: str,
 ) -> None:
-    _recovery_pipeline(
+    pipeline = _recovery_pipeline(
         pipeline_key=pipeline_key,
         queue_name=queue_name,
     )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
     Queue(queue_name, polling_interval_sec=0.01)
     engine = create_engine(database_url)
+    registration = None
     try:
         DBOS(
             config=_dbos_config(
@@ -122,6 +132,16 @@ def _run_recovery_worker(
                 application_name=application_name,
                 application_version=application_version,
             )
+        )
+        registration = register_scheduled_dispatcher(
+            config=PlatformDbosConfig(
+                database_url=database_url,
+                system_database_url=database_url,
+            ),
+            engine=engine,
+            registry=registry,
+            batch_size=1,
+            barrier_batch_size=1,
         )
         DBOS.launch()
         deadline = time.monotonic() + _WORKER_TIMEOUT_SECONDS
@@ -136,6 +156,8 @@ def _run_recovery_worker(
             time.sleep(0.02)
         raise TimeoutError("recovered stage did not reach SUCCEEDED")
     finally:
+        if registration is not None:
+            registration.close()
         DBOS.destroy(destroy_registry=True)
         engine.dispose()
 
@@ -221,7 +243,7 @@ def test_dbos_recovery_reuses_the_platform_stage_attempt(
         capacity=1,
         engine=pg_engine,
     )
-    submit(
+    submit_items(
         campaign_key=f"campaign-{suffix}",
         run_key=f"run-{suffix}",
         pipeline=pipeline.identity,

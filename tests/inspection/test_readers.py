@@ -46,12 +46,13 @@ from dr_platform.pipeline.definitions import (
 )
 from dr_platform.pipeline.registry import PipelineRegistry
 from dr_platform.recovery.retry import retry_stage
-from dr_platform.submission.stream import WorkInput, submit
+from dr_platform.submission.stream import WorkInput
 from tests.conftest import (
     NOW,
     _args_for,
     _as_dbos_client,
     _migrate,
+    submit_items,
 )
 
 if TYPE_CHECKING:
@@ -60,7 +61,7 @@ if TYPE_CHECKING:
     from dr_platform._core.ledger.schema import StagingSchema
 
 
-def _workflow(input_reference: str) -> str:
+async def _workflow(input_reference: str) -> str:
     return f"output:{input_reference}"
 
 
@@ -102,7 +103,7 @@ def _submit(  # noqa: PLR0913 -- explicit desired-state test facts
     work_keys: tuple[str, ...],
     clock: datetime = NOW,
 ) -> None:
-    submit(
+    submit_items(
         campaign_key=campaign_key,
         run_key=run_key,
         pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
@@ -694,7 +695,7 @@ def test_six_seed_top_up_uses_bulk_statuses_for_one_campaign(
         else:
             absent.append(raw_key)
 
-    receipt = submit(
+    receipt = submit_items(
         campaign_key="estimate-v1",
         run_key="run-top-up",
         pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
@@ -714,8 +715,8 @@ def test_six_seed_top_up_uses_bulk_statuses_for_one_campaign(
 
     assert absent == list(desired_keys[3:])
     assert reserved == [existing_keys[2]]
-    assert receipt.inserted_count == 3
-    assert receipt.already_existing_count == 0
+    assert receipt.created_work_count == 3
+    assert receipt.reused_work_count == 0
     refreshed = bulk_work_statuses(
         "estimate-v1", desired_keys, engine=pg_engine
     ).statuses

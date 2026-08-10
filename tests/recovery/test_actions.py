@@ -41,7 +41,7 @@ from dr_platform.recovery.cancellation import (
     cancel_work,
 )
 from dr_platform.recovery.retry import retry_stage
-from dr_platform.submission.stream import WorkInput, submit
+from dr_platform.submission.stream import WorkInput
 from tests.conftest import (
     NOW,
     _args_for,
@@ -51,6 +51,7 @@ from tests.conftest import (
     dbos_config,
     engine_dsn,
     initialize_dbos_schema,
+    submit_items,
 )
 
 if TYPE_CHECKING:
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
 
 
-def _workflow(input_reference: str) -> str:
+async def _workflow(input_reference: str) -> str:
     return f"output:{input_reference}"
 
 
@@ -99,7 +100,7 @@ def _submit(
     run_key: str,
     work_keys: tuple[str, ...],
 ) -> None:
-    submit(
+    submit_items(
         campaign_key="campaign-1",
         run_key=run_key,
         pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
@@ -112,6 +113,7 @@ def _submit(
             )
             for work_key in work_keys
         ),
+        expected_member_count=len(work_keys),
         registry=registry,
         engine=engine,
         clock=lambda: NOW,

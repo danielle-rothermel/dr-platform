@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Sized
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
@@ -11,6 +11,13 @@ from sqlalchemy import Engine, create_engine, make_url, text
 
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
+from dr_platform.submission.stream import (
+    RunMemberInput,
+    RunRegistrationDeclaration,
+    SubmissionReceipt,
+    WorkInput,
+    submit,
+)
 
 if TYPE_CHECKING:
     from dbos import DBOSClient
@@ -111,6 +118,27 @@ def _migrate(engine: Engine) -> StagingSchema:
 
 def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
     return (payload.input_reference,)
+
+
+def submit_items(
+    *,
+    items: Iterable[WorkInput],
+    expected_member_count: int | None = None,
+    **kwargs: object,
+) -> SubmissionReceipt:
+    """Test helper adapting item collections to ordered run registration."""
+    if expected_member_count is None:
+        if not isinstance(items, Sized):
+            items = tuple(items)
+        expected_member_count = len(items)
+    return submit(
+        **kwargs,  # ty: ignore[invalid-argument-type]
+        declaration=RunRegistrationDeclaration(expected_member_count),
+        members=(
+            RunMemberInput(ordinal=ordinal, work=item)
+            for ordinal, item in enumerate(items)
+        ),
+    )
 
 
 def _as_dbos_client(client: object) -> DBOSClient:

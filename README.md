@@ -7,7 +7,7 @@
 | --- | --- | --- | --- |
 
 **dr-platform durably moves application-owned work through staged pipelines.**
-It is built on PostgreSQL and DBOS and organized into six functional areas:
+It is built on PostgreSQL and DBOS and organized into seven functional areas:
 
 `dr-platform` is alpha software. The root `dr_platform` API is the intended
 application boundary, but compatibility is not yet promised.
@@ -25,6 +25,9 @@ application boundary, but compatibility is not yet promised.
 - **[Execution and handoff](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/execution)**
   make admitted stages DBOS-durable, record outcomes, and create the next ready
   stage transactionally.
+- **[Run completion](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/completion)**
+  releases one optional durable fan-in operation after a closed run's members
+  settle, without adding graph semantics to item pipelines.
 - **[Recovery and operator actions](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/recovery)**
   reconcile abandoned workflows and provide explicit retry and cancellation
   while preserving stage-attempt history.
@@ -37,7 +40,8 @@ application boundary, but compatibility is not yet promised.
       persistence ledger shared across functional areas.
     - **[Runtime](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/runtime)**
       validates PostgreSQL and DBOS colocation, initializes DBOS, schedules
-      dispatch, and optionally configures telemetry.
+      admission and run-barrier reconciliation independently, and optionally
+      configures telemetry.
         - **[Database](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/runtime/database)**
           owns the platform schema and migrations.
 
@@ -79,8 +83,16 @@ class PipelineIdentity:
 class StageDefinition:
     key: StageKey
     queue_name: str
-    workflow: Callable[..., object]
-    args_for: Callable[..., tuple[object, ...]]
+    workflow: Callable[..., Awaitable[str | None]]
+    args_for: Callable[[AdmissionPayload], tuple[object, ...]]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RunCompletionDefinition:
+    key: RunCompletionKey
+    queue_name: str
+    workflow: Callable[..., Awaitable[str | None]]
+    args_for: Callable[[RunCompletionPayload], tuple[object, ...]]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -88,6 +100,7 @@ class PipelineDefinition:
     key: PipelineKey
     version: int
     stages: tuple[StageDefinition, ...]
+    run_completion: RunCompletionDefinition | None = None
 ```
 
 ```python
@@ -107,9 +120,10 @@ class PipelineRegistry:
 
 ### Submission
 
-Submission accepts an arbitrary iterable of immutable work inputs and commits
-it in bounded chunks. Reusing an existing identity is safe only when its
-immutable provenance matches the original submission.
+Submission registers one declared ordered membership in bounded, set-oriented
+chunks and closes it after successful stream exhaustion and validation. A
+matching closed replay returns its persisted receipt without consuming the
+member iterable. Compatible work may belong to more than one run.
 
 ```python
 @dataclass(frozen=True, slots=True, init=False)
@@ -128,10 +142,26 @@ class WorkInput:
 
 
 @dataclass(frozen=True, slots=True)
+class RunMemberInput:
+    ordinal: int
+    work: WorkInput
+
+
+@dataclass(frozen=True, slots=True)
+class RunRegistrationDeclaration:
+    expected_member_count: int
+    manifest_reference: str | None = None
+    membership_digest: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SubmissionReceipt:
     run_key: RunKey
-    inserted_count: int
-    already_existing_count: int
+    membership_digest: str | None
+    registered_member_count: int
+    created_work_count: int
+    reused_work_count: int
+    registration_closed_at: datetime
 ```
 
 ```python
@@ -141,11 +171,16 @@ def submit(
     run_key: RunKey | str,
     pipeline: PipelineIdentity,
     execution_config_reference: str,
-    items: Iterable[WorkInput],
+    declaration: RunRegistrationDeclaration,
+    members: Iterable[RunMemberInput],
     registry: PipelineRegistry,
     engine: Engine,
 ) -> SubmissionReceipt: ...
 ```
+
+Use `compute_run_membership_digest(members, expected_member_count=...)` when
+constructing a manifest-bound declaration. It validates the canonical
+zero-based member order and pins the digest wire format used again at closure.
 
 ### Admission and controls
 
@@ -154,8 +189,7 @@ every matching capacity control. Operators can change capacity or pause future
 admissions without preempting work that is already running.
 
 ```python
-@dataclass(frozen=True, slots=True)
-class AdmissionPayload:
+class AdmissionPayload(BaseModel):
     campaign_key: CampaignKey
     work_key: WorkKey
     run_key: RunKey
@@ -189,7 +223,7 @@ read_controls(pipeline, stage_key, labels=None) -> tuple[StageControlRecord, ...
 
 ### Execution and handoff
 
-Execution wraps application stage callables in package-owned DBOS workflows
+Execution wraps async application stage callables in package-owned DBOS workflows
 that record one terminal outcome and prepare the next stage transactionally.
 Stage bodies must tolerate at-least-once execution across workflow recovery.
 Crash recovery requires a worker with the matching executor and application
@@ -213,6 +247,43 @@ def wrap_pipeline_workflows(
     pipeline: PipelineDefinition,
 ) -> PipelineDefinition: ...
 ```
+
+Argument derivation runs inside the durable wrapper, after admission commits.
+Applications own and close any loop-affine clients used by their workflows.
+
+### Run completion
+
+A completion-enabled pipeline requires an immutable manifest reference and the
+canonical digest of its declared ordered membership. Independent scheduled
+barrier reconciliation releases exactly one completion execution after every
+member's current stage settles. Release facts remain fixed if a member later
+changes state.
+
+```python
+class RunCompletionExecutionState(StrEnum):
+    ENQUEUED = "enqueued"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class RunCompletionPayload(BaseModel):
+    campaign_key: CampaignKey
+    run_key: RunKey
+    pipeline_key: PipelineKey
+    pipeline_version: int
+    execution_config_reference: str
+    manifest_reference: str
+    membership_digest: str
+    member_count: int
+    released_at: datetime
+    release_terminal_state_counts: tuple[StateCount, ...]
+```
+
+The application validates the manifest digest before aggregation and records
+the exact member outcomes and output references consumed in its aggregate
+artifact. `inspect_run_completion()` reports durable submission as `ENQUEUED`
+until the application records success or failure; it does not project DBOS
+runtime state.
 
 ### Recovery and operator actions
 
@@ -306,6 +377,7 @@ list_work_items(campaign_key, state=None, cursor=None, limit=...) -> tuple[WorkI
 get_work_item_stages(work_item_id) -> tuple[StageExecutionSummary, ...]
 campaign_state_counts(campaign_key) -> tuple[StateCount, ...]
 run_state_counts(run_key) -> tuple[StateCount, ...]
+bulk_run_state_counts(run_keys) -> Mapping[RunKey, tuple[StateCount, ...] | None]
 bulk_work_statuses(campaign_key, work_keys) -> BulkStatusResult
 ```
 
@@ -315,16 +387,30 @@ The platform tables and the DBOS system schema must share one PostgreSQL
 database. Runtime initialization and dispatcher registration validate that
 colocation and fail when their URLs identify different databases.
 
-`0001_staging_baseline` is the root of the supported Alembic chain. Apply it
-only to a database that does not already contain the platform schema. The
-baseline is deliberately irreversible: downgrade refuses to delete the
+`0001_staging_baseline` is the fresh-schema root of the supported Alembic
+chain. This development hard cut has no compatibility or historical backfill
+path. Archive any database worth retaining before explicitly resetting it.
+Downgrade remains deliberately non-destructive and refuses to delete the
 recorded ledger.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher
-before `DBOS.launch()`. Keep the returned dispatcher registration alive while
-the runtime is active. Production-like deployments must also schedule
+before `DBOS.launch()`. Admission and run-barrier reconciliation have separate
+schedule and batch settings. The barrier also has a candidate budget, which
+must be at least its release batch size and bounds all evaluated runs, including
+ineligible and lock-skipped candidates. A persisted cursor rotates blocked or
+failed candidates so later runs can make progress. Keep the returned dispatcher
+registration alive while the runtime is active. Production-like deployments
+must also schedule
 `sweep_abandoned_stages`, either through the dispatcher or independently, so
 abandoned workflows do not retain admission capacity indefinitely.
+
+Size the schedules independently with
+`batch size * 3600 / interval seconds`. For example, a five-second admission
+schedule with a batch of 200 has a theoretical ceiling of 144,000 admissions
+per hour, giving 44% headroom over a 100,000-admission workload. A five-second
+barrier schedule with a batch of 20 similarly provides 14,400 releases per
+hour for a 10,000-completion workload. These are sizing examples, not
+throughput guarantees; qualify the chosen configuration in its deployment.
 
 ## Development
 

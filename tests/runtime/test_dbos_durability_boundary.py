@@ -129,7 +129,7 @@ def test_stage_wrapper_is_declared_as_dbos_workflow() -> None:
 
     workflow_decorated: list[str] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for decorator in node.decorator_list:
             call = decorator if isinstance(decorator, ast.Call) else None

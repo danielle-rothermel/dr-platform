@@ -11,6 +11,7 @@ import dr_platform
 from dr_platform._core import identities
 from dr_platform._core.ledger import attempts, executions, schema, states
 from dr_platform.admission import controls, runner
+from dr_platform.completion import execution as completion_execution
 from dr_platform.execution import handoff
 from dr_platform.inspection import campaigns, statuses
 from dr_platform.inspection import work_items as inspection_work_items
@@ -35,7 +36,18 @@ _ROOT_BINDINGS = {
     "PipelineRegistry": registry.PipelineRegistry,
     "PipelineRunConflictError": runs.PipelineRunConflictError,
     "PlatformDbosConfig": dbos.PlatformDbosConfig,
+    "RegistrationClosureError": stream.RegistrationClosureError,
+    "RunCompletionDefinition": definitions.RunCompletionDefinition,
+    "RunCompletionExecutionRecord": (
+        completion_execution.RunCompletionExecutionRecord
+    ),
+    "RunCompletionExecutionState": states.RunCompletionExecutionState,
+    "RunCompletionKey": identities.RunCompletionKey,
+    "RunCompletionPayload": completion_execution.RunCompletionPayload,
     "RunKey": identities.RunKey,
+    "RunMemberInput": stream.RunMemberInput,
+    "RunMembershipConflictError": stream.RunMembershipConflictError,
+    "RunRegistrationDeclaration": stream.RunRegistrationDeclaration,
     "RunSummary": campaigns.RunSummary,
     "StageAttemptRecord": attempts.StageAttemptRecord,
     "StageControlRecord": controls.StageControlRecord,
@@ -61,12 +73,15 @@ _ROOT_BINDINGS = {
     "WorkflowCanceller": cancellation.WorkflowCanceller,
     "build_platform_dbos_config": dbos.build_platform_dbos_config,
     "bulk_work_statuses": statuses.bulk_work_statuses,
+    "bulk_run_state_counts": statuses.bulk_run_state_counts,
     "campaign_state_counts": statuses.campaign_state_counts,
     "cancel_work": cancellation.cancel_work,
+    "compute_run_membership_digest": stream.compute_run_membership_digest,
     "get_work_item_stages": inspection_work_items.get_work_item_stages,
     "initialize_dbos_runtime": dbos.initialize_dbos_runtime,
     "initialize_telemetry_safely": telemetry.initialize_telemetry_safely,
     "inspect_campaign": campaigns.inspect_campaign,
+    "inspect_run_completion": completion_execution.inspect_run_completion,
     "list_campaigns": campaigns.list_campaigns,
     "list_runs": campaigns.list_runs,
     "list_work_items": inspection_work_items.list_work_items,

@@ -58,6 +58,11 @@ class StageKey(_ValidatedKey):
 
 
 @dataclass(frozen=True, slots=True)
+class RunCompletionKey(_ValidatedKey):
+    _label: ClassVar[str] = "run completion key"
+
+
+@dataclass(frozen=True, slots=True)
 class PipelineKey(_ValidatedKey):
     _label: ClassVar[str] = "pipeline key"
 
