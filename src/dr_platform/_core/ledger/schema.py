@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 PREFIX_PATTERN = re.compile(r"[a-z_][a-z0-9_]*")
 MAX_PREFIX_BYTES = 21
+POSTGRESQL_MAX_IDENTIFIER_BYTES = 63
 DEFAULT_PREFIX = "platform"
 
 
@@ -57,7 +58,14 @@ class StagingSchema:
         self.metadata = MetaData()
 
         def name(suffix: str) -> str:
-            return f"{prefix}_{suffix}"
+            identifier = f"{prefix}_{suffix}"
+            if len(identifier.encode()) > POSTGRESQL_MAX_IDENTIFIER_BYTES:
+                raise ValueError(
+                    "generated PostgreSQL identifier exceeds "
+                    f"{POSTGRESQL_MAX_IDENTIFIER_BYTES} bytes: "
+                    f"{identifier!r}"
+                )
+            return identifier
 
         self.pipeline_runs = Table(
             name("pipeline_runs"),
@@ -439,7 +447,7 @@ class StagingSchema:
             ),
             CheckConstraint(
                 "terminal_at IS NULL OR terminal_at >= enqueued_at",
-                name=name("ck_run_completion_executions_terminal_time"),
+                name=name("ck_rc_exec_terminal_time"),
             ),
             CheckConstraint(
                 "(state = 'enqueued' AND terminal_at IS NULL AND "
@@ -466,7 +474,7 @@ class StagingSchema:
                 BigInteger,
                 ForeignKey(
                     f"{name('run_completion_executions')}.run_completion_execution_id",
-                    name=name("fk_run_completion_attempts_execution"),
+                    name=name("fk_rc_attempts_execution"),
                     ondelete="RESTRICT",
                 ),
                 nullable=False,
@@ -481,32 +489,32 @@ class StagingSchema:
             UniqueConstraint(
                 "run_completion_execution_id",
                 "attempt_number",
-                name=name("uq_run_completion_attempts_execution_number"),
+                name=name("uq_rc_attempt_exec_no"),
             ),
             UniqueConstraint(
                 "workflow_id",
-                name=name("uq_run_completion_attempts_workflow"),
+                name=name("uq_rc_attempt_workflow"),
             ),
             CheckConstraint(
                 "attempt_number > 0",
-                name=name("ck_run_completion_attempts_number"),
+                name=name("ck_rc_attempt_number"),
             ),
             CheckConstraint(
                 "terminal_summary IS NULL "
                 "OR jsonb_typeof(terminal_summary) = 'object'",
-                name=name("ck_run_completion_attempts_summary_object"),
+                name=name("ck_rc_attempt_summary"),
             ),
             CheckConstraint(
                 "enqueued_at IS NULL OR enqueued_at >= created_at",
-                name=name("ck_run_completion_attempts_enqueued_time"),
+                name=name("ck_rc_attempt_enqueued"),
             ),
             CheckConstraint(
                 "terminal_at IS NULL OR terminal_at >= created_at",
-                name=name("ck_run_completion_attempts_terminal_time"),
+                name=name("ck_rc_attempt_terminal"),
             ),
             CheckConstraint(
                 "enqueued_at IS NULL OR terminal_at IS NULL "
                 "OR terminal_at >= enqueued_at",
-                name=name("ck_run_completion_attempts_time_order"),
+                name=name("ck_rc_attempt_time_order"),
             ),
         )

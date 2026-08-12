@@ -351,8 +351,8 @@ def record_run_completion_outcome(  # noqa: PLR0913
         if output_reference is not None or error_summary is None:
             raise ValueError("failed run completion requires only an error")
         attempt_summary = {
-            "outcome": RunCompletionExecutionState.FAILED.value,
             **dict(error_summary),
+            "outcome": RunCompletionExecutionState.FAILED.value,
         }
         values = {
             "state": RunCompletionExecutionState.FAILED.value,

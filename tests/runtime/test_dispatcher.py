@@ -27,7 +27,7 @@ from dr_platform.pipeline.definitions import (
     StageDefinition,
 )
 from dr_platform.pipeline.registry import PipelineRegistry
-from dr_platform.recovery.sweep import SweepSummary
+from dr_platform.recovery.sweep import RunCompletionSweepSummary, SweepSummary
 from dr_platform.runtime import dispatcher
 from dr_platform.runtime.dbos import PlatformDbosConfig
 from dr_platform.runtime.dispatcher import UnwrappedPipelineError
@@ -761,11 +761,22 @@ def test_sweep_cron_registers_a_second_scheduled_workflow(
         ),
     )
 
-    def fake_sweep(engine: object, **kwargs: object) -> SweepSummary:
-        calls.append(("sweep", (engine, kwargs)))
+    def fake_stage_sweep(engine: object, **kwargs: object) -> SweepSummary:
+        calls.append(("stage_sweep", (engine, kwargs)))
         return SweepSummary(inspected_count=0, projections=())
 
-    monkeypatch.setattr(dispatcher, "sweep_abandoned_stages", fake_sweep)
+    def fake_completion_sweep(
+        engine: object, **kwargs: object
+    ) -> RunCompletionSweepSummary:
+        calls.append(("completion_sweep", (engine, kwargs)))
+        return RunCompletionSweepSummary(inspected_count=0, projections=())
+
+    monkeypatch.setattr(dispatcher, "sweep_abandoned_stages", fake_stage_sweep)
+    monkeypatch.setattr(
+        dispatcher,
+        "sweep_abandoned_run_completions",
+        fake_completion_sweep,
+    )
     config = PlatformDbosConfig(
         database_url="postgresql+psycopg://user:secret@db/platform",
         system_database_url="postgresql+psycopg://user:secret@db/platform",
@@ -795,11 +806,15 @@ def test_sweep_cron_registers_a_second_scheduled_workflow(
 
     assert ("cron", "0 * * * * *") in calls
     assert ("workflow", dispatcher.SWEEP_WORKFLOW_NAME) in calls
-    sweep_call = calls[-1]
-    assert sweep_call[0] == "sweep"
-    sweep_args = cast("tuple[object, dict[str, object]]", sweep_call[1])
-    assert sweep_args[0] is engine
-    assert sweep_args[1]["client"] is client
-    assert sweep_args[1]["batch_size"] == 25
-    assert "live_identity" in sweep_args[1]
+    assert calls[-2][0] == "stage_sweep"
+    stage_args = cast("tuple[object, dict[str, object]]", calls[-2][1])
+    assert stage_args[0] is engine
+    assert stage_args[1]["client"] is client
+    assert stage_args[1]["batch_size"] == 25
+    assert "live_identity" in stage_args[1]
+    completion_args = cast("tuple[object, dict[str, object]]", calls[-1][1])
+    assert calls[-1][0] == "completion_sweep"
+    assert completion_args[0] is engine
+    assert completion_args[1]["client"] is client
+    assert completion_args[1]["batch_size"] == 25
     assert client.destroyed

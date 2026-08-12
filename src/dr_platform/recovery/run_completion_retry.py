@@ -22,7 +22,9 @@ from dr_platform._core.ledger.states import (
     StageExecutionState,
 )
 from dr_platform.completion.execution import (
+    RunCompletionExecutionRecord,
     RunCompletionPayload,
+    inspect_run_completion,
     is_run_completion_wrapped,
 )
 from dr_platform.inspection.statuses import StateCount
@@ -42,17 +44,8 @@ def _utc_now() -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class RunCompletionRetryResult:
-    execution: RunCompletionExecutionRecordProxy
+    execution: RunCompletionExecutionRecord
     new_attempt: RunCompletionAttemptRecord
-
-
-@dataclass(frozen=True, slots=True)
-class RunCompletionExecutionRecordProxy:
-    run_completion_execution_id: int
-    run_key: RunKey
-    current_attempt: int
-    state: RunCompletionExecutionState
-    enqueued_at: datetime
 
 
 def retry_run_completion(  # noqa: PLR0913 -- explicit operator boundary
@@ -187,15 +180,12 @@ def retry_run_completion(  # noqa: PLR0913 -- explicit operator boundary
         client.enqueue_in_transaction(
             connection, options, payload.model_dump(mode="json")
         )
-        execution = RunCompletionExecutionRecordProxy(
-            run_completion_execution_id=run_row["run_completion_execution_id"],
-            run_key=normalized_run_key,
-            current_attempt=new_attempt.attempt_number,
-            state=RunCompletionExecutionState.ENQUEUED,
-            enqueued_at=retried_at,
-        )
     return RunCompletionRetryResult(
-        execution=execution,
+        execution=inspect_run_completion(
+            normalized_run_key,
+            engine=engine,
+            schema=selected_schema,
+        ),
         new_attempt=new_attempt,
     )
 

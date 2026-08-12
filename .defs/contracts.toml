@@ -346,7 +346,9 @@ title = "Sweep only projects abandonment"
 statement = """
 The abandoned-stage sweep visits admitted current attempts and projects only \
 cancelled, errored, recovery-exhausted, or identity-orphaned pending workflow \
-evidence into terminal platform state. Pending rows that still match the live \
+evidence into terminal platform state. The run-completion sweep visits enqueued \
+current attempts and projects only errored or recovery-exhausted DBOS evidence \
+into failed platform state. Pending rows that still match the live \
 application version and executor identity are skipped so startup recovery and \
 the configured recovery cap can settle same-process crashes. The sweep never \
 retries, resumes, replaces, or waits for work, and a concurrent platform \
@@ -356,7 +358,7 @@ The sweep reconciles external execution evidence without time thresholds or \
 automatic policy that could duplicate paid work. Identity projection covers \
 structural orphaning after code or executor changes."""
 date = "2026-08-05"
-check = "uv run pytest -q tests/execution/test_handoff.py -k 'sweep'"
+check = "uv run pytest -q tests/execution/test_handoff.py -k 'sweep' tests/recovery/test_run_completion_retry.py::test_sweep_projects_exhausted_run_completion_for_operator_retry"
 
 [[contracts]]
 title = "Recovery preserves one attempt identity"
@@ -372,7 +374,7 @@ Runtime replay and operator retry are distinct: replay continues one attempt, \
 while retry appends another. Matching registrations, application version, and \
 an explicit recovery cap prevent silent paid re-execution after crash."""
 date = "2026-08-05"
-check = "uv run pytest -q tests/execution/test_dbos_recovery_boundary.py"
+check = "uv run pytest -q tests/execution/test_dbos_recovery_boundary.py tests/recovery/test_run_completion_retry.py::test_sweep_projects_exhausted_run_completion_for_operator_retry"
 
 [[contracts]]
 title = "Platform and workflow state are colocated"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -19,6 +20,7 @@ from dr_platform.completion.execution import (
     record_run_completion_outcome,
 )
 from dr_platform.recovery.run_completion_retry import retry_run_completion
+from dr_platform.recovery.sweep import sweep_abandoned_run_completions
 from tests.completion.test_run_barrier import (
     _members,
     _RecordingClient,
@@ -30,6 +32,27 @@ from tests.conftest import NOW, _as_dbos_client, _migrate
 
 if TYPE_CHECKING:
     from dr_platform.pipeline.registry import PipelineRegistry
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkflowStatus:
+    workflow_id: str
+    status: str
+    error: Exception | None = None
+
+
+class _StatusClient:
+    def __init__(self, statuses: tuple[_WorkflowStatus, ...]) -> None:
+        self._statuses = {status.workflow_id: status for status in statuses}
+
+    def list_workflows(
+        self, *, workflow_ids: list[str], **_kwargs: object
+    ) -> list[_WorkflowStatus]:
+        return [
+            self._statuses[workflow_id]
+            for workflow_id in workflow_ids
+            if workflow_id in self._statuses
+        ]
 
 
 def _enqueue_completion(
@@ -83,6 +106,7 @@ def test_retry_run_completion_appends_attempt_and_reenqueues(
 
     assert result.execution.state is RunCompletionExecutionState.ENQUEUED
     assert result.execution.current_attempt == 2
+    assert result.execution.workflow_id == result.new_attempt.workflow_id
     assert result.new_attempt.attempt_number == 2
     assert client.enqueued
     assert (
@@ -171,3 +195,53 @@ def test_retry_run_completion_rejects_non_failed_execution(
             client=_as_dbos_client(_RecordingClient()),
             registry=registry,
         )
+
+
+def test_sweep_projects_exhausted_run_completion_for_operator_retry(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(pg_engine, key="sweep-retry")
+    status_client = _StatusClient(
+        (
+            _WorkflowStatus(
+                workflow_id,
+                "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+                RuntimeError("recovery exhausted"),
+            ),
+        )
+    )
+    sweep = sweep_abandoned_run_completions(
+        pg_engine,
+        client=_as_dbos_client(status_client),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert sweep.inspected_count == 1
+    assert sweep.projected_count == 1
+    assert sweep.projections[0].state is RunCompletionExecutionState.FAILED
+
+    client = _RecordingClient()
+    result = retry_run_completion(
+        "run-retry",
+        engine=pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW + timedelta(seconds=3),
+    )
+    assert result.execution.state is RunCompletionExecutionState.ENQUEUED
+    assert result.execution.current_attempt == 2
+    assert client.enqueued
+
+    with pg_engine.connect() as connection:
+        first = get_run_completion_attempt(
+            connection,
+            run_completion_execution_id=result.execution.run_completion_execution_id,
+            attempt_number=1,
+            schema=schema,
+        )
+    assert first is not None
+    assert first.terminal_at is not None
+    assert first.terminal_summary is not None
+    assert first.terminal_summary["outcome"] == (
+        RunCompletionExecutionState.FAILED.value
+    )

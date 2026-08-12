@@ -89,8 +89,11 @@ from dr_platform.recovery.run_completion_retry import (
     retry_run_completion,
 )
 from dr_platform.recovery.sweep import (
+    RunCompletionSweepProjection,
+    RunCompletionSweepSummary,
     SweepProjection,
     SweepSummary,
+    sweep_abandoned_run_completions,
     sweep_abandoned_stages,
 )
 from dr_platform.runtime.database import upgrade_platform_schema
@@ -146,6 +149,8 @@ __all__ = [
     "RunCompletionKey",
     "RunCompletionPayload",
     "RunCompletionRetryResult",
+    "RunCompletionSweepProjection",
+    "RunCompletionSweepSummary",
     "RunKey",
     "RunMemberInput",
     "RunMemberSummary",
@@ -204,6 +209,7 @@ __all__ = [
     "set_selector_capacity",
     "set_stage_capacity",
     "submit",
+    "sweep_abandoned_run_completions",
     "sweep_abandoned_stages",
     "upgrade_platform_schema",
     "wrap_pipeline_workflows",

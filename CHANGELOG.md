@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passes.
 - `retry_run_completion` with `run_completion_attempts` attempt history and
   per-attempt workflow identity.
+- `sweep_abandoned_run_completions` to project recovery-exhausted and errored
+  run-completion workflows onto platform failure for operator retry.
 
 ### Changed
 
@@ -31,8 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the per-stage-boundary latency model.
 - Run completion schema hard cutover: execution rows track `current_attempt`;
   workflow identity lives on attempt rows.
-- Sweep and recovery contracts now cover identity orphaning, recovery caps, and
-  run completion retry.
+- Sweep and recovery contracts now cover identity orphaning, recovery caps,
+  run completion retry, and run-completion abandonment projection.
+- Run-completion attempt summaries pin platform `outcome` over caller-supplied
+  error fields; shortened run-completion attempt constraint names fit PostgreSQL
+  identifier limits.
 
 ### Removed
 

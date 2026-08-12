@@ -31,6 +31,7 @@ from dr_platform.execution.handoff import (
 )
 from dr_platform.recovery.sweep import (
     DEFAULT_SWEEP_BATCH_SIZE,
+    sweep_abandoned_run_completions,
     sweep_abandoned_stages,
 )
 from dr_platform.runtime.dbos import (
@@ -340,16 +341,24 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
                 _scheduled_time: datetime,
                 _actual_time: datetime,
             ) -> None:
-                summary = sweep_abandoned_stages(
+                stage_summary = sweep_abandoned_stages(
                     engine,
                     client=client,
                     live_identity=live_dbos_identity,
                     batch_size=sweep_batch_size,
                 )
+                completion_summary = sweep_abandoned_run_completions(
+                    engine,
+                    client=client,
+                    batch_size=sweep_batch_size,
+                )
                 logger.info(
-                    "abandoned-stage sweep inspected=%s projected=%s",
-                    summary.inspected_count,
-                    summary.projected_count,
+                    "abandoned-stage sweep inspected=%s projected=%s; "
+                    "run-completion sweep inspected=%s projected=%s",
+                    stage_summary.inspected_count,
+                    stage_summary.projected_count,
+                    completion_summary.inspected_count,
+                    completion_summary.projected_count,
                 )
 
             sweep_workflow = cast("ScheduledWorkflow", sweep)

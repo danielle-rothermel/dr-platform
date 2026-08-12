@@ -392,7 +392,9 @@ bounded admission, run-barrier, and abandoned-stage sweep passes on independent 
 schedules. The sweep registers by default unless disabled at registration time. \
 The caller supplies the live application version and executor ids observed at \
 registration so identity-orphaned pending work can be projected without time \
-thresholds. Its registration remains alive with the runtime."""
+thresholds. Supply the deployment-wide live executor set on the process that \
+owns sweep when multiple workers run. Its registration remains alive with the \
+runtime."""
 exported_symbols = [
   "register_scheduled_dispatcher",
   "DispatcherRegistration",
@@ -449,15 +451,19 @@ exported_symbols = [
 name = "sweep"
 definition = """
 The reconciliation pass that projects terminal workflow abandonment and \
-identity-orphaned pending work onto currently admitted platform stages and \
-reclaims their occupancy. Structural abandonment uses stale application version \
-or dead executor evidence only; pending rows that still match the live identity \
-are left for startup recovery and the configured recovery cap. It does not \
-retry, resume, replace, or wait for work."""
+identity-orphaned pending work onto currently admitted platform stages, \
+projects errored or recovery-exhausted DBOS evidence onto enqueued run \
+completions, and reclaims stage occupancy. Structural abandonment uses stale \
+application version or dead executor evidence only; pending rows that still \
+match the live identity are left for startup recovery and the configured \
+recovery cap. It does not retry, resume, replace, or wait for work."""
 exported_symbols = [
   "sweep_abandoned_stages",
+  "sweep_abandoned_run_completions",
   "SweepProjection",
   "SweepSummary",
+  "RunCompletionSweepProjection",
+  "RunCompletionSweepSummary",
 ]
 
 [[terms]]

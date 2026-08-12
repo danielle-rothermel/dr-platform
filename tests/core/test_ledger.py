@@ -576,6 +576,15 @@ def test_upgrade_rejects_conflicting_table_without_destroying_data(
         )
 
 
+def test_staging_schema_rejects_overlong_prefix() -> None:
+    with pytest.raises(ValueError, match="maximum is 21 ASCII bytes"):
+        StagingSchema("x" * 22)
+
+
+def test_staging_schema_accepts_max_length_prefix() -> None:
+    StagingSchema("x" * 21)
+
+
 def test_campaign_work_identity_is_unique(pg_engine: Engine) -> None:
     _migrate(pg_engine)
     schema = StagingSchema()

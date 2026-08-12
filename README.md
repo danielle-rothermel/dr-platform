@@ -307,7 +307,8 @@ runtime state.
 Recovery keeps platform state authoritative while delegating physical workflow
 cancellation through a narrow protocol. Retry creates a new attempt for failed
 stages or run completions, while the sweeper projects terminal DBOS abandonment
-and identity-orphaned pending work onto admitted stages. Pending rows that still
+and identity-orphaned pending work onto admitted stages and enqueued run
+completions. Pending rows that still
 match the live application version and executor identity are skipped so startup
 recovery and the recovery cap can settle same-process crashes; projection uses
 structural evidence only (no time thresholds). Deploy one live process per
@@ -362,6 +363,7 @@ cancel_work(work identity, canceller) -> WorkCancellationResult
 retry_stage(stage_execution_id) -> StageRetryResult
 retry_run_completion(run_key, DBOS client, registry) -> RunCompletionRetryResult
 sweep_abandoned_stages(DBOS client, live_identity) -> SweepSummary
+sweep_abandoned_run_completions(DBOS client) -> RunCompletionSweepSummary
 ```
 
 ### Inspection
@@ -466,9 +468,13 @@ recorded ledger.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher
 before `DBOS.launch()`. Admission, run-barrier reconciliation, and
-abandoned-stage sweep have separate schedule and batch settings; the sweep is
-registered by default unless `sweep_cron=None`. Pass `LiveDbosIdentity` from
-`DBOS.application_version` and `{DBOS.executor_id}` at dispatcher registration.
+abandoned-stage and run-completion sweep have separate schedule and batch
+settings; both register by default unless `sweep_cron=None`. Pass
+`LiveDbosIdentity` from `DBOS.application_version` and the deployment-wide
+set of live executor IDs at dispatcher registration. When multiple worker
+processes run, either disable sweep on all but one reconciler or supply every
+live executor ID to the process that owns sweep so peer work is not projected
+as `dead_executor`.
 The barrier also has a candidate budget, which
 must be at least its release batch size and bounds all evaluated runs, including
 ineligible and lock-skipped candidates. A persisted cursor rotates blocked or

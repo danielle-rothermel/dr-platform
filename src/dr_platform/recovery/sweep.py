@@ -7,16 +7,23 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import Engine, select
 
-from dr_platform._core.identities import StageKey
+from dr_platform._core.identities import RunKey, StageKey
 from dr_platform._core.ledger.attempts import record_stage_attempt_terminal
 from dr_platform._core.ledger.executions import transition_stage_execution
 from dr_platform._core.ledger.schema import StagingSchema
-from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.states import (
+    RunCompletionExecutionState,
+    StageExecutionState,
+)
 from dr_platform._core.ledger.terminal_summary import (
     TerminalSummaryProducer,
     build_terminal_summary,
 )
 from dr_platform._core.validation import validate_positive_integer
+from dr_platform.completion.execution import (
+    RunCompletionOutcomeError,
+    record_run_completion_outcome,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -94,6 +101,25 @@ class SweepProjection:
 @dataclass(frozen=True, slots=True)
 class SweepSummary:
     projections: tuple[SweepProjection, ...]
+    inspected_count: int
+
+    @property
+    def projected_count(self) -> int:
+        return len(self.projections)
+
+
+@dataclass(frozen=True, slots=True)
+class RunCompletionSweepProjection:
+    workflow_id: str
+    run_completion_execution_id: int
+    run_key: RunKey
+    state: RunCompletionExecutionState
+    dbos_status: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunCompletionSweepSummary:
+    projections: tuple[RunCompletionSweepProjection, ...]
     inspected_count: int
 
     @property
@@ -307,3 +333,148 @@ def _project_terminal_status(  # noqa: PLR0913 -- explicit projection facts
         schema=schema,
     )
     return True
+
+
+def _dbos_failure_error_summary(status: object) -> dict[str, object] | None:
+    dbos_status = getattr(status, "status", None)
+    if dbos_status not in _FAILED_DBOS_STATUSES:
+        return None
+    error = getattr(status, "error", None)
+    message = str(dbos_status)
+    if error is not None:
+        message = _safe_error_message(error)
+    return {
+        "error_type": "dbos.abandonment",
+        "message": message,
+        "dbos_status": dbos_status,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _EnqueuedCompletionAttempt:
+    workflow_id: str
+    run_completion_execution_id: int
+    attempt_number: int
+    run_key: RunKey
+
+
+def sweep_abandoned_run_completions(
+    engine: Engine,
+    *,
+    client: DBOSClient,
+    batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
+    clock: Callable[[], datetime] = _utc_now,
+    schema: StagingSchema | None = None,
+) -> RunCompletionSweepSummary:
+    """Project terminal DBOS abandonment for enqueued run completions.
+
+    Only errored or recovery-exhausted DBOS statuses are projected. Live
+    pending rows are left for startup recovery and the configured recovery cap.
+    """
+    validate_positive_integer(batch_size, label="sweep batch size")
+    selected_schema = schema or StagingSchema()
+    projections: list[RunCompletionSweepProjection] = []
+    inspected_count = 0
+    cursor: int | None = None
+    while True:
+        with engine.connect() as connection:
+            enqueued = _list_enqueued_completion_attempts(
+                connection,
+                schema=selected_schema,
+                limit=batch_size,
+                after=cursor,
+            )
+        if not enqueued:
+            break
+        inspected_count += len(enqueued)
+        cursor = enqueued[-1].run_completion_execution_id
+
+        statuses = client.list_workflows(
+            workflow_ids=[attempt.workflow_id for attempt in enqueued],
+            load_input=False,
+            load_output=False,
+        )
+        statuses_by_id = {status.workflow_id: status for status in statuses}
+        for attempt in enqueued:
+            status = statuses_by_id.get(attempt.workflow_id)
+            if status is None:
+                continue
+            error_summary = _dbos_failure_error_summary(status)
+            if error_summary is None:
+                continue
+            terminal_at = clock()
+            try:
+                with engine.begin() as connection:
+                    record_run_completion_outcome(
+                        connection,
+                        workflow_id=attempt.workflow_id,
+                        succeeded=False,
+                        output_reference=None,
+                        error_summary=error_summary,
+                        terminal_at=terminal_at,
+                        schema=selected_schema,
+                    )
+            except RunCompletionOutcomeError:
+                continue
+            projections.append(
+                RunCompletionSweepProjection(
+                    workflow_id=attempt.workflow_id,
+                    run_completion_execution_id=(
+                        attempt.run_completion_execution_id
+                    ),
+                    run_key=attempt.run_key,
+                    state=RunCompletionExecutionState.FAILED,
+                    dbos_status=str(getattr(status, "status", "")),
+                )
+            )
+        if len(enqueued) < batch_size:
+            break
+    return RunCompletionSweepSummary(
+        projections=tuple(projections),
+        inspected_count=inspected_count,
+    )
+
+
+def _list_enqueued_completion_attempts(
+    connection: Connection,
+    *,
+    schema: StagingSchema,
+    limit: int,
+    after: int | None = None,
+) -> tuple[_EnqueuedCompletionAttempt, ...]:
+    executions = schema.run_completion_executions
+    attempts = schema.run_completion_attempts
+    conditions = [
+        executions.c.state == RunCompletionExecutionState.ENQUEUED.value,
+        attempts.c.attempt_number == executions.c.current_attempt,
+        attempts.c.terminal_at.is_(None),
+    ]
+    if after is not None:
+        conditions.append(executions.c.run_completion_execution_id > after)
+    rows = connection.execute(
+        select(
+            attempts.c.workflow_id,
+            executions.c.run_completion_execution_id,
+            attempts.c.attempt_number,
+            executions.c.run_key,
+        )
+        .select_from(
+            executions.join(
+                attempts,
+                executions.c.run_completion_execution_id
+                == attempts.c.run_completion_execution_id,
+            )
+        )
+        .where(*conditions)
+        .order_by(executions.c.run_completion_execution_id)
+        .limit(limit)
+    ).mappings()
+    return tuple(
+        _EnqueuedCompletionAttempt(
+            workflow_id=row["workflow_id"],
+            run_completion_execution_id=row["run_completion_execution_id"],
+            attempt_number=row["attempt_number"],
+            run_key=RunKey(row["run_key"]),
+        )
+        for row in rows
+    )
