@@ -53,7 +53,8 @@ MEMBERSHIP_DIGEST_SCHEMA = "dr-platform/run-membership/v1"
 
 @verify(UNIQUE)
 class MembershipDigestField(StrEnum):
-    """Persisted digest keys; spell them out at encoding sites."""
+    """Persisted digest keys; the byte fragments below name members
+    individually, never iterate."""
 
     ENTRIES = "entries"
     EXPECTED_MEMBER_COUNT = "expected_member_count"

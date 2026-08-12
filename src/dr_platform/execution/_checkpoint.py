@@ -67,15 +67,13 @@ class _LedgerCheckpointExecutor:
         self._executor.shutdown(wait=True)
 
 
-class _LedgerCheckpointBinding(_WorkflowBinding):
-    @property
-    def _executor(self) -> _LedgerCheckpointExecutor:
-        return cast("_LedgerCheckpointExecutor", self.payload)
-
-
 def _checkpoint_executor_is_live(existing: object) -> bool:
     """Only an executor that has not been closed still owns the workflow."""
     return not cast("_LedgerCheckpointExecutor", existing).closed
+
+
+class _LedgerCheckpointBinding(_WorkflowBinding):
+    """Binds one ledger checkpoint executor to wrapped stage workflows."""
 
 
 def _preflight_ledger_checkpoint_executor(

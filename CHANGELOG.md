@@ -56,9 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copies; `_core.frozen.immutable_mapping` replaces the inline
   `MappingProxyType(dict(...))` sites; `_core/validation.py` integer guards
   replace the hand-rolled copies in `insert_stage_execution` and the stage
-  control writers. `MembershipDigestField` now derives the membership-digest
-  byte fragments it declares, and `_core/ledger/schema.py` derives
-  `MAX_PREFIX_BYTES` from the declared table metadata instead of a
+  control writers, so `set_stage_capacity` and `set_selector_capacity` raise
+  `TypeError` rather than `ValueError` for a non-integer capacity, and
+  `AdmissionPayload` rejects a non-string origin run key with the generic
+  `run key must be a string`. `MembershipDigestField` now derives the
+  membership-digest byte fragments it declares, and `_core/ledger/schema.py`
+  derives `MAX_PREFIX_BYTES` from the declared table metadata instead of a
   hand-maintained suffix list.
 - Dispatcher registration hygiene: `_log_admission_summary`,
   `_log_barrier_summary`, and `_validate_dispatcher_settings` are module-level

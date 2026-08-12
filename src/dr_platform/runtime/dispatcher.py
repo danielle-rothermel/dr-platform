@@ -203,7 +203,7 @@ def _log_barrier_summary(summary: RunBarrierSummary) -> None:
         )
 
 
-def _validate_dispatcher_settings(  # noqa: PLR0913
+def _validate_dispatcher_settings(  # noqa: PLR0913 -- explicit dispatcher settings
     *,
     config: PlatformDbosConfig,
     engine: Engine,

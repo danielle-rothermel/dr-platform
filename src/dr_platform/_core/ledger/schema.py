@@ -36,9 +36,10 @@ DEFAULT_PREFIX = "platform"
 # Sentinel used once at import time to measure generated identifier suffixes;
 # every identifier this schema declares is named f"{prefix}_{suffix}".
 _MEASUREMENT_PREFIX = "p"
-# Filled in below, once the declarations have been measured; the prefix-length
-# guard is inert for the single measurement construction.
-MAX_PREFIX_BYTES = POSTGRESQL_MAX_IDENTIFIER_BYTES
+# Narrowed below, once the declarations have been measured; the prefix-length
+# guard is inert for the single measurement construction. The public
+# MAX_PREFIX_BYTES is bound once, at the bottom of this module.
+_MAX_PREFIX_BYTES = POSTGRESQL_MAX_IDENTIFIER_BYTES
 
 
 def _enum_check(column_name: str, enum_type: type[StrEnum]) -> str:
@@ -53,10 +54,10 @@ class StagingSchema:
                 "prefix must be a lowercase SQL identifier using letters, "
                 "numbers, or _"
             )
-        if len(prefix.encode()) > MAX_PREFIX_BYTES:
+        if len(prefix.encode()) > _MAX_PREFIX_BYTES:
             raise ValueError(
                 "prefix is too long for generated PostgreSQL identifiers: "
-                f"maximum is {MAX_PREFIX_BYTES} ASCII bytes"
+                f"maximum is {_MAX_PREFIX_BYTES} ASCII bytes"
             )
 
         self.prefix = prefix
@@ -541,6 +542,7 @@ LONGEST_TABLE_SUFFIX = max(
     key=lambda suffix: len(suffix.encode()),
 )
 LONGEST_TABLE_SUFFIX_BYTES = len(LONGEST_TABLE_SUFFIX.encode())
-MAX_PREFIX_BYTES = (
+_MAX_PREFIX_BYTES = (
     POSTGRESQL_MAX_IDENTIFIER_BYTES - 1 - LONGEST_TABLE_SUFFIX_BYTES
 )
+MAX_PREFIX_BYTES = _MAX_PREFIX_BYTES
