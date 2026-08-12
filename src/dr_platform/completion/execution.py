@@ -40,6 +40,7 @@ from dr_platform._core.validation import validate_non_empty_string
 from dr_platform.execution._checkpoint import (
     _require_ledger_checkpoint_executor,
 )
+from dr_platform.execution._recovery_cap import mark_wrapped_recovery_cap
 from dr_platform.inspection.statuses import StateCount  # noqa: TC001
 from dr_platform.pipeline.definitions import RunCompletionDefinition
 
@@ -268,6 +269,7 @@ def wrap_run_completion(
         return output_reference
 
     setattr(run_completion, _WRAPPED_COMPLETION_MARKER, True)
+    mark_wrapped_recovery_cap(run_completion, max_recovery_attempts)
     return RunCompletionDefinition(
         key=completion.key,
         queue_name=completion.queue_name,
@@ -422,6 +424,14 @@ def inspect_run_completion(
         )
     if attempt is None:
         raise RuntimeError("run completion current attempt is missing")
+    return _decode_execution(row, attempt=attempt)
+
+
+def decode_run_completion_execution(
+    row: RowMapping,
+    *,
+    attempt: RunCompletionAttemptRecord,
+) -> RunCompletionExecutionRecord:
     return _decode_execution(row, attempt=attempt)
 
 

@@ -25,6 +25,7 @@ from dr_platform.execution._checkpoint import (
     _LedgerCheckpointExecutor,
     _preflight_ledger_checkpoint_executor,
 )
+from dr_platform.execution._recovery_cap import validate_registry_recovery_cap
 from dr_platform.execution.handoff import (
     _pipeline_checkpoint_workflows,
     is_pipeline_wrapped,
@@ -223,6 +224,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
         system_database_url=config.system_database_url,
     )
     _require_wrapped_registry(registry)
+    validate_registry_recovery_cap(registry, config.max_recovery_attempts)
     ownership_token = _DISPATCHER_OWNERSHIP.reserve()
     client: DBOSClient | None = None
     checkpoint_executor: _LedgerCheckpointExecutor | None = None

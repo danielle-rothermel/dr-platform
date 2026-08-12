@@ -132,6 +132,64 @@ def test_retry_run_completion_appends_attempt_and_reenqueues(
     assert second.enqueued_at is not None
 
 
+def test_retry_run_completion_timestamps_follow_prior_terminal_at(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(pg_engine, key="timestamps")
+    failed_at = NOW + timedelta(seconds=2)
+    with pg_engine.begin() as connection:
+        record_run_completion_outcome(
+            connection,
+            workflow_id=workflow_id,
+            succeeded=False,
+            output_reference=None,
+            error_summary={"error_type": "ValueError", "message": "broken"},
+            terminal_at=failed_at,
+        )
+
+    retried_at = NOW + timedelta(seconds=3)
+    result = retry_run_completion(
+        "run-retry",
+        engine=pg_engine,
+        client=_as_dbos_client(_RecordingClient()),
+        registry=registry,
+        clock=lambda: retried_at,
+    )
+
+    assert result.new_attempt.created_at >= failed_at
+    assert result.new_attempt.enqueued_at is not None
+    assert result.new_attempt.enqueued_at >= failed_at
+    assert result.execution.enqueued_at >= failed_at
+    assert result.execution.terminal_at is None
+
+
+def test_retry_run_completion_rejects_clock_before_prior_terminal(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(pg_engine, key="clock-order")
+    failed_at = NOW + timedelta(seconds=2)
+    with pg_engine.begin() as connection:
+        record_run_completion_outcome(
+            connection,
+            workflow_id=workflow_id,
+            succeeded=False,
+            output_reference=None,
+            error_summary={"error_type": "ValueError", "message": "broken"},
+            terminal_at=failed_at,
+        )
+
+    with pytest.raises(ValueError, match="retry timestamp cannot precede"):
+        retry_run_completion(
+            "run-retry",
+            engine=pg_engine,
+            client=_as_dbos_client(_RecordingClient()),
+            registry=registry,
+            clock=lambda: failed_at - timedelta(seconds=1),
+        )
+
+
 def test_stale_run_completion_workflow_id_cannot_terminalize_retry(
     pg_engine: Engine,
 ) -> None:

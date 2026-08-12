@@ -29,6 +29,7 @@ from dr_platform.completion.execution import (
 from dr_platform.execution._checkpoint import (
     _require_ledger_checkpoint_executor,
 )
+from dr_platform.execution._recovery_cap import mark_wrapped_recovery_cap
 from dr_platform.execution.failures import StageApplicationFailure
 from dr_platform.pipeline.definitions import (
     AsyncWorkflowCallable,
@@ -258,6 +259,7 @@ def _wrap_stage_workflow(
 
     # Dispatcher rejects declarations lacking this package-owned marker.
     setattr(run_stage, _WRAPPED_STAGE_MARKER, True)
+    mark_wrapped_recovery_cap(run_stage, max_recovery_attempts)
     return cast("AsyncWorkflowCallable", run_stage)
 
 

@@ -398,6 +398,34 @@ def test_registration_accepts_a_registry_of_wrapped_pipelines(
     assert client.destroyed
 
 
+def test_registration_rejects_wrapped_recovery_cap_mismatch(
+    monkeypatch,
+) -> None:
+    client = _FakeClient(
+        system_database_url="postgresql+psycopg://user:secret@db/platform"
+    )
+    _patch_dbos_wiring(monkeypatch, client)
+    config = PlatformDbosConfig(
+        database_url="postgresql+psycopg://user:secret@db/platform",
+        system_database_url="postgresql+psycopg://user:secret@db/platform",
+        max_recovery_attempts=1,
+    )
+    engine = create_engine(config.database_url)
+    registry = PipelineRegistry()
+    registry.register(
+        wrap_pipeline_workflows(_declared_pipeline(), max_recovery_attempts=5)
+    )
+
+    with pytest.raises(ValueError, match="recovery cap does not match"):
+        dispatcher.register_scheduled_dispatcher(
+            live_dbos_identity=default_live_dbos_identity(app_version="test"),
+            config=config,
+            engine=engine,
+            registry=registry,
+        )
+    engine.dispose()
+
+
 def test_registration_binds_one_sized_executor_to_every_wrapper(
     monkeypatch,
 ) -> None:

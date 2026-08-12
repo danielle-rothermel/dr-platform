@@ -24,7 +24,7 @@ from dr_platform._core.ledger.states import (
 from dr_platform.completion.execution import (
     RunCompletionExecutionRecord,
     RunCompletionPayload,
-    inspect_run_completion,
+    decode_run_completion_execution,
     is_run_completion_wrapped,
 )
 from dr_platform.inspection.statuses import StateCount
@@ -62,7 +62,8 @@ def retry_run_completion(  # noqa: PLR0913 -- explicit operator boundary
     normalized_run_key = (
         run_key if isinstance(run_key, RunKey) else RunKey(run_key)
     )
-    retried_at = clock()
+    execution_record: RunCompletionExecutionRecord
+    new_attempt_record: RunCompletionAttemptRecord
     with engine.begin() as connection:
         runs = selected_schema.pipeline_runs
         executions = selected_schema.run_completion_executions
@@ -119,6 +120,11 @@ def retry_run_completion(  # noqa: PLR0913 -- explicit operator boundary
             raise RuntimeError(
                 "FAILED run completion has no terminal current attempt"
             )
+        retried_at = clock()
+        if retried_at < previous.terminal_at:
+            raise ValueError(
+                "retry timestamp cannot precede prior attempt termination"
+            )
         pipeline = registry.get(
             key=PipelineKey(run_row["pipeline_key"]),
             version=run_row["pipeline_version"],
@@ -135,7 +141,7 @@ def retry_run_completion(  # noqa: PLR0913 -- explicit operator boundary
         state_counts = _decode_state_counts(
             run_row["release_terminal_state_counts"]
         )
-        new_attempt = append_run_completion_attempt(
+        new_attempt_record = append_run_completion_attempt(
             connection,
             run_completion_execution_id=run_row["run_completion_execution_id"],
             run_key=normalized_run_key,
@@ -146,19 +152,28 @@ def retry_run_completion(  # noqa: PLR0913 -- explicit operator boundary
             enqueued_at=retried_at,
             schema=selected_schema,
         )
-        connection.execute(
-            update(executions)
-            .where(
-                executions.c.run_completion_execution_id
-                == run_row["run_completion_execution_id"]
+        updated = (
+            connection.execute(
+                update(executions)
+                .where(
+                    executions.c.run_completion_execution_id
+                    == run_row["run_completion_execution_id"]
+                )
+                .values(
+                    state=RunCompletionExecutionState.ENQUEUED.value,
+                    enqueued_at=retried_at,
+                    output_reference=None,
+                    error_summary=null(),
+                    terminal_at=None,
+                )
+                .returning(*executions.c)
             )
-            .values(
-                state=RunCompletionExecutionState.ENQUEUED.value,
-                enqueued_at=retried_at,
-                output_reference=None,
-                error_summary=null(),
-                terminal_at=None,
-            )
+            .mappings()
+            .one()
+        )
+        execution_record = decode_run_completion_execution(
+            updated,
+            attempt=new_attempt_record,
         )
         payload = RunCompletionPayload(
             campaign_key=CampaignKey(run_row["campaign_key"]),
@@ -175,18 +190,14 @@ def retry_run_completion(  # noqa: PLR0913 -- explicit operator boundary
         options: EnqueueOptions = {
             "workflow_name": _workflow_name(completion),
             "queue_name": completion.queue_name,
-            "workflow_id": new_attempt.workflow_id,
+            "workflow_id": new_attempt_record.workflow_id,
         }
         client.enqueue_in_transaction(
             connection, options, payload.model_dump(mode="json")
         )
     return RunCompletionRetryResult(
-        execution=inspect_run_completion(
-            normalized_run_key,
-            engine=engine,
-            schema=selected_schema,
-        ),
-        new_attempt=new_attempt,
+        execution=execution_record,
+        new_attempt=new_attempt_record,
     )
 
 
