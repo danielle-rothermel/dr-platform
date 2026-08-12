@@ -407,7 +407,7 @@ def _bulk_terminal_status_statement(
                         executions.c.stage_index == current.c.stage_index,
                     ),
                 )
-                .join(
+                .outerjoin(
                     attempts,
                     and_(
                         attempts.c.stage_execution_id

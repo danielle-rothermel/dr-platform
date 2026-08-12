@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import Engine, event, select, text
 
-from dr_platform._core.identities import PipelineKey, StageKey
+from dr_platform._core.identities import PipelineKey, StageKey, WorkKey
 from dr_platform._core.ledger.attempts import (
     append_stage_attempt,
     record_stage_attempt_terminal,
@@ -17,6 +17,7 @@ from dr_platform._core.ledger.terminal_summary import (
     build_terminal_summary,
 )
 from dr_platform.inspection.run_members import list_run_members
+from dr_platform.inspection.statuses import bulk_work_terminal_statuses
 from dr_platform.inspection.terminal_filters import TerminalSummaryFilter
 from dr_platform.pipeline.definitions import (
     PipelineDefinition,
@@ -267,6 +268,44 @@ def test_list_run_members_uses_one_query_per_page(
 
     assert len(page) == 5
     assert list_queries == 1
+
+
+def test_filtered_run_members_and_bulk_terminal_agree_on_ready_state(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    _submit_run(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-ready-filter",
+        work_indexes=(1, 2),
+    )
+    ready_filter = TerminalSummaryFilter(state=StageExecutionState.READY)
+
+    members = list_run_members(
+        "run-ready-filter",
+        engine=pg_engine,
+        terminal_filter=ready_filter,
+        limit=10,
+    )
+    bulk = bulk_work_terminal_statuses(
+        "campaign-1",
+        ("work-1", "work-2"),
+        engine=pg_engine,
+        terminal_filter=ready_filter,
+    ).statuses
+
+    assert {member.work_key.value for member in members} == {
+        "work-1",
+        "work-2",
+    }
+    assert all(member.state is StageExecutionState.READY for member in members)
+    assert bulk[WorkKey("work-1")].present
+    assert bulk[WorkKey("work-2")].present
+    assert bulk[WorkKey("work-1")].state is StageExecutionState.READY
+    assert bulk[WorkKey("work-2")].state is StageExecutionState.READY
 
 
 def test_list_run_members_filters_by_terminal_producer(

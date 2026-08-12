@@ -338,3 +338,40 @@ def test_bulk_terminal_statuses_uses_one_query_per_chunk(
 
     assert len(result.statuses) == len(work_keys) + 1
     assert bulk_queries == 3
+
+
+def test_bulk_terminal_statuses_reports_unadmitted_ready_work_as_present(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry = _registry()
+    submit_items(
+        campaign_key="campaign-ready",
+        run_key="run-ready",
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
+        execution_config_reference="config:1",
+        items=(
+            WorkInput(
+                work_key="work-ready",
+                input_reference="input:ready",
+                labels={},
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+
+    status = bulk_work_terminal_statuses(
+        "campaign-ready",
+        ("work-ready", "work-missing"),
+        engine=pg_engine,
+    ).statuses
+
+    ready = status[WorkKey("work-ready")]
+    missing = status[WorkKey("work-missing")]
+    assert ready.present is True
+    assert ready.state is StageExecutionState.READY
+    assert ready.terminal_summary is None
+    assert ready.evidence_reference is None
+    assert missing.present is False
