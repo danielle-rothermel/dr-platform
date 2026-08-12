@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Required `PlatformDbosConfig.max_recovery_attempts` for wrapped stage and run
+  completion workflows; recovery-exhausted workflows project to platform failure
+  for operator retry.
+- Default-on abandoned-stage sweep with identity-based pending projection
+  (`stale_app_version`, `dead_executor`) and live-identity skip for same-process
+  crash recovery.
+- INFO reconciliation logging for admission, run-barrier, and sweep dispatcher
+  passes.
+- `retry_run_completion` with `run_completion_attempts` attempt history and
+  per-attempt workflow identity.
+
 ### Changed
 
 - Hard-cut dev-mode defaults: 1 s dispatcher schedules, comically high
@@ -16,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wire format; removed `MAX_INSPECTION_LIMIT`.
 - README sizing guidance now points at whetstone's sizing table and documents
   the per-stage-boundary latency model.
+- Run completion schema hard cutover: execution rows track `current_attempt`;
+  workflow identity lives on attempt rows.
+- Sweep and recovery contracts now cover identity orphaning, recovery caps, and
+  run completion retry.
 
 ### Removed
 

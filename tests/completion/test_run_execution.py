@@ -182,5 +182,5 @@ def test_completion_workflow_identity_is_stable_and_pipeline_scoped() -> None:
     assert first != other_pipeline
     assert first == (
         "drp-run-23c1e871ca241a532a43c70dbee5b25ccdf2a675ae5f8f120f7"
-        "812cad09ab907"
+        "812cad09ab907-a1"
     )

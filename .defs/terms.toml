@@ -388,13 +388,16 @@ part_of = ["stage control"]
 name = "scheduled dispatcher"
 definition = """
 A process-local registration that owns its durable-workflow client and runs \
-bounded admission and run-barrier passes on independent schedules, with an \
-optional abandoned-stage sweep. Its registration remains alive with the \
-runtime."""
+bounded admission, run-barrier, and abandoned-stage sweep passes on independent \
+schedules. The sweep registers by default unless disabled at registration time. \
+The caller supplies the live application version and executor ids observed at \
+registration so identity-orphaned pending work can be projected without time \
+thresholds. Its registration remains alive with the runtime."""
 exported_symbols = [
   "register_scheduled_dispatcher",
   "DispatcherRegistration",
   "UnwrappedPipelineError",
+  "LiveDbosIdentity",
 ]
 
 [[terms]]
@@ -418,8 +421,15 @@ exported_symbols = ["StageHandoffMismatchError", "StageApplicationFailure"]
 name = "retry"
 definition = """
 The operator action that returns a terminal failed stage execution to ready \
-with exactly one new attempt awaiting admission. No other state is eligible."""
-exported_symbols = ["retry_stage", "StageRetryResult"]
+with exactly one new attempt awaiting admission, or that returns a terminal \
+failed run completion to enqueued with exactly one new attempt awaiting \
+execution. No other state is eligible."""
+exported_symbols = [
+  "retry_stage",
+  "StageRetryResult",
+  "retry_run_completion",
+  "RunCompletionRetryResult",
+]
 
 [[terms]]
 name = "cancellation"
@@ -438,8 +448,11 @@ exported_symbols = [
 [[terms]]
 name = "sweep"
 definition = """
-The reconciliation pass that projects terminal workflow abandonment onto \
-currently admitted platform stages and reclaims their occupancy. It does not \
+The reconciliation pass that projects terminal workflow abandonment and \
+identity-orphaned pending work onto currently admitted platform stages and \
+reclaims their occupancy. Structural abandonment uses stale application version \
+or dead executor evidence only; pending rows that still match the live identity \
+are left for startup recovery and the configured recovery cap. It does not \
 retry, resume, replace, or wait for work."""
 exported_symbols = [
   "sweep_abandoned_stages",
@@ -459,7 +472,8 @@ name = "platform runtime"
 definition = """
 The process-level configuration and initialization boundary that connects the \
 platform to its durable-workflow runtime while leaving queue registration and \
-launch ownership with the application."""
+launch ownership with the application. Wrapped stage and run completion \
+workflows require an explicit per-registration recovery cap."""
 exported_symbols = [
   "PlatformDbosConfig",
   "build_platform_dbos_config",

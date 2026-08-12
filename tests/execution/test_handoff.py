@@ -55,6 +55,7 @@ from tests.conftest import (
     _migrate,
     _RecordingCanceller,
     dbos_config,
+    default_live_dbos_identity,
     submit_items,
 )
 
@@ -158,9 +159,11 @@ def _launch_dbos(
         )
     )
     registration = register_scheduled_dispatcher(
+        live_dbos_identity=default_live_dbos_identity(app_version="test"),
         config=PlatformDbosConfig(
             database_url=database_url,
             system_database_url=database_url,
+            max_recovery_attempts=1,
         ),
         engine=engine,
         registry=registry,
@@ -350,7 +353,9 @@ def test_three_stage_pipeline_streams_end_to_end_through_wrapped_workflows(
             ("score", score),
         ),
     )
-    pipeline = wrap_pipeline_workflows(declared, clock=_utc_now)
+    pipeline = wrap_pipeline_workflows(
+        declared, clock=_utc_now, max_recovery_attempts=1
+    )
     registry = PipelineRegistry()
     registry.register(pipeline)
     _configure_controls(pg_engine, pipeline, capacity=2)
@@ -666,7 +671,9 @@ def test_application_failure_is_recorded_in_band_and_releases_capacity(
         key=f"failure-{suffix}",
         stage_logic=(("execute", sometimes_fails),),
     )
-    pipeline = wrap_pipeline_workflows(declared, clock=_utc_now)
+    pipeline = wrap_pipeline_workflows(
+        declared, clock=_utc_now, max_recovery_attempts=1
+    )
     registry = PipelineRegistry()
     registry.register(pipeline)
     _configure_controls(pg_engine, pipeline, capacity=1)
@@ -785,7 +792,9 @@ def test_invalid_application_output_lands_failed_without_a_successor(
             ("score", lambda input_reference: f"score:{input_reference}"),
         ),
     )
-    pipeline = wrap_pipeline_workflows(declared, clock=_utc_now)
+    pipeline = wrap_pipeline_workflows(
+        declared, clock=_utc_now, max_recovery_attempts=1
+    )
     registry = PipelineRegistry()
     registry.register(pipeline)
     _configure_controls(pg_engine, pipeline, capacity=1)
@@ -992,7 +1001,9 @@ def test_application_failure_with_unprintable_error_lands_failed(
         key=f"unprintable-{suffix}",
         stage_logic=(("execute", raises_unprintable),),
     )
-    pipeline = wrap_pipeline_workflows(declared, clock=_utc_now)
+    pipeline = wrap_pipeline_workflows(
+        declared, clock=_utc_now, max_recovery_attempts=1
+    )
     registry = PipelineRegistry()
     registry.register(pipeline)
     _configure_controls(pg_engine, pipeline, capacity=1)
@@ -1068,6 +1079,8 @@ class _Status:
     workflow_id: str
     status: str
     error: Exception | None = None
+    app_version: str = "test"
+    executor_id: str = "local"
 
 
 class _StatusClient:
@@ -1200,6 +1213,7 @@ def test_sweep_race_with_successful_handoff_has_one_terminal_outcome(
             )
             summary = sweep_abandoned_stages(
                 pg_engine,
+                live_identity=default_live_dbos_identity(app_version="test"),
                 client=_as_dbos_client(
                     _BarrierStatusClient(abandoned, barrier)
                 ),
@@ -1221,6 +1235,7 @@ def test_sweep_race_with_successful_handoff_has_one_terminal_outcome(
             handoff = executor.submit(handoff_after_projection)
             summary = sweep_abandoned_stages(
                 pg_engine,
+                live_identity=default_live_dbos_identity(app_version="test"),
                 client=_as_dbos_client(_StatusClient((abandoned,))),
                 clock=lambda: race_time,
             )
@@ -1325,6 +1340,7 @@ def test_sweep_race_with_operator_cancellation_has_one_terminal_outcome(
             )
             summary = sweep_abandoned_stages(
                 pg_engine,
+                live_identity=default_live_dbos_identity(app_version="test"),
                 client=_as_dbos_client(
                     _BarrierStatusClient(abandoned, barrier)
                 ),
@@ -1346,6 +1362,7 @@ def test_sweep_race_with_operator_cancellation_has_one_terminal_outcome(
             cancellation = executor.submit(cancel_after_projection)
             summary = sweep_abandoned_stages(
                 pg_engine,
+                live_identity=default_live_dbos_identity(app_version="test"),
                 client=_as_dbos_client(_StatusClient((abandoned,))),
                 clock=lambda: race_time,
             )
@@ -1448,6 +1465,7 @@ def test_sweep_projects_only_cancelled_or_abandoned_admitted_attempts(
 
     summary = sweep_abandoned_stages(
         pg_engine,
+        live_identity=default_live_dbos_identity(app_version="test"),
         client=_as_dbos_client(status_client),
         clock=_utc_now,
     )
@@ -1535,6 +1553,7 @@ def test_sweep_projects_an_abandoned_attempt_with_an_unprintable_error(
 
     summary = sweep_abandoned_stages(
         pg_engine,
+        live_identity=default_live_dbos_identity(app_version="test"),
         client=_as_dbos_client(status_client),
         clock=_utc_now,
     )
@@ -1616,6 +1635,7 @@ def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
     batch_size = 2
     summary = sweep_abandoned_stages(
         pg_engine,
+        live_identity=default_live_dbos_identity(app_version="test"),
         client=_as_dbos_client(status_client),
         batch_size=batch_size,
         clock=_utc_now,
@@ -1627,3 +1647,119 @@ def test_sweep_paginates_to_reach_abandoned_attempt_in_later_page(
     assert summary.projections[0].state == StageExecutionState.FAILED
     assert len(status_client.requested_ids) > 1
     assert any(abandoned_id in page for page in status_client.requested_ids)
+
+
+def _admit_one_for_sweep(
+    pg_engine: Engine,
+    *,
+    pipeline_key: str,
+    campaign_key: str,
+    run_key: str,
+) -> tuple[PipelineRegistry, str]:
+    pipeline = _pipeline(
+        key=pipeline_key,
+        stage_logic=(
+            ("execute", lambda input_reference: f"output:{input_reference}"),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    _configure_controls(pg_engine, pipeline, capacity=1)
+    _submit_items(
+        pg_engine,
+        registry,
+        pipeline,
+        campaign_key=campaign_key,
+        run_key=run_key,
+        items=(
+            WorkInput(
+                work_key="work-0",
+                input_reference="input:0",
+                labels={},
+            ),
+        ),
+    )
+    admission_client = _RecordingClient()
+    assert (
+        run_admission_pass(
+            pg_engine,
+            client=_as_dbos_client(admission_client),
+            registry=registry,
+            clock=_utc_now,
+        ).admitted_total
+        == 1
+    )
+    workflow_id = _recorded_workflow_id(admission_client.enqueued[0][0])
+    return registry, workflow_id
+
+
+def test_sweep_projects_pending_with_dead_executor(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-dead-executor",
+        campaign_key="campaign-dead-executor",
+        run_key="run-dead-executor",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=default_live_dbos_identity(app_version="test"),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _Status(
+                        workflow_id,
+                        "PENDING",
+                        executor_id="other-executor",
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 1
+    assert summary.projections[0].state is StageExecutionState.FAILED
+    assert summary.projections[0].dbos_status == "PENDING"
+
+
+def test_sweep_skips_pending_with_live_identity(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-live-skip",
+        campaign_key="campaign-live-skip",
+        run_key="run-live-skip",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=default_live_dbos_identity(app_version="test"),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _Status(
+                        workflow_id,
+                        "PENDING",
+                        app_version="test",
+                        executor_id="local",
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 0
+    with pg_engine.connect() as connection:
+        state = connection.execute(
+            select(schema.stage_executions.c.state)
+        ).scalar_one()
+    assert state == StageExecutionState.ADMITTED.value

@@ -19,6 +19,7 @@ def _config(
 ) -> PlatformDbosConfig:
     return dbos_config.build_platform_dbos_config(
         database_url="postgresql+psycopg://app/platform",
+        max_recovery_attempts=1,
         enable_otlp=enable_otlp,
         otlp_traces_endpoints=otlp_traces_endpoints,
     )
@@ -78,6 +79,7 @@ def test_build_platform_dbos_config_system_url_fallbacks(
     explicit = dbos_config.build_platform_dbos_config(
         database_url="postgresql://app-user@app/db",
         system_database_url="postgresql://explicit-user@app/db",
+        max_recovery_attempts=1,
     )
     assert (
         explicit.system_database_url
@@ -86,6 +88,7 @@ def test_build_platform_dbos_config_system_url_fallbacks(
 
     from_env = dbos_config.build_platform_dbos_config(
         database_url="postgresql://app-user@app/db",
+        max_recovery_attempts=1,
     )
     assert (
         from_env.system_database_url
@@ -95,6 +98,7 @@ def test_build_platform_dbos_config_system_url_fallbacks(
     monkeypatch.delenv("DBOS_SYSTEM_DATABASE_URL", raising=False)
     from_app = dbos_config.build_platform_dbos_config(
         database_url="postgresql://app-user@app/db",
+        max_recovery_attempts=1,
     )
     assert (
         from_app.system_database_url == "postgresql+psycopg://app-user@app/db"
@@ -117,6 +121,7 @@ def test_build_platform_dbos_config_rejects_explicit_split_and_redacts_urls(
             system_database_url=(
                 "postgresql://system-user:system-secret@system.example/dbos"
             ),
+            max_recovery_attempts=1,
         )
 
     message = str(exc_info.value)
@@ -143,6 +148,7 @@ def test_build_platform_dbos_config_redacts_query_values() -> None:
                 "postgresql://system@system.example/dbos"
                 "?sslpassword=system-query-secret&application_name=worker"
             ),
+            max_recovery_attempts=1,
         )
 
     message = str(exc_info.value)
@@ -178,6 +184,7 @@ def test_build_platform_dbos_config_rejects_query_routing(
             system_database_url=(
                 f"postgresql://system@db.example/platform?{routing_query}"
             ),
+            max_recovery_attempts=1,
         )
 
 
@@ -189,6 +196,7 @@ def test_build_platform_dbos_config_rejects_missing_database_name() -> None:
         dbos_config.build_platform_dbos_config(
             database_url="postgresql://platform_user@db.example",
             system_database_url="postgresql://dbos_user@db.example",
+            max_recovery_attempts=1,
         )
 
 
@@ -206,6 +214,7 @@ def test_build_platform_dbos_config_rejects_split_from_env(
     ):
         dbos_config.build_platform_dbos_config(
             database_url="postgresql://db.example:5432/platform",
+            max_recovery_attempts=1,
         )
 
 
@@ -215,6 +224,7 @@ def test_build_platform_dbos_config_accepts_colocated_urls() -> None:
         system_database_url=(
             "postgresql+psycopg://system-user@db.example:5432/platform"
         ),
+        max_recovery_attempts=1,
     )
 
     assert config.database_url == (
@@ -236,6 +246,7 @@ def test_initialize_dbos_runtime_forwards_bootstrap_config() -> None:
             "https://collector-a.example/v1/traces",
             "https://collector-b.example/v1/traces",
         ),
+        max_recovery_attempts=1,
     )
     runtime_configs: list[DBOSConfig] = []
     telemetry_configs: list[DBOSConfig] = []
@@ -288,6 +299,7 @@ def test_initialize_dbos_runtime_skips_disabled_telemetry() -> None:
     config = dbos_config.build_platform_dbos_config(
         database_url="postgresql://app-user@db.example/platform",
         enable_otlp=False,
+        max_recovery_attempts=1,
     )
     runtime_configs: list[DBOSConfig] = []
     telemetry_configs: list[DBOSConfig] = []

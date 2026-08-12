@@ -9,7 +9,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 from dbos import DBOS
-from dr_serialize import json_hash
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -25,6 +24,15 @@ from dr_platform._core.identities import (
     PipelineKey,
     RunCompletionKey,
     RunKey,
+)
+from dr_platform._core.ledger.completion_attempts import (
+    RunCompletionAttemptRecord,
+    get_run_completion_attempt,
+    get_run_completion_attempt_by_workflow_id,
+    record_run_completion_attempt_terminal,
+)
+from dr_platform._core.ledger.completion_attempts import (
+    run_completion_workflow_id as _run_completion_workflow_id,
 )
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import RunCompletionExecutionState
@@ -147,6 +155,7 @@ class RunCompletionPayload(BaseModel):
 class RunCompletionExecutionRecord:
     run_completion_execution_id: int
     run_key: RunKey
+    current_attempt: int
     workflow_id: str
     state: RunCompletionExecutionState
     enqueued_at: datetime
@@ -165,19 +174,15 @@ def run_completion_workflow_id(
     pipeline_key: PipelineKey,
     pipeline_version: int,
     completion_key: RunCompletionKey,
+    attempt_number: int = 1,
 ) -> str:
-    digest = json_hash(
-        {
-            RunCompletionWorkflowIdField.RUN_KEY: run_key.value,
-            RunCompletionWorkflowIdField.PIPELINE_KEY: pipeline_key.value,
-            RunCompletionWorkflowIdField.PIPELINE_VERSION: pipeline_version,
-            RunCompletionWorkflowIdField.RUN_COMPLETION_KEY: (
-                completion_key.value
-            ),
-        },
-        length=RUN_COMPLETION_WORKFLOW_ID_DIGEST_LENGTH,
+    return _run_completion_workflow_id(
+        run_key=run_key,
+        pipeline_key=pipeline_key,
+        pipeline_version=pipeline_version,
+        completion_key=completion_key,
+        attempt_number=attempt_number,
     )
-    return f"{RUN_COMPLETION_WORKFLOW_ID_PREFIX}{digest}"
 
 
 def is_run_completion_wrapped(completion: RunCompletionDefinition) -> bool:
@@ -191,6 +196,7 @@ def wrap_run_completion(
     *,
     pipeline_key: PipelineKey,
     pipeline_version: int,
+    max_recovery_attempts: int,
     clock: Callable[[], datetime],
 ) -> RunCompletionDefinition:
     workflow_name = _run_completion_workflow_name(
@@ -220,7 +226,10 @@ def wrap_run_completion(
         name=f"{workflow_name}_complete",
     )(_record_transaction)
 
-    @DBOS.workflow(name=workflow_name)
+    @DBOS.workflow(
+        name=workflow_name,
+        max_recovery_attempts=max_recovery_attempts,
+    )
     async def run_completion(payload_data: dict[str, object]) -> str | None:
         checkpoint_executor = _require_ledger_checkpoint_executor(
             run_completion
@@ -278,21 +287,34 @@ def record_run_completion_outcome(  # noqa: PLR0913
     schema: StagingSchema | None = None,
 ) -> RunCompletionExecutionRecord:
     selected_schema = schema or StagingSchema()
-    table = selected_schema.run_completion_executions
+    attempt = get_run_completion_attempt_by_workflow_id(
+        connection,
+        workflow_id=workflow_id,
+        schema=selected_schema,
+    )
+    if attempt is None:
+        raise LookupError(
+            f"run completion workflow does not exist: {workflow_id}"
+        )
+    executions = selected_schema.run_completion_executions
     row = (
         connection.execute(
-            select(table)
-            .where(table.c.workflow_id == workflow_id)
-            .with_for_update(of=table)
+            select(executions)
+            .where(
+                executions.c.run_completion_execution_id
+                == attempt.run_completion_execution_id
+            )
+            .with_for_update(of=executions)
         )
         .mappings()
         .one_or_none()
     )
     if row is None:
         raise LookupError(
-            f"run completion workflow does not exist: {workflow_id}"
+            f"run completion execution does not exist: "
+            f"{attempt.run_completion_execution_id}"
         )
-    existing = _decode_execution(row)
+    existing = _decode_execution(row, attempt=attempt)
     if existing.state is not RunCompletionExecutionState.ENQUEUED:
         if (
             existing.state
@@ -312,6 +334,9 @@ def record_run_completion_outcome(  # noqa: PLR0913
         reference = validate_non_empty_string(
             output_reference, label="run completion output reference"
         )
+        attempt_summary: Mapping[str, object] | None = {
+            "outcome": RunCompletionExecutionState.SUCCEEDED.value,
+        }
         values = {
             "state": RunCompletionExecutionState.SUCCEEDED.value,
             "output_reference": reference,
@@ -321,6 +346,10 @@ def record_run_completion_outcome(  # noqa: PLR0913
     else:
         if output_reference is not None or error_summary is None:
             raise ValueError("failed run completion requires only an error")
+        attempt_summary = {
+            "outcome": RunCompletionExecutionState.FAILED.value,
+            **dict(error_summary),
+        }
         values = {
             "state": RunCompletionExecutionState.FAILED.value,
             "output_reference": None,
@@ -329,18 +358,30 @@ def record_run_completion_outcome(  # noqa: PLR0913
         }
     updated = (
         connection.execute(
-            update(table)
+            update(executions)
             .where(
-                table.c.run_completion_execution_id
+                executions.c.run_completion_execution_id
                 == existing.run_completion_execution_id
             )
             .values(**values)
-            .returning(*table.c)
+            .returning(*executions.c)
         )
         .mappings()
         .one()
     )
-    return _decode_execution(updated)
+    recorded_attempt = record_run_completion_attempt_terminal(
+        connection,
+        run_completion_execution_id=existing.run_completion_execution_id,
+        attempt_number=existing.current_attempt,
+        terminal_at=terminal_at,
+        terminal_summary=attempt_summary,
+        terminal_reference=workflow_id,
+        schema=selected_schema,
+    )
+    return _decode_execution(
+        updated,
+        attempt=recorded_attempt,
+    )
 
 
 def inspect_run_completion(
@@ -364,19 +405,33 @@ def inspect_run_completion(
             .mappings()
             .one_or_none()
         )
-    if row is None:
-        raise LookupError(
-            f"run completion execution does not exist: {normalized_run_key}"
+        if row is None:
+            raise LookupError(
+                "run completion execution does not exist: "
+                f"{normalized_run_key}"
+            )
+        attempt = get_run_completion_attempt(
+            connection,
+            run_completion_execution_id=row["run_completion_execution_id"],
+            attempt_number=row["current_attempt"],
+            schema=selected_schema,
         )
-    return _decode_execution(row)
+    if attempt is None:
+        raise RuntimeError("run completion current attempt is missing")
+    return _decode_execution(row, attempt=attempt)
 
 
-def _decode_execution(row: RowMapping) -> RunCompletionExecutionRecord:
+def _decode_execution(
+    row: RowMapping,
+    *,
+    attempt: RunCompletionAttemptRecord,
+) -> RunCompletionExecutionRecord:
     error_summary = row["error_summary"]
     return RunCompletionExecutionRecord(
         run_completion_execution_id=row["run_completion_execution_id"],
         run_key=RunKey(row["run_key"]),
-        workflow_id=row["workflow_id"],
+        current_attempt=row["current_attempt"],
+        workflow_id=attempt.workflow_id,
         state=RunCompletionExecutionState(row["state"]),
         enqueued_at=row["enqueued_at"],
         output_reference=row["output_reference"],

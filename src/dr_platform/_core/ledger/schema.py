@@ -423,7 +423,7 @@ class StagingSchema:
                 nullable=False,
                 unique=True,
             ),
-            Column("workflow_id", Text, nullable=False, unique=True),
+            Column("current_attempt", Integer, nullable=False),
             Column("state", Text, nullable=False),
             Column("enqueued_at", DateTime(timezone=True), nullable=False),
             Column("output_reference", Text),
@@ -432,6 +432,10 @@ class StagingSchema:
             CheckConstraint(
                 _enum_check("state", RunCompletionExecutionState),
                 name=name("ck_run_completion_executions_state"),
+            ),
+            CheckConstraint(
+                "current_attempt > 0",
+                name=name("ck_run_completion_executions_attempt"),
             ),
             CheckConstraint(
                 "terminal_at IS NULL OR terminal_at >= enqueued_at",
@@ -445,5 +449,64 @@ class StagingSchema:
                 "(state = 'failed' AND terminal_at IS NOT NULL AND "
                 "output_reference IS NULL AND error_summary IS NOT NULL)",
                 name=name("ck_run_completion_executions_outcome"),
+            ),
+        )
+
+        self.run_completion_attempts = Table(
+            name("run_completion_attempts"),
+            self.metadata,
+            Column(
+                "run_completion_attempt_id",
+                BigInteger,
+                Identity(),
+                primary_key=True,
+            ),
+            Column(
+                "run_completion_execution_id",
+                BigInteger,
+                ForeignKey(
+                    f"{name('run_completion_executions')}.run_completion_execution_id",
+                    name=name("fk_run_completion_attempts_execution"),
+                    ondelete="RESTRICT",
+                ),
+                nullable=False,
+            ),
+            Column("attempt_number", Integer, nullable=False),
+            Column("workflow_id", Text, nullable=False),
+            Column("terminal_summary", JSONB),
+            Column("terminal_reference", Text),
+            Column("created_at", DateTime(timezone=True), nullable=False),
+            Column("enqueued_at", DateTime(timezone=True)),
+            Column("terminal_at", DateTime(timezone=True)),
+            UniqueConstraint(
+                "run_completion_execution_id",
+                "attempt_number",
+                name=name("uq_run_completion_attempts_execution_number"),
+            ),
+            UniqueConstraint(
+                "workflow_id",
+                name=name("uq_run_completion_attempts_workflow"),
+            ),
+            CheckConstraint(
+                "attempt_number > 0",
+                name=name("ck_run_completion_attempts_number"),
+            ),
+            CheckConstraint(
+                "terminal_summary IS NULL "
+                "OR jsonb_typeof(terminal_summary) = 'object'",
+                name=name("ck_run_completion_attempts_summary_object"),
+            ),
+            CheckConstraint(
+                "enqueued_at IS NULL OR enqueued_at >= created_at",
+                name=name("ck_run_completion_attempts_enqueued_time"),
+            ),
+            CheckConstraint(
+                "terminal_at IS NULL OR terminal_at >= created_at",
+                name=name("ck_run_completion_attempts_terminal_time"),
+            ),
+            CheckConstraint(
+                "enqueued_at IS NULL OR terminal_at IS NULL "
+                "OR terminal_at >= enqueued_at",
+                name=name("ck_run_completion_attempts_time_order"),
             ),
         )

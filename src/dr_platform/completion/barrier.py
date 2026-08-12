@@ -12,6 +12,9 @@ from dr_platform._core.identities import (
     PipelineKey,
     RunKey,
 )
+from dr_platform._core.ledger.completion_attempts import (
+    create_initial_run_completion_attempt,
+)
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
@@ -470,6 +473,7 @@ def _release_candidate(  # noqa: PLR0913 -- explicit release facts
         pipeline_key=pipeline.key,
         pipeline_version=pipeline.version,
         completion_key=completion.key,
+        attempt_number=1,
     )
     serialized_counts = [item.model_dump(mode="json") for item in state_counts]
     run_row = connection.execute(
@@ -487,13 +491,26 @@ def _release_candidate(  # noqa: PLR0913 -- explicit release facts
     if run_row is None:
         raise RuntimeError("run barrier was already released")
     executions = schema.run_completion_executions
-    connection.execute(
-        insert(executions).values(
+    execution_row = connection.execute(
+        insert(executions)
+        .values(
             run_key=candidate.run_key,
-            workflow_id=workflow_id,
+            current_attempt=1,
             state=RunCompletionExecutionState.ENQUEUED.value,
             enqueued_at=released_at,
         )
+        .returning(executions.c.run_completion_execution_id)
+    ).scalar_one()
+    create_initial_run_completion_attempt(
+        connection,
+        run_completion_execution_id=execution_row,
+        run_key=RunKey(candidate.run_key),
+        pipeline_key=pipeline.key,
+        pipeline_version=pipeline.version,
+        completion_key=completion.key,
+        created_at=released_at,
+        enqueued_at=released_at,
+        schema=schema,
     )
     payload = RunCompletionPayload(
         campaign_key=CampaignKey(candidate.campaign_key),

@@ -10,8 +10,9 @@ from dbos import DBOS, DBOSConfig
 from sqlalchemy import Engine, create_engine, make_url, text
 
 from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform.recovery.live_identity import LiveDbosIdentity
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
-from dr_platform.runtime.dbos import DEFAULT_POOL_SIZE
+from dr_platform.runtime.dbos import DEFAULT_POOL_SIZE, PlatformDbosConfig
 from dr_platform.submission.stream import (
     RunMemberInput,
     RunRegistrationDeclaration,
@@ -31,6 +32,29 @@ TEST_DATABASE_URL = os.environ.get(
 )
 
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
+DEFAULT_MAX_RECOVERY_ATTEMPTS = 1
+
+
+def default_live_dbos_identity(*, app_version: str) -> LiveDbosIdentity:
+    return LiveDbosIdentity(
+        app_version=app_version,
+        executor_ids=frozenset({"local"}),
+    )
+
+
+def default_platform_dbos_config(
+    database_url: str,
+    *,
+    system_database_url: str | None,
+    max_recovery_attempts: int,
+) -> PlatformDbosConfig:
+    resolved_system = system_database_url or database_url
+    return PlatformDbosConfig(
+        database_url=database_url,
+        system_database_url=resolved_system,
+        max_recovery_attempts=max_recovery_attempts,
+        pool_size=DEFAULT_POOL_SIZE,
+    )
 
 
 def engine_dsn(engine: Engine) -> str:

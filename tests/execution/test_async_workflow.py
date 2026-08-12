@@ -37,7 +37,7 @@ from dr_platform.submission.stream import (
     WorkInput,
     submit,
 )
-from tests.conftest import NOW, _migrate
+from tests.conftest import NOW, _migrate, default_live_dbos_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -85,7 +85,8 @@ def test_checkpoint_transactions_register_read_committed(
         isolation_levels.append(isolation_level)
         return lambda function: function
 
-    def workflow(*, name: str | None = None):
+    def workflow(*, name: str | None = None, **kwargs: object):
+        del kwargs
         assert name is not None
         return lambda function: function
 
@@ -117,7 +118,7 @@ def test_checkpoint_transactions_register_read_committed(
         ),
     )
 
-    wrap_pipeline_workflows(declared)
+    wrap_pipeline_workflows(declared, max_recovery_attempts=1)
 
     assert isolation_levels == ["READ COMMITTED", "READ COMMITTED"]
 
@@ -144,7 +145,7 @@ def _run_pipeline(  # noqa: PLR0913 -- explicit integration wiring
             ),
         ),
     )
-    pipeline = wrap_pipeline_workflows(declared)
+    pipeline = wrap_pipeline_workflows(declared, max_recovery_attempts=1)
     registry = PipelineRegistry()
     registry.register(pipeline)
     Queue(pipeline.stages[0].queue_name, concurrency=member_count)
@@ -177,10 +178,13 @@ def _run_pipeline(  # noqa: PLR0913 -- explicit integration wiring
         clock=lambda: NOW,
     )
     config = PlatformDbosConfig(
-        database_url=clean_pg, system_database_url=clean_pg
+        database_url=clean_pg,
+        system_database_url=clean_pg,
+        max_recovery_attempts=1,
     )
     initialize_dbos_runtime(config, app_name=f"drp-async-{suffix}")
     registration = register_scheduled_dispatcher(
+        live_dbos_identity=default_live_dbos_identity(app_version="test"),
         config=config,
         engine=engine,
         registry=registry,

@@ -63,6 +63,7 @@ STAGING_TABLE_SUFFIXES = (
     "run_barrier_cursor",
     "run_memberships",
     "run_completion_executions",
+    "run_completion_attempts",
     "work_items",
     "stage_executions",
     "stage_attempts",

@@ -24,8 +24,16 @@ if TYPE_CHECKING:
     from dbos import DBOSClient
     from sqlalchemy import Connection
 
+    from dr_platform.recovery.live_identity import LiveDbosIdentity
+
 
 DEFAULT_SWEEP_BATCH_SIZE = 10_000
+
+
+@verify(UNIQUE)
+class AbandonmentEvidence(StrEnum):
+    STALE_APP_VERSION = "stale_app_version"
+    DEAD_EXECUTOR = "dead_executor"
 
 
 @verify(UNIQUE)
@@ -59,6 +67,21 @@ def _safe_error_message(error: object) -> str:
         return "<unprintable error message>"
 
 
+def _pending_abandonment_evidence(
+    *,
+    app_version: str | None,
+    executor_id: str | None,
+    live_identity: LiveDbosIdentity,
+) -> AbandonmentEvidence | None:
+    if app_version is None or executor_id is None:
+        return None
+    if app_version != live_identity.app_version:
+        return AbandonmentEvidence.STALE_APP_VERSION
+    if executor_id not in live_identity.executor_ids:
+        return AbandonmentEvidence.DEAD_EXECUTOR
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class SweepProjection:
     workflow_id: str
@@ -86,17 +109,20 @@ class _AdmittedAttempt:
     stage_key: StageKey
 
 
-def sweep_abandoned_stages(
+def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
     engine: Engine,
     *,
     client: DBOSClient,
+    live_identity: LiveDbosIdentity,
     batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
     clock: Callable[[], datetime] = _utc_now,
     schema: StagingSchema | None = None,
 ) -> SweepSummary:
     """Project terminal DBOS abandonment without resuming or retrying.
 
-    Missing and active workflows are ignored. ``batch_size`` is a page size,
+    Missing workflows are ignored. Identity-orphaned PENDING rows project to
+    FAILED using structural evidence only; live-identity PENDING rows are left
+    for startup recovery and the recovery cap. ``batch_size`` is a page size,
     not a cap; every ADMITTED attempt is visited each call because an external
     cursor could skip newly admitted rows behind it. Platform state wins races
     with out-of-band DBOS resume through the handoff identity guard.
@@ -129,10 +155,22 @@ def sweep_abandoned_stages(
             status = statuses_by_id.get(attempt.workflow_id)
             if status is None:
                 continue
+            target_state: StageExecutionState | None = None
+            abandonment_reason: str | None = None
             if status.status == DbosWorkflowStatus.CANCELLED.value:
                 target_state = StageExecutionState.CANCELLED
             elif status.status in _FAILED_DBOS_STATUSES:
                 target_state = StageExecutionState.FAILED
+            elif status.status == DbosWorkflowStatus.PENDING.value:
+                evidence = _pending_abandonment_evidence(
+                    app_version=status.app_version,
+                    executor_id=status.executor_id,
+                    live_identity=live_identity,
+                )
+                if evidence is None:
+                    continue
+                target_state = StageExecutionState.FAILED
+                abandonment_reason = evidence.value
             else:
                 continue
             terminal_summary = build_terminal_summary(
@@ -144,6 +182,7 @@ def sweep_abandoned_stages(
                     if status.error is None
                     else _safe_error_message(status.error)
                 ),
+                reason=abandonment_reason,
             )
             # Read per projection so committed pages cannot move time backward.
             terminal_at = clock()
