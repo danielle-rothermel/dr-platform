@@ -14,6 +14,7 @@ from dr_platform._core.identities import (
 )
 from dr_platform._core.ledger.completion_attempts import (
     create_initial_run_completion_attempt,
+    run_completion_workflow_id,
 )
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import (
@@ -24,7 +25,6 @@ from dr_platform._core.validation import validate_positive_integer
 from dr_platform.completion.execution import (
     RunCompletionPayload,
     is_run_completion_wrapped,
-    run_completion_workflow_id,
 )
 from dr_platform.inspection.statuses import StateCount
 
@@ -93,7 +93,7 @@ class _CandidatePage:
 
 
 def run_barrier_pass(  # noqa: PLR0913 -- explicit reconciliation boundary
-    database: Engine | Connection,
+    engine: Engine,
     *,
     client: DBOSClient,
     registry: PipelineRegistry,
@@ -111,20 +111,9 @@ def run_barrier_pass(  # noqa: PLR0913 -- explicit reconciliation boundary
             "run barrier candidate budget must be at least the batch size"
         )
     selected_schema = schema or StagingSchema()
-    if isinstance(database, Engine):
-        with database.begin() as connection:
-            return _run_in_transaction(
-                connection,
-                client=client,
-                registry=registry,
-                batch_size=batch_size,
-                candidate_budget=candidate_budget,
-                clock=clock,
-                schema=selected_schema,
-            )
-    with database.begin():
+    with engine.begin() as connection:
         return _run_in_transaction(
-            database,
+            connection,
             client=client,
             registry=registry,
             batch_size=batch_size,

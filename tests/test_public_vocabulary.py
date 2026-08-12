@@ -34,7 +34,6 @@ from dr_platform.recovery.run_completion_retry import (
 )
 from dr_platform.runtime import database, dbos, dispatcher, telemetry
 from dr_platform.submission import runs, stream
-from dr_platform.submission import work_items as submission_work_items
 
 _ROOT_BINDINGS = {
     "AdmissionPayload": runner.AdmissionPayload,
@@ -95,7 +94,6 @@ _ROOT_BINDINGS = {
     "UnwrappedPipelineError": dispatcher.UnwrappedPipelineError,
     "WorkCancellationResult": cancellation.WorkCancellationResult,
     "WorkInput": stream.WorkInput,
-    "WorkItemConflictError": submission_work_items.WorkItemConflictError,
     "WorkItemSummary": inspection_work_items.WorkItemSummary,
     "WorkKey": identities.WorkKey,
     "WorkflowCanceller": cancellation.WorkflowCanceller,

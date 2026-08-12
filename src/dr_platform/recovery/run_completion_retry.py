@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from dbos import DBOSClient, EnqueueOptions
     from sqlalchemy import Engine
 
+    from dr_platform.pipeline.definitions import RunCompletionDefinition
     from dr_platform.pipeline.registry import PipelineRegistry
 
 
@@ -121,6 +122,8 @@ def retry_run_completion(  # noqa: PLR0913 -- explicit operator boundary
                 "FAILED run completion has no terminal current attempt"
             )
         retried_at = clock()
+        # The reset below overwrites enqueued_at, so append-time ordering
+        # alone cannot preserve ck_rc_exec_terminal_time; check the clock here.
         if retried_at < previous.terminal_at:
             raise ValueError(
                 "retry timestamp cannot precede prior attempt termination"
@@ -201,8 +204,8 @@ def retry_run_completion(  # noqa: PLR0913 -- explicit operator boundary
     )
 
 
-def _workflow_name(completion: object) -> str:
-    workflow = getattr(completion, "workflow", completion)
+def _workflow_name(completion: RunCompletionDefinition) -> str:
+    workflow = completion.workflow
     name = getattr(
         workflow,
         "dbos_function_name",

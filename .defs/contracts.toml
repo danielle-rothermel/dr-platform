@@ -239,7 +239,7 @@ inside the platform would couple durable orchestration to one storage or \
 domain scheme. Keeping success output references on stage executions separate \
 from attempt-level failure evidence preserves the success/failure boundary."""
 date = "2026-08-11"
-check = "uv run pytest -q tests/submission/test_stream.py::test_input_reference_is_transported_opaquely_without_parsing tests/execution/test_handoff.py::test_output_reference_is_transported_opaquely_without_parsing tests/execution/test_handoff.py::test_application_failure_can_store_evidence_reference tests/core/test_ledger.py::test_output_reference_is_required_only_for_success_and_preserved tests/core/test_ledger.py::test_stage_attempt_evidence_reference_is_persisted"
+check = "uv run pytest -q tests/execution/test_handoff.py::test_output_reference_is_transported_opaquely_without_parsing tests/execution/test_handoff.py::test_application_failure_can_store_evidence_reference tests/core/test_ledger.py::test_output_reference_is_required_only_for_success_and_preserved tests/core/test_ledger.py::test_stage_attempt_evidence_reference_is_persisted"
 
 [[contracts]]
 title = "Attempts are append-only lifecycle records"

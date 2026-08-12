@@ -84,6 +84,12 @@ def _pipeline_checkpoint_workflows(
     )
 
 
+def _pipeline_stage_workflows(
+    pipeline: PipelineDefinition,
+) -> tuple[AsyncWorkflowCallable, ...]:
+    return tuple(stage.workflow for stage in pipeline.stages)
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 

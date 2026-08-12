@@ -501,33 +501,20 @@ def _decode_bulk_work_terminal_status(row) -> BulkWorkTerminalStatus:
             terminal_summary=None,
             evidence_reference=None,
         )
-    summary = row["terminal_summary"]
-    stage_key = row["stage_key"]
-    state = row["state"]
-    if row["stage_execution_id"] is None:
-        return BulkWorkTerminalStatus(
-            work_key=work_key,
-            present=False,
-            work_item_id=row["work_item_id"],
-            stage_execution_id=None,
-            current_stage_key=None,
-            current_stage_index=None,
-            state=None,
-            terminal_summary=None,
-            evidence_reference=None,
-        )
     return BulkWorkTerminalStatus(
         work_key=work_key,
         present=True,
         work_item_id=row["work_item_id"],
         stage_execution_id=row["stage_execution_id"],
-        current_stage_key=StageKey(stage_key),
+        current_stage_key=StageKey(row["stage_key"]),
         current_stage_index=row["stage_index"],
-        state=StageExecutionState(state),
+        state=StageExecutionState(row["state"]),
         terminal_summary=(
             None
-            if summary is None
-            else immutable_json_mapping(cast("Mapping[str, object]", summary))
+            if row["terminal_summary"] is None
+            else immutable_json_mapping(
+                cast("Mapping[str, object]", row["terminal_summary"])
+            )
         ),
         evidence_reference=row["evidence_reference"],
     )

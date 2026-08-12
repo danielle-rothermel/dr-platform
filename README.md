@@ -349,7 +349,7 @@ class StageRetryResult:
 @dataclass(frozen=True, slots=True)
 class RunCompletionRetryResult:
     execution: RunCompletionExecutionRecord
-    new_attempt: object
+    new_attempt: RunCompletionAttemptRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,10 +469,11 @@ database. Runtime initialization and dispatcher registration validate that
 colocation and fail when their URLs identify different databases.
 
 `0001_staging_baseline` is the fresh-schema root of the supported Alembic
-chain. This development hard cut has no compatibility or historical backfill
-path. Archive any database worth retaining before explicitly resetting it.
-Downgrade remains deliberately non-destructive and refuses to delete the
-recorded ledger.
+chain, and `0002_dr_store_baseline` is its head — the revision
+`upgrade_platform_schema` installs by default. This development hard cut has
+no compatibility or historical backfill path. Archive any database worth
+retaining before explicitly resetting it. Both revisions refuse downgrade
+outright rather than delete the recorded ledger.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher
 before `DBOS.launch()`. Admission, run-barrier reconciliation, and

@@ -220,6 +220,8 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
     schema: StagingSchema | None = None,
 ) -> SubmissionReceipt:
     """Register one complete ordered membership in bounded transactions."""
+    # Phase 1 — validate and normalize; this ordering is load-bearing, since
+    # tests pin that a rejected submission never touches the member input.
     validate_positive_integer(chunk_size, label="chunk size")
     validate_pipeline_identity(pipeline)
     if not isinstance(declaration, RunRegistrationDeclaration):
@@ -244,6 +246,7 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
             "and membership digest"
         )
 
+    # Phase 2 — open or replay the run registration in its own transaction.
     with engine.begin() as connection:
         run = insert_pipeline_run(
             connection,
@@ -264,6 +267,7 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
         if run.registration_closed_at is not None:
             return _receipt(run)
 
+    # Phase 3 — stream members into bounded per-chunk transactions.
     chunk: list[RunMemberInput] = []
     for member in members:
         if not isinstance(member, RunMemberInput):
@@ -292,6 +296,7 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
             clock=clock,
         )
 
+    # Phase 4 — verify the recorded membership and close registration.
     with engine.begin() as connection:
         run = get_pipeline_run(
             connection,
