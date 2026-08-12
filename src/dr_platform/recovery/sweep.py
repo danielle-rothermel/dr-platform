@@ -336,10 +336,8 @@ def _project_terminal_status(  # noqa: PLR0913 -- explicit projection facts
     return True
 
 
-def _dbos_failure_error_summary(status: object) -> dict[str, object] | None:
+def _dbos_failure_error_summary(status: object) -> dict[str, object]:
     dbos_status = getattr(status, "status", None)
-    if dbos_status not in _FAILED_DBOS_STATUSES:
-        return None
     error = getattr(status, "error", None)
     message = str(dbos_status)
     if error is not None:

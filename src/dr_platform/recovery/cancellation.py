@@ -179,8 +179,9 @@ def _lock_current_stage(
     schema: StagingSchema,
 ) -> StageExecutionRecord:
     # READ COMMITTED may miss a successor inserted while this lock blocks;
-    # reselect until the locked row is still current. The 64-reselection cap
-    # can fail if the current stage keeps advancing.
+    # reselect until the locked row is still current. The
+    # _MAX_CURRENT_STAGE_RESELECTS cap can fail if the current stage keeps
+    # advancing.
     table = schema.stage_executions
     for _ in range(_MAX_CURRENT_STAGE_RESELECTS):
         stage_execution_id = connection.execute(

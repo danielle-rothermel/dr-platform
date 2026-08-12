@@ -4,7 +4,6 @@ import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003 -- Pydantic resolves it
-from enum import UNIQUE, StrEnum, verify
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
@@ -31,9 +30,6 @@ from dr_platform._core.ledger.completion_attempts import (
     get_run_completion_attempt_by_workflow_id,
     record_run_completion_attempt_terminal,
 )
-from dr_platform._core.ledger.completion_attempts import (
-    run_completion_workflow_id as _run_completion_workflow_id,
-)
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import RunCompletionExecutionState
 from dr_platform._core.ledger.terminal_summary import (
@@ -55,19 +51,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
     from sqlalchemy.engine import RowMapping
 
-RUN_COMPLETION_WORKFLOW_ID_PREFIX = "drp-run-"
-RUN_COMPLETION_WORKFLOW_ID_DIGEST_LENGTH = 64
 _WRAPPED_COMPLETION_MARKER = "_dr_platform_wrapped_run_completion"
-
-
-@verify(UNIQUE)
-class RunCompletionWorkflowIdField(StrEnum):
-    """Persisted wire keys; spell them out at hashing sites, never iterate."""
-
-    RUN_KEY = "run_key"
-    PIPELINE_KEY = "pipeline_key"
-    PIPELINE_VERSION = "pipeline_version"
-    RUN_COMPLETION_KEY = "run_completion_key"
 
 
 class RunCompletionPayload(BaseModel):
@@ -174,23 +158,6 @@ class RunCompletionOutcomeError(RuntimeError):
     pass
 
 
-def run_completion_workflow_id(
-    *,
-    run_key: RunKey,
-    pipeline_key: PipelineKey,
-    pipeline_version: int,
-    completion_key: RunCompletionKey,
-    attempt_number: int = 1,
-) -> str:
-    return _run_completion_workflow_id(
-        run_key=run_key,
-        pipeline_key=pipeline_key,
-        pipeline_version=pipeline_version,
-        completion_key=completion_key,
-        attempt_number=attempt_number,
-    )
-
-
 def is_run_completion_wrapped(completion: RunCompletionDefinition) -> bool:
     return bool(
         getattr(completion.workflow, _WRAPPED_COMPLETION_MARKER, False)
@@ -244,7 +211,7 @@ def wrap_run_completion(
         payload = RunCompletionPayload.model_validate(payload_data)
         try:
             workflow_args = _validate_workflow_args(
-                completion.args_for(payload), label="run completion"
+                completion.args_for(payload)
             )
             output_reference = _validate_output_reference(
                 await completion.workflow(*workflow_args)
@@ -470,11 +437,9 @@ def _validate_output_reference(value: object) -> str:
     return value
 
 
-def _validate_workflow_args(
-    value: object, *, label: str
-) -> tuple[object, ...]:
+def _validate_workflow_args(value: object) -> tuple[object, ...]:
     if not isinstance(value, tuple):
-        raise TypeError(f"{label} args_for must return a tuple")
+        raise TypeError("run completion args_for must return a tuple")
     return value
 
 
@@ -501,10 +466,14 @@ def _run_completion_workflow_name(
     identity = (
         f"{pipeline_key.value}\0{pipeline_version}\0{completion_key.value}"
     )
-    slug = hashlib.sha256(identity.encode()).hexdigest()[:12]
+    # Truncation affects routing names only; ledger identity uses full digest.
+    name_slug = hashlib.sha256(identity.encode()).hexdigest()[:12]
     readable = re.sub(
         r"[^A-Za-z0-9_]",
         "_",
         f"{pipeline_key.value}_{completion_key.value}",
     )
-    return f"dr_platform_run_completion_{readable}_v{pipeline_version}_{slug}"
+    return (
+        f"dr_platform_run_completion_{readable}"
+        f"_v{pipeline_version}_{name_slug}"
+    )

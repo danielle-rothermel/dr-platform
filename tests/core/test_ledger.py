@@ -58,7 +58,6 @@ from dr_platform.submission.runs import (
     PipelineRunConflictError,
     insert_pipeline_run,
 )
-from dr_platform.submission.work_items import insert_work_item
 from tests.conftest import NOW, engine_dsn
 from tests.core.test_evidence import SAMPLE_EVIDENCE_REFERENCE
 
@@ -346,17 +345,22 @@ def _create_stage_execution(
         expected_member_count=0,
         created_at=NOW,
     )
-    work_item = insert_work_item(
-        connection,
-        campaign_key="campaign-1",
-        work_key="work-1",
-        origin_run_key="run-1",
-        input_reference="input:1",
-        labels={"cohort": "blue"},
-    )
+    work_items = StagingSchema().work_items
+    work_item_id = connection.execute(
+        work_items.insert()
+        .values(
+            campaign_key="campaign-1",
+            work_key="work-1",
+            origin_run_key="run-1",
+            input_reference="input:1",
+            labels={"cohort": "blue"},
+            rank=1,
+        )
+        .returning(work_items.c.work_item_id)
+    ).scalar_one()
     return insert_stage_execution(
         connection,
-        work_item_id=work_item.work_item_id,
+        work_item_id=work_item_id,
         stage_key="execute",
         stage_index=0,
         created_at=NOW,
@@ -1011,17 +1015,21 @@ def test_output_reference_is_required_only_for_success_and_preserved(
             execution_config_reference="config:1",
             created_at=NOW,
         )
-        work_item = insert_work_item(
-            connection,
-            campaign_key="campaign-1",
-            work_key="work-output-semantics",
-            origin_run_key="run-output-semantics",
-            input_reference="input:1",
-            labels={},
-        )
+        work_item_id = connection.execute(
+            schema.work_items.insert()
+            .values(
+                campaign_key="campaign-1",
+                work_key="work-output-semantics",
+                origin_run_key="run-output-semantics",
+                input_reference="input:1",
+                labels={},
+                rank=1,
+            )
+            .returning(schema.work_items.c.work_item_id)
+        ).scalar_one()
         execution = insert_stage_execution(
             connection,
-            work_item_id=work_item.work_item_id,
+            work_item_id=work_item_id,
             stage_key="execute",
             stage_index=0,
             created_at=NOW,

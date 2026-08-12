@@ -120,7 +120,7 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
         .one_or_none()
     )
     if row is None:
-        existing = get_stage_execution_for_work(
+        existing = _get_stage_execution_for_work(
             connection,
             work_item_id=work_item_id,
             stage_key=normalized_stage_key,
@@ -163,7 +163,7 @@ def get_stage_execution(
     return None if row is None else _decode_stage_execution(row)
 
 
-def get_stage_execution_for_work(
+def _get_stage_execution_for_work(
     connection: Connection,
     *,
     work_item_id: int,

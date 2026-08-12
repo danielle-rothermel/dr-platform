@@ -507,19 +507,20 @@ def test_registration_binds_one_sized_executor_to_every_wrapper(
     assert registration._resources is not None
     bound = registration._resources.checkpoint_executor
     bound_store = registration._resources.object_store_binding._object_store
-    workflows = [stage.workflow for stage in pipeline.stages]
+    stage_workflows = [stage.workflow for stage in pipeline.stages]
     assert pipeline.run_completion is not None
-    workflows.append(pipeline.run_completion.workflow)
+    completion_workflow = pipeline.run_completion.workflow
 
     assert workers == [23]
     assert all(
         vars(workflow)["_dr_platform_ledger_checkpoint_executor"] is bound
-        for workflow in workflows
+        for workflow in [*stage_workflows, completion_workflow]
     )
     assert all(
         vars(workflow)["_dr_platform_object_store"] is bound_store
-        for workflow in workflows
+        for workflow in stage_workflows
     )
+    assert "_dr_platform_object_store" not in vars(completion_workflow)
 
     registration.close()
     registration.close()

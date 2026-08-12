@@ -14,6 +14,7 @@ from dr_platform._core.identities import (
 )
 from dr_platform._core.ledger.completion_attempts import (
     get_run_completion_attempt,
+    run_completion_workflow_id,
 )
 from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
@@ -25,7 +26,6 @@ from dr_platform.completion.execution import (
     RunCompletionPayload,
     inspect_run_completion,
     record_run_completion_outcome,
-    run_completion_workflow_id,
 )
 from dr_platform.inspection.statuses import StateCount
 from tests.completion.test_run_barrier import (
@@ -200,18 +200,21 @@ def test_completion_workflow_identity_is_stable_and_pipeline_scoped() -> None:
         pipeline_key=PipelineKey("pipeline-a"),
         pipeline_version=1,
         completion_key=RunCompletionKey("aggregate"),
+        attempt_number=1,
     )
     replay = run_completion_workflow_id(
         run_key=RunKey("run-1"),
         pipeline_key=PipelineKey("pipeline-a"),
         pipeline_version=1,
         completion_key=RunCompletionKey("aggregate"),
+        attempt_number=1,
     )
     other_pipeline = run_completion_workflow_id(
         run_key=RunKey("run-1"),
         pipeline_key=PipelineKey("pipeline-b"),
         pipeline_version=1,
         completion_key=RunCompletionKey("aggregate"),
+        attempt_number=1,
     )
     assert first == replay
     assert first != other_pipeline

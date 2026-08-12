@@ -34,6 +34,7 @@ from dr_platform.execution._object_store import (
 from dr_platform.execution._recovery_cap import validate_registry_recovery_cap
 from dr_platform.execution.handoff import (
     _pipeline_checkpoint_workflows,
+    _pipeline_stage_workflows,
     is_pipeline_wrapped,
 )
 from dr_platform.recovery.sweep import (
@@ -123,6 +124,16 @@ def _registry_checkpoint_workflows(
         workflow
         for pipeline in registry.pipelines()
         for workflow in _pipeline_checkpoint_workflows(pipeline)
+    )
+
+
+def _registry_stage_workflows(
+    registry: PipelineRegistry,
+) -> tuple[Callable[..., object], ...]:
+    return tuple(
+        workflow
+        for pipeline in registry.pipelines()
+        for workflow in _pipeline_stage_workflows(pipeline)
     )
 
 
@@ -254,7 +265,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
         )
         object_store = ObjectStore(PostgresBackend.open_sync(engine))
         object_store_binding = _bind_object_store(
-            checkpoint_workflows,
+            _registry_stage_workflows(registry),
             object_store,
         )
         resources = _DispatcherResources(

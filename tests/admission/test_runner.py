@@ -1374,7 +1374,8 @@ def test_unconfigured_backlog_cannot_exhaust_considered_budget(
     pg_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Shrink the 10,000-row production budget to exercise starvation cheaply.
+    # Shrink MAX_CAPACITY_SKIPS_PER_PASS (1,000,000 in production) to
+    # exercise starvation cheaply.
     monkeypatch.setattr(
         "dr_platform.admission.runner.MAX_CAPACITY_SKIPS_PER_PASS", 2
     )

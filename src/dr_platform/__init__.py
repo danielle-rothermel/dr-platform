@@ -122,7 +122,6 @@ from dr_platform.submission.stream import (
     compute_run_membership_digest,
     submit,
 )
-from dr_platform.submission.work_items import WorkItemConflictError
 
 __all__ = [
     "AdmissionPayload",
@@ -179,7 +178,6 @@ __all__ = [
     "UnwrappedPipelineError",
     "WorkCancellationResult",
     "WorkInput",
-    "WorkItemConflictError",
     "WorkItemSummary",
     "WorkKey",
     "WorkflowCanceller",

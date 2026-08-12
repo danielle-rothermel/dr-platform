@@ -1,37 +1,22 @@
-# ruff: noqa: S608 -- every interpolated identifier uses the strict prefix
-# validator above; SQL parameters cannot represent DDL identifiers.
+# ruff: noqa: S608 -- every interpolated identifier uses a prefix validated by
+# StagingSchema; SQL parameters cannot represent DDL identifiers.
 from __future__ import annotations
-
-import re
 
 import sqlalchemy as sa
 from alembic import context, op
 
-from dr_platform._core.ledger.schema import MAX_PREFIX_BYTES, StagingSchema
+from dr_platform._core.ledger.schema import DEFAULT_PREFIX, StagingSchema
 
 revision = "0001_staging_baseline"
 down_revision = None
 branch_labels = None
 depends_on = None
 
-DEFAULT_PREFIX = "platform"
-PREFIX_PATTERN = re.compile(r"[a-z_][a-z0-9_]*")
-
 
 def _prefix() -> str:
     prefix = context.config.attributes.get("prefix", DEFAULT_PREFIX)
     if not isinstance(prefix, str):
         raise TypeError("migration prefix must be a string")
-    if PREFIX_PATTERN.fullmatch(prefix) is None:
-        raise ValueError(
-            "prefix must be a lowercase SQL identifier using letters, "
-            "numbers, or _"
-        )
-    if len(prefix.encode()) > MAX_PREFIX_BYTES:
-        raise ValueError(
-            "prefix is too long for generated PostgreSQL identifiers: "
-            f"maximum is {MAX_PREFIX_BYTES} ASCII bytes"
-        )
     return prefix
 
 

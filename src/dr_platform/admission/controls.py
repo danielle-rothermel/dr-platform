@@ -212,39 +212,6 @@ def upsert_stage_control(  # noqa: PLR0913 -- explicit control facts
     return _decode_stage_control(row)
 
 
-def get_stage_control(  # noqa: PLR0913 -- explicit control identity
-    connection: Connection,
-    *,
-    pipeline_key: str,
-    pipeline_version: int,
-    stage_key: StageKey | str,
-    selector: Mapping[str, str] | None = None,
-    schema: StagingSchema | None = None,
-) -> StageControlRecord | None:
-    selected_schema = schema or StagingSchema()
-    normalized_stage_key = (
-        stage_key if isinstance(stage_key, StageKey) else StageKey(stage_key)
-    )
-    normalized_selector = validate_labels(
-        {} if selector is None else selector,
-        label="stage control selector",
-    )
-    table = selected_schema.stage_controls
-    row = (
-        connection.execute(
-            table.select().where(
-                table.c.pipeline_key == pipeline_key,
-                table.c.pipeline_version == pipeline_version,
-                table.c.stage_key == normalized_stage_key.value,
-                table.c.selector == normalized_selector,
-            )
-        )
-        .mappings()
-        .one_or_none()
-    )
-    return None if row is None else _decode_stage_control(row)
-
-
 def set_stage_control_capacity(  # noqa: PLR0913 -- explicit control facts
     connection: Connection,
     *,

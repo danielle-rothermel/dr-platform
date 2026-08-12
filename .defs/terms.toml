@@ -286,7 +286,7 @@ definition = """
 One validated immutable item at the submission boundary, carrying work \
 identity, a non-empty input reference, and labels independently of the source \
 transport."""
-exported_symbols = ["WorkInput", "WorkKey", "WorkItemConflictError"]
+exported_symbols = ["WorkInput", "WorkKey"]
 
 [[terms]]
 name = "work item"

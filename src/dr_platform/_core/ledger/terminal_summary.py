@@ -90,11 +90,3 @@ def build_run_completion_attempt_summary(
         **dict(error_summary),
         TerminalSummaryField.OUTCOME: outcome,
     }
-
-
-def validate_evidence_reference(value: str | None) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("evidence reference must be a non-empty string")
-    return value

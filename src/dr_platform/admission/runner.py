@@ -361,7 +361,7 @@ class _SkipFull:
 
 
 def run_admission_pass(  # noqa: PLR0913 -- explicit admission dependencies
-    database: Engine | Connection,
+    engine: Engine,
     *,
     client: DBOSClient,
     registry: PipelineRegistry,
@@ -371,26 +371,16 @@ def run_admission_pass(  # noqa: PLR0913 -- explicit admission dependencies
 ) -> AdmissionSummary:
     """Own one transaction and admit at most ``batch_size`` candidates.
 
-    A supplied connection must be idle. At most
-    ``batch_size + MAX_CAPACITY_SKIPS_PER_PASS`` rows are examined. Missing
-    controls exclude a stage; application failures and registry drift exclude
-    only their candidate, without aborting other admissions.
+    At most ``batch_size + MAX_CAPACITY_SKIPS_PER_PASS`` rows are examined.
+    Missing controls exclude a stage; ledger-write and enqueue failures and
+    registry drift exclude only their candidate, without aborting other
+    admissions.
     """
     validate_positive_integer(batch_size, label="admission batch size")
     selected_schema = schema or StagingSchema()
-    if isinstance(database, Engine):
-        with database.begin() as connection:
-            return _admit_in_transaction(
-                connection,
-                client=client,
-                registry=registry,
-                batch_size=batch_size,
-                clock=clock,
-                schema=selected_schema,
-            )
-    with database.begin():
+    with engine.begin() as connection:
         return _admit_in_transaction(
-            database,
+            connection,
             client=client,
             registry=registry,
             batch_size=batch_size,
@@ -452,8 +442,8 @@ def _admit_in_transaction(  # noqa: PLR0912, PLR0913 -- pass evaluation loop
                     tally.record_capacity_skip()
                     full_control_ids.update(ids)
                 case _Admit(matching=matching):
-                    # Application failures roll back only this candidate;
-                    # registry drift is reported separately.
+                    # Ledger-write and enqueue failures roll back only this
+                    # candidate; registry drift is reported separately.
                     try:
                         with connection.begin_nested():
                             _admit_candidate(
