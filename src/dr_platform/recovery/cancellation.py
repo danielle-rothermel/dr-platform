@@ -51,7 +51,8 @@ class CancellationDisposition(StrEnum):
     ALREADY_TERMINAL = "already_terminal"
 
 
-_MAX_CURRENT_STAGE_RESELECTS = 64
+# Watchdog against relock livelock while resolving the current stage.
+_MAX_CURRENT_STAGE_RESELECTS = 4_096
 
 
 @dataclass(frozen=True, slots=True)

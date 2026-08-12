@@ -50,7 +50,7 @@ only-include = ["src"]
 testpaths = ["tests"]
 
 [tool.ruff]
-include = ["qualification/**/*.py", "src/**/*.py", "tests/**/*.py"]
+include = ["src/**/*.py", "tests/**/*.py"]
 line-length = 79
 
 [tool.ruff.lint]
@@ -101,4 +101,4 @@ ignore = ["PLR1711", "S101", "TRY003"]
 "tests/**/*.py" = ["PLR2004", "PLC0415", "ARG001", "ARG005", "S603", "TC002", "TC003"]
 
 [tool.ty.src]
-include = ["qualification", "src", "tests"]
+include = ["src", "tests"]

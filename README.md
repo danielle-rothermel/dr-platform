@@ -192,7 +192,7 @@ admissions without preempting work that is already running.
 class AdmissionPayload(BaseModel):
     campaign_key: CampaignKey
     work_key: WorkKey
-    run_key: RunKey
+    origin_run_key: RunKey
     input_reference: str
     labels: Mapping[str, str]
     pipeline_key: str
@@ -404,13 +404,16 @@ must also schedule
 `sweep_abandoned_stages`, either through the dispatcher or independently, so
 abandoned workflows do not retain admission capacity indefinitely.
 
-Size the schedules independently with
-`batch size * 3600 / interval seconds`. For example, a five-second admission
-schedule with a batch of 200 has a theoretical ceiling of 144,000 admissions
-per hour, giving 44% headroom over a 100,000-admission workload. A five-second
-barrier schedule with a batch of 20 similarly provides 14,400 releases per
-hour for a 10,000-completion workload. These are sizing examples, not
-throughput guarantees; qualify the chosen configuration in its deployment.
+Size admission schedules, barrier schedules, DBOS queue concurrency, stage
+capacity, and the DBOS application-database pool together using
+[whetstone's sizing table](https://github.com/danielle-rothermel/whetstone).
+dr-platform exposes dispatcher and runtime knobs; only the application owns
+provider, process, and queue configuration.
+
+Per-stage-boundary latency is approximately the admission schedule interval
+plus the queue poll interval configured on each application-owned DBOS
+`Queue`. Queue poll intervals are part of whetstone's sizing table, not
+dr-platform defaults.
 
 ## Development
 

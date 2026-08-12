@@ -35,8 +35,8 @@ if TYPE_CHECKING:
     from dr_platform.pipeline.definitions import RunCompletionDefinition
     from dr_platform.pipeline.registry import PipelineRegistry
 
-DEFAULT_RUN_BARRIER_BATCH_SIZE = 100
-DEFAULT_RUN_BARRIER_CANDIDATE_BUDGET = 1_000
+DEFAULT_RUN_BARRIER_BATCH_SIZE = 10_000
+DEFAULT_RUN_BARRIER_CANDIDATE_BUDGET = 100_000
 _TERMINAL_STATES = (
     StageExecutionState.SUCCEEDED,
     StageExecutionState.FAILED,

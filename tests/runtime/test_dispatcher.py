@@ -194,6 +194,26 @@ def test_registration_validates_run_barrier_candidate_budget(
         engine.dispose()
 
 
+def test_registration_validates_pool_size_against_checkpoint_workers() -> None:
+    config = PlatformDbosConfig(
+        database_url="postgresql+psycopg://user:secret@db/platform",
+        system_database_url="postgresql+psycopg://user:secret@db/platform",
+        pool_size=5,
+    )
+    engine = create_engine(config.database_url)
+    try:
+        with pytest.raises(ValueError, match="pool size must be at least"):
+            dispatcher.register_scheduled_dispatcher(
+                config=config,
+                engine=engine,
+                registry=PipelineRegistry(),
+                batch_size=10,
+                barrier_batch_size=7,
+            )
+    finally:
+        engine.dispose()
+
+
 def test_mismatched_stages_are_logged_as_registry_drift_at_error(
     monkeypatch,
     caplog,
