@@ -110,6 +110,7 @@ def _reset_test_database(database_url: str) -> None:
         with engine.begin() as connection:
             # Dropping public strands pgcrypto's catalog entry.
             connection.execute(text("DROP EXTENSION IF EXISTS pgcrypto"))
+            connection.execute(text("DROP SCHEMA IF EXISTS dr_store CASCADE"))
             connection.execute(text("DROP SCHEMA public CASCADE"))
             connection.execute(text("CREATE SCHEMA public"))
             connection.execute(text("CREATE EXTENSION pgcrypto"))
