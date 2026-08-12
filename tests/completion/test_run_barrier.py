@@ -229,7 +229,7 @@ def test_barrier_releases_once_with_compact_immutable_facts(
     assert second.releases == ()
     assert len(client.enqueued) == 1
     options = client.enqueued[0]
-    payload = client.enqueued_payload(0)
+    payload = client.enqueued_payloads[0]
     assert options["workflow_id"].startswith("drp-run-")
     assert payload["run_key"] == "run-1"
     assert payload["member_count"] == 3
@@ -737,7 +737,7 @@ def test_empty_completion_run_is_immediately_eligible(
         clock=lambda: NOW + timedelta(seconds=1),
     )
     assert len(summary.releases) == 1
-    assert client.enqueued_payload(0)["release_terminal_state_counts"] == [
+    assert client.enqueued_payloads[0]["release_terminal_state_counts"] == [
         {"state": "succeeded", "count": 0},
         {"state": "failed", "count": 0},
         {"state": "cancelled", "count": 0},

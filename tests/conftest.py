@@ -220,12 +220,9 @@ class _RecordingClient:
             self.enqueued_args.append(args)
         return object()
 
-    def enqueued_payload(self, index: int) -> dict[str, object]:
-        """Read the first positional argument of one enqueue as a mapping."""
-        return _payload_of(self.enqueued_args[index])
-
     @property
     def enqueued_payloads(self) -> list[dict[str, object]]:
+        """Read the first positional argument of each enqueue as a mapping."""
         return [_payload_of(args) for args in self.enqueued_args]
 
 
