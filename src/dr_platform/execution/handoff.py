@@ -254,7 +254,7 @@ def _wrap_stage_workflow(
     return cast("AsyncWorkflowCallable", run_stage)
 
 
-def _complete_stage_in_transaction(  # noqa: PLR0913
+def _complete_stage_in_transaction(  # noqa: PLR0912, PLR0913
     connection: Connection,
     *,
     workflow_id: str,
@@ -309,6 +309,10 @@ def _complete_stage_in_transaction(  # noqa: PLR0913
     stage_execution_id = source["stage_execution_id"]
     if succeeded:
         assert output_reference is not None
+        if evidence_reference is not None:
+            raise ValueError(
+                "a succeeded stage cannot store an evidence reference"
+            )
         transition_stage_execution(
             connection,
             stage_execution_id=stage_execution_id,
@@ -320,6 +324,10 @@ def _complete_stage_in_transaction(  # noqa: PLR0913
     else:
         if output_reference is not None:
             raise ValueError("a failed stage cannot store an output reference")
+        if evidence_reference is not None and not evidence_reference.strip():
+            raise ValueError(
+                "evidence reference must be a non-empty string when present"
+            )
         if next_stage_key is not None or next_stage_index is not None:
             raise ValueError("a failed stage cannot create a successor")
         transition_stage_execution(
