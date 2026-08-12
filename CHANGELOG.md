@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `dr-store==0.2.2` integration with enlisted failure evidence writes in the
+- `dr-store==0.2.3` integration with enlisted failure evidence writes in the
   stage handoff checkpoint; Alembic revision `0002_dr_store_baseline` colocates
   the `dr_store` schema with the platform ledger on the migration bind
   connection and is irreversible on downgrade.
