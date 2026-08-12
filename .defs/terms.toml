@@ -143,6 +143,8 @@ exported_symbols = [
   "submit",
   "RunSummary",
   "list_runs",
+  "list_run_members",
+  "RunMemberSummary",
   "run_state_counts",
   "bulk_run_state_counts",
   "PipelineRunConflictError",
@@ -241,9 +243,19 @@ is_a = ["reference"]
 [[terms]]
 name = "output reference"
 definition = """
-A non-empty opaque reference returned by a successful stage and recorded as \
-its result evidence. A failed stage cannot carry one."""
+A non-empty opaque reference returned by a successful stage and recorded on \
+its stage execution as result evidence. It is distinct from an attempt-level \
+evidence reference recorded only for a terminal failed attempt."""
 is_a = ["reference"]
+
+[[terms]]
+name = "evidence reference"
+definition = """
+A non-empty opaque reference recording partial result evidence for one \
+terminal failed stage attempt. The platform stores and transports it without \
+interpretation or resolution."""
+is_a = ["reference"]
+part_of = ["stage attempt"]
 
 [[terms]]
 name = "label"
@@ -297,7 +309,11 @@ definition = """
 One attempt in a stage execution's ordered history, identified by its \
 sequence number and durable workflow identity. Admission and terminal facts \
 are each recorded at most once."""
-exported_symbols = ["StageAttemptRecord"]
+exported_symbols = [
+  "StageAttemptRecord",
+  "TerminalSummaryField",
+  "TerminalSummaryProducer",
+]
 is_a = ["attempt"]
 part_of = ["stage execution"]
 
@@ -392,7 +408,7 @@ The single completion transaction that settles a successful attempt, marks \
 its stage succeeded, and creates the next linear stage as ready when one \
 exists. A completion \
 must identify the persisted current admitted attempt."""
-exported_symbols = ["StageHandoffMismatchError"]
+exported_symbols = ["StageHandoffMismatchError", "StageApplicationFailure"]
 
 [[terms]]
 name = "retry"

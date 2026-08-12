@@ -10,10 +10,13 @@ from typing import Any
 import dr_platform
 from dr_platform._core import identities
 from dr_platform._core.ledger import attempts, executions, schema, states
+from dr_platform._core.ledger import (
+    terminal_summary as ledger_terminal_summary,
+)
 from dr_platform.admission import controls, runner
 from dr_platform.completion import execution as completion_execution
-from dr_platform.execution import handoff
-from dr_platform.inspection import campaigns, statuses
+from dr_platform.execution import failures, handoff
+from dr_platform.inspection import campaigns, run_members, statuses
 from dr_platform.inspection import work_items as inspection_work_items
 from dr_platform.pipeline import definitions, registry
 from dr_platform.recovery import cancellation, retry, sweep
@@ -46,9 +49,11 @@ _ROOT_BINDINGS = {
     "RunCompletionPayload": completion_execution.RunCompletionPayload,
     "RunKey": identities.RunKey,
     "RunMemberInput": stream.RunMemberInput,
+    "RunMemberSummary": run_members.RunMemberSummary,
     "RunMembershipConflictError": stream.RunMembershipConflictError,
     "RunRegistrationDeclaration": stream.RunRegistrationDeclaration,
     "RunSummary": campaigns.RunSummary,
+    "StageApplicationFailure": failures.StageApplicationFailure,
     "StageAttemptRecord": attempts.StageAttemptRecord,
     "StageControlRecord": controls.StageControlRecord,
     "StageDefinition": definitions.StageDefinition,
@@ -63,6 +68,10 @@ _ROOT_BINDINGS = {
     "SubmissionReceipt": stream.SubmissionReceipt,
     "SweepProjection": sweep.SweepProjection,
     "SweepSummary": sweep.SweepSummary,
+    "TerminalSummaryField": ledger_terminal_summary.TerminalSummaryField,
+    "TerminalSummaryProducer": (
+        ledger_terminal_summary.TerminalSummaryProducer
+    ),
     "TelemetryInitializationResult": telemetry.TelemetryInitializationResult,
     "UnwrappedPipelineError": dispatcher.UnwrappedPipelineError,
     "WorkCancellationResult": cancellation.WorkCancellationResult,
@@ -83,6 +92,7 @@ _ROOT_BINDINGS = {
     "inspect_campaign": campaigns.inspect_campaign,
     "inspect_run_completion": completion_execution.inspect_run_completion,
     "list_campaigns": campaigns.list_campaigns,
+    "list_run_members": run_members.list_run_members,
     "list_runs": campaigns.list_runs,
     "list_work_items": inspection_work_items.list_work_items,
     "pause": controls.pause,

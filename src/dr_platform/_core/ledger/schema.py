@@ -329,6 +329,7 @@ class StagingSchema:
             Column("workflow_id", Text, nullable=False),
             Column("terminal_summary", JSONB),
             Column("terminal_reference", Text),
+            Column("evidence_reference", Text),
             Column("created_at", DateTime(timezone=True), nullable=False),
             Column("admitted_at", DateTime(timezone=True)),
             Column("terminal_at", DateTime(timezone=True)),

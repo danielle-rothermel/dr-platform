@@ -905,7 +905,38 @@ def test_stage_attempt_lifecycle_fills_one_row_once(
     assert terminal.terminal_at == terminal_at
     assert terminal.terminal_summary == {"outcome": "failed"}
     assert terminal.terminal_reference == "builtins.RuntimeError"
+    assert terminal.evidence_reference is None
     assert attempts == (terminal,)
+
+
+def test_stage_attempt_evidence_reference_is_persisted(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        execution = _create_stage_execution(connection)
+        pending = append_stage_attempt(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+            created_at=NOW,
+        )
+        mark_stage_attempt_admitted(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+            attempt_number=pending.attempt_number,
+            admitted_at=NOW + timedelta(seconds=1),
+        )
+        terminal = record_stage_attempt_terminal(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+            attempt_number=pending.attempt_number,
+            terminal_at=NOW + timedelta(seconds=2),
+            terminal_summary={"outcome": "failed"},
+            terminal_reference=None,
+            evidence_reference="evidence:partial",
+        )
+
+    assert terminal.evidence_reference == "evidence:partial"
 
 
 def test_stage_attempt_terminal_summary_is_recursively_immutable(

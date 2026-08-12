@@ -243,6 +243,15 @@ class StageExecutionState(StrEnum):
 class StageHandoffMismatchError(RuntimeError): ...
 
 
+class StageApplicationFailure(Exception):
+    def __init__(
+        self,
+        message: str,
+        *,
+        evidence_reference: str | None = None,
+    ) -> None: ...
+
+
 def wrap_pipeline_workflows(
     pipeline: PipelineDefinition,
 ) -> PipelineDefinition: ...
@@ -339,7 +348,15 @@ sweep_abandoned_stages(DBOS client) -> SweepSummary
 
 Inspection provides read-only projections over stable logical identities rather
 than exposing database rows. Collection readers are bounded; direct work-item
-inspection returns its complete stage-attempt history.
+inspection returns its complete stage-attempt history. Run member listing is
+paginated by membership ordinal and reports current stage state without
+returning evidence payloads.
+
+Terminal attempt summaries use pinned wire keys (`TerminalSummaryField`,
+`TerminalSummaryProducer`) with an explicit producer tag and optional
+traceback capture on application failure. Applications may attach partial
+evidence on failure by raising `StageApplicationFailure` with an optional
+evidence reference, stored separately from success output references.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -364,6 +381,17 @@ class WorkItemSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class RunMemberSummary:
+    member_ordinal: int
+    work_key: WorkKey
+    work_item_id: int
+    input_reference: str
+    current_stage_key: StageKey | None
+    current_stage_index: int | None
+    state: StageExecutionState | None
+
+
+@dataclass(frozen=True, slots=True)
 class StageExecutionSummary:
     execution: StageExecutionRecord
     attempts: tuple[StageAttemptRecord, ...]
@@ -373,6 +401,7 @@ class StageExecutionSummary:
 inspect_campaign(campaign_key) -> CampaignSummary
 list_campaigns(cursor=None, limit=...) -> tuple[CampaignSummary, ...]
 list_runs(campaign_key, cursor=None, limit=...) -> tuple[RunSummary, ...]
+list_run_members(run_key, cursor=None, limit=...) -> tuple[RunMemberSummary, ...]
 list_work_items(campaign_key, state=None, cursor=None, limit=...) -> tuple[WorkItemSummary, ...]
 get_work_item_stages(work_item_id) -> tuple[StageExecutionSummary, ...]
 campaign_state_counts(campaign_key) -> tuple[StateCount, ...]

@@ -48,6 +48,7 @@ class StageAttemptRecord:
     workflow_id: str
     terminal_summary: Mapping[str, object] | None
     terminal_reference: str | None
+    evidence_reference: str | None
     created_at: datetime
     admitted_at: datetime | None
     terminal_at: datetime | None
@@ -99,6 +100,7 @@ def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
     terminal_at: datetime | None = None,
     terminal_summary: Mapping[str, object] | None = None,
     terminal_reference: str | None = None,
+    evidence_reference: str | None = None,
     schema: StagingSchema | None = None,
 ) -> StageAttemptRecord:
     """Append the next attempt with a deterministic DBOS workflow ID."""
@@ -161,6 +163,7 @@ def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
                 workflow_id=workflow_id,
                 terminal_summary=summary,
                 terminal_reference=terminal_reference,
+                evidence_reference=evidence_reference,
                 created_at=created_at,
                 admitted_at=admitted_at,
                 terminal_at=terminal_at,
@@ -279,6 +282,7 @@ def record_stage_attempt_terminal(  # noqa: PLR0913 -- explicit outcome facts
     terminal_at: datetime,
     terminal_summary: Mapping[str, object],
     terminal_reference: str | None = None,
+    evidence_reference: str | None = None,
     schema: StagingSchema | None = None,
 ) -> StageAttemptRecord:
     """Record one terminal attempt outcome exactly once."""
@@ -315,6 +319,7 @@ def record_stage_attempt_terminal(  # noqa: PLR0913 -- explicit outcome facts
                 terminal_at=terminal_at,
                 terminal_summary=dict(terminal_summary),
                 terminal_reference=terminal_reference,
+                evidence_reference=evidence_reference,
             )
             .returning(*table.c)
         )
@@ -337,6 +342,7 @@ def _decode_stage_attempt(row: RowMapping) -> StageAttemptRecord:
             else immutable_json_mapping(cast("Mapping[str, object]", summary))
         ),
         terminal_reference=row["terminal_reference"],
+        evidence_reference=row["evidence_reference"],
         created_at=row["created_at"],
         admitted_at=row["admitted_at"],
         terminal_at=row["terminal_at"],

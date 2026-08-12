@@ -112,13 +112,17 @@ title = "Run inspection follows membership"
 statement = """
 Counts, status queries, and completion eligibility derive through run \
 membership rather than work origin. Bulk run state counts use one aggregate \
-query per bounded input chunk and distinguish missing from present empty runs; \
-the platform exposes no general member-listing API."""
+query per bounded input chunk and distinguish missing from present empty \
+runs. Run member inspection uses bounded paginated ``list_run_members`` at \
+platform grain—ordinal, work keys, and current stage state—without result or \
+evidence pagination."""
 rationale = """
-Membership is the authoritative run scope, including for reused work. A narrow \
-inspection surface avoids unbounded result sets and premature pagination."""
-date = "2026-08-09"
-check = "uv run pytest -q tests/inspection/test_run_membership.py"
+Membership is the authoritative run scope, including for reused work. A \
+paginated member listing lets operator tooling enumerate run scope without \
+coupling to application manifests, while keeping evidence payloads out of \
+platform inspection."""
+date = "2026-08-11"
+check = "uv run pytest -q tests/inspection/test_run_membership.py tests/inspection/test_run_members.py"
 
 [[contracts]]
 title = "Run barrier releases completion once"
@@ -222,14 +226,16 @@ check = "uv run pytest -q tests/submission/test_stream.py"
 title = "References remain opaque"
 statement = """
 The platform validates references only as non-empty strings, stores and \
-transports them without interpretation or resolution, and records an output \
-reference only for a successful stage."""
+transports them without interpretation or resolution, records an output \
+reference only for a successful stage execution, and may record an evidence \
+reference on a terminal failed stage attempt."""
 rationale = """
 Payload and artifact meaning belongs to the application. Parsing references \
 inside the platform would couple durable orchestration to one storage or \
-domain scheme and would blur success evidence with failure diagnostics."""
-date = "2026-08-05"
-check = "uv run pytest -q tests/submission/test_stream.py::test_input_reference_is_transported_opaquely_without_parsing tests/execution/test_handoff.py::test_output_reference_is_transported_opaquely_without_parsing tests/core/test_ledger.py::test_output_reference_is_required_only_for_success_and_preserved"
+domain scheme. Keeping success output references on stage executions separate \
+from attempt-level failure evidence preserves the success/failure boundary."""
+date = "2026-08-11"
+check = "uv run pytest -q tests/submission/test_stream.py::test_input_reference_is_transported_opaquely_without_parsing tests/execution/test_handoff.py::test_output_reference_is_transported_opaquely_without_parsing tests/execution/test_handoff.py::test_application_failure_can_store_evidence_reference tests/core/test_ledger.py::test_output_reference_is_required_only_for_success_and_preserved tests/core/test_ledger.py::test_stage_attempt_evidence_reference_is_persisted"
 
 [[contracts]]
 title = "Attempts are append-only lifecycle records"

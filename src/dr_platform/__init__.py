@@ -13,6 +13,10 @@ from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
     StageExecutionState,
 )
+from dr_platform._core.ledger.terminal_summary import (
+    TerminalSummaryField,
+    TerminalSummaryProducer,
+)
 from dr_platform.admission.controls import (
     StageControlRecord,
     pause,
@@ -27,6 +31,7 @@ from dr_platform.completion.execution import (
     RunCompletionPayload,
     inspect_run_completion,
 )
+from dr_platform.execution.failures import StageApplicationFailure
 from dr_platform.execution.handoff import (
     StageHandoffMismatchError,
     wrap_pipeline_workflows,
@@ -37,6 +42,10 @@ from dr_platform.inspection.campaigns import (
     inspect_campaign,
     list_campaigns,
     list_runs,
+)
+from dr_platform.inspection.run_members import (
+    RunMemberSummary,
+    list_run_members,
 )
 from dr_platform.inspection.statuses import (
     BulkStatusResult,
@@ -126,9 +135,11 @@ __all__ = [
     "RunCompletionPayload",
     "RunKey",
     "RunMemberInput",
+    "RunMemberSummary",
     "RunMembershipConflictError",
     "RunRegistrationDeclaration",
     "RunSummary",
+    "StageApplicationFailure",
     "StageAttemptRecord",
     "StageControlRecord",
     "StageDefinition",
@@ -144,6 +155,8 @@ __all__ = [
     "SweepProjection",
     "SweepSummary",
     "TelemetryInitializationResult",
+    "TerminalSummaryField",
+    "TerminalSummaryProducer",
     "UnwrappedPipelineError",
     "WorkCancellationResult",
     "WorkInput",
@@ -163,6 +176,7 @@ __all__ = [
     "inspect_campaign",
     "inspect_run_completion",
     "list_campaigns",
+    "list_run_members",
     "list_runs",
     "list_work_items",
     "pause",

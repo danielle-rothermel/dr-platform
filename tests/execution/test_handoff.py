@@ -25,6 +25,7 @@ from dr_platform._core.identities import (
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import upsert_stage_control
 from dr_platform.admission.runner import run_admission_pass
+from dr_platform.execution.failures import StageApplicationFailure
 from dr_platform.execution.handoff import (
     StageHandoffMismatchError,
     _complete_stage_in_transaction,
@@ -488,6 +489,7 @@ def test_completion_and_next_ready_insert_roll_back_together(
             output_reference="output:prepare",
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="output:prepare",
+            evidence_reference=None,
             next_stage_key="execute",
             next_stage_index=1,
             completed_at=_utc_now(),
@@ -572,6 +574,7 @@ def test_completion_identity_mismatch_does_not_mutate_state(
             output_reference="output:prepare",
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="output:prepare",
+            evidence_reference=None,
             next_stage_key="execute",
             next_stage_index=1,
             completed_at=_utc_now(),
@@ -619,6 +622,7 @@ def test_output_reference_is_transported_opaquely_without_parsing(
             output_reference=_TERMINAL_OBJECT_REFERENCE,
             terminal_summary={"outcome": "succeeded"},
             terminal_reference=_TERMINAL_OBJECT_REFERENCE,
+            evidence_reference=None,
             next_stage_key=None,
             next_stage_index=None,
             completed_at=_utc_now(),
@@ -844,6 +848,7 @@ def test_invalid_application_output_lands_failed_without_a_successor(
                     schema.stage_attempts.c.terminal_at,
                     schema.stage_attempts.c.terminal_summary,
                     schema.stage_attempts.c.terminal_reference,
+                    schema.stage_attempts.c.evidence_reference,
                 )
             ).one()
         _wait_for_workflow_statuses(
@@ -860,14 +865,112 @@ def test_invalid_application_output_lands_failed_without_a_successor(
     assert attempt.terminal_at is not None
     assert attempt.terminal_summary == {
         "outcome": "failed",
+        "producer": "application_failure",
         "error_type": "builtins.ValueError",
         "message": (
             "stage application logic must return a non-empty "
             "output-reference string"
         ),
+        "traceback": attempt.terminal_summary["traceback"],
     }
+    assert isinstance(attempt.terminal_summary["traceback"], str)
     assert attempt.terminal_reference is None
-    assert attempt.terminal_summary["error_type"] == "builtins.ValueError"
+    assert attempt.evidence_reference is None
+
+
+def test_application_failure_can_store_evidence_reference(
+    clean_pg: str,
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+
+    def raises_with_evidence(_input_reference: str) -> str:
+        raise StageApplicationFailure(
+            "partial graph outcome",
+            evidence_reference="evidence:partial-1",
+        )
+
+    declared = _pipeline(
+        key=f"evidence-failure-{suffix}",
+        stage_logic=(("execute", raises_with_evidence),),
+    )
+    pipeline = wrap_pipeline_workflows(declared, clock=_utc_now)
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    _configure_controls(pg_engine, pipeline, capacity=1)
+    _submit_items(
+        pg_engine,
+        registry,
+        pipeline,
+        campaign_key=f"campaign-evidence-failure-{suffix}",
+        run_key=f"run-evidence-failure-{suffix}",
+        items=(
+            WorkInput(work_key="work", input_reference="input", labels={}),
+        ),
+    )
+    Queue(pipeline.stages[0].queue_name, polling_interval_sec=0.02)
+
+    registration: DispatcherRegistration | None = None
+    try:
+        registration = _launch_dbos(
+            clean_pg,
+            suffix=suffix,
+            engine=pg_engine,
+            registry=registry,
+        )
+        client = registration.client
+        admitted = run_admission_pass(
+            pg_engine,
+            client=client,
+            registry=registry,
+            clock=_utc_now,
+        )
+        assert admitted.admitted_total == 1
+        _wait_for(
+            lambda: (
+                _stage_state_count(
+                    pg_engine,
+                    schema,
+                    stage_index=0,
+                    state=StageExecutionState.FAILED,
+                )
+                == 1
+            )
+        )
+
+        with pg_engine.connect() as connection:
+            attempt = connection.execute(
+                select(
+                    schema.stage_attempts.c.workflow_id,
+                    schema.stage_attempts.c.terminal_summary,
+                    schema.stage_attempts.c.terminal_reference,
+                    schema.stage_attempts.c.evidence_reference,
+                    schema.stage_executions.c.output_reference,
+                ).select_from(
+                    schema.stage_attempts.join(
+                        schema.stage_executions,
+                        schema.stage_attempts.c.stage_execution_id
+                        == schema.stage_executions.c.stage_execution_id,
+                    )
+                )
+            ).one()
+            workflow_id = attempt.workflow_id
+        _wait_for_workflow_statuses(
+            client,
+            [workflow_id],
+            expected_status="SUCCESS",
+        )
+    finally:
+        if registration is not None:
+            registration.close()
+        DBOS.destroy(destroy_registry=True)
+
+    assert attempt.output_reference is None
+    assert attempt.terminal_reference is None
+    assert attempt.evidence_reference == "evidence:partial-1"
+    assert attempt.terminal_summary["producer"] == "application_failure"
+    assert attempt.terminal_summary["message"] == "partial graph outcome"
 
 
 class _UnprintableError(RuntimeError):
@@ -1021,6 +1124,7 @@ def _commit_successful_handoff(
             output_reference="output:prepare",
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="output:prepare",
+            evidence_reference=None,
             next_stage_key=pipeline.stages[1].key.value,
             next_stage_index=1,
             completed_at=completed_at,
@@ -1156,6 +1260,7 @@ def test_sweep_race_with_successful_handoff_has_one_terminal_outcome(
         assert execution_rows == [(0, "failed", None)]
         assert attempts[0].terminal_summary == {
             "outcome": "failed",
+            "producer": "abandonment",
             "dbos_status": "ERROR",
             "message": "reported abandoned",
         }
@@ -1273,6 +1378,7 @@ def test_sweep_race_with_operator_cancellation_has_one_terminal_outcome(
         assert result.disposition is CancellationDisposition.CANCELLED_ADMITTED
         assert attempts[0].terminal_summary == {
             "outcome": "cancelled",
+            "producer": "cancellation",
             "reason": "operator_requested",
         }
         assert canceller.cancelled == [(workflow_id, False)]
@@ -1281,6 +1387,7 @@ def test_sweep_race_with_operator_cancellation_has_one_terminal_outcome(
         assert result.disposition is CancellationDisposition.CANCELLED_FAILED
         assert attempts[0].terminal_summary == {
             "outcome": "failed",
+            "producer": "abandonment",
             "dbos_status": "ERROR",
             "message": "reported abandoned",
         }

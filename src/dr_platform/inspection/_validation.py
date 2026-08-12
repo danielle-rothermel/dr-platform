@@ -91,6 +91,25 @@ def validate_work_item_id(work_item_id: int) -> None:
         raise ValueError("work item id must be a positive integer")
 
 
+def validate_run_member_cursor(
+    connection: Connection,
+    *,
+    cursor: int,
+    run_key: RunKey,
+    schema: StagingSchema,
+) -> None:
+    if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+        raise ValueError("run member cursor must be a non-negative integer")
+    exists = connection.execute(
+        select(schema.run_memberships.c.member_ordinal).where(
+            schema.run_memberships.c.run_key == run_key.value,
+            schema.run_memberships.c.member_ordinal == cursor,
+        )
+    ).scalar_one_or_none()
+    if exists is None:
+        raise ValueError("run member cursor is unknown in this run")
+
+
 def normalize_campaign_key(value: CampaignKey | str) -> CampaignKey:
     return value if isinstance(value, CampaignKey) else CampaignKey(value)
 

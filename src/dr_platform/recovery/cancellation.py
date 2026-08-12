@@ -22,6 +22,10 @@ from dr_platform._core.ledger.executions import (
 )
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.terminal_summary import (
+    TerminalSummaryProducer,
+    build_terminal_summary,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -251,10 +255,11 @@ def _cancel_current_stage(
             stage_execution_id=current.stage_execution_id,
             attempt_number=current.current_attempt,
             terminal_at=cancelled_at,
-            terminal_summary={
-                "outcome": StageExecutionState.CANCELLED.value,
-                "reason": "operator_requested",
-            },
+            terminal_summary=build_terminal_summary(
+                outcome=StageExecutionState.CANCELLED.value,
+                producer=TerminalSummaryProducer.CANCELLATION,
+                reason="operator_requested",
+            ),
             terminal_reference=workflow_id,
             schema=schema,
         )
