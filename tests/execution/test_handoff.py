@@ -1079,8 +1079,8 @@ class _Status:
     workflow_id: str
     status: str
     error: Exception | None = None
-    app_version: str = "test"
-    executor_id: str = "local"
+    app_version: str | None = "test"
+    executor_id: str | None = "local"
 
 
 class _StatusClient:
@@ -1725,6 +1725,39 @@ def test_sweep_projects_pending_with_dead_executor(
     assert summary.projected_count == 1
     assert summary.projections[0].state is StageExecutionState.FAILED
     assert summary.projections[0].dbos_status == "PENDING"
+
+
+def test_sweep_skips_pending_with_missing_identity_fields(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-missing-identity",
+        campaign_key="campaign-missing-identity",
+        run_key="run-missing-identity",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=default_live_dbos_identity(app_version="test"),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _Status(
+                        workflow_id,
+                        "PENDING",
+                        app_version=None,
+                        executor_id=None,
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 0
 
 
 def test_sweep_skips_pending_with_live_identity(

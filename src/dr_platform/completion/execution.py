@@ -314,6 +314,10 @@ def record_run_completion_outcome(  # noqa: PLR0913
             f"run completion execution does not exist: "
             f"{attempt.run_completion_execution_id}"
         )
+    if attempt.attempt_number != row["current_attempt"]:
+        raise RunCompletionOutcomeError(
+            "run completion workflow does not match the current attempt"
+        )
     existing = _decode_execution(row, attempt=attempt)
     if existing.state is not RunCompletionExecutionState.ENQUEUED:
         if (

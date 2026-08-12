@@ -14,7 +14,10 @@ from dr_platform._core.ledger.states import (
     StageExecutionState,
 )
 from dr_platform.completion.barrier import run_barrier_pass
-from dr_platform.completion.execution import record_run_completion_outcome
+from dr_platform.completion.execution import (
+    RunCompletionOutcomeError,
+    record_run_completion_outcome,
+)
 from dr_platform.recovery.run_completion_retry import retry_run_completion
 from tests.completion.test_run_barrier import (
     _members,
@@ -103,6 +106,47 @@ def test_retry_run_completion_appends_attempt_and_reenqueues(
     assert first.terminal_at is not None
     assert second is not None
     assert second.enqueued_at is not None
+
+
+def test_stale_run_completion_workflow_id_cannot_terminalize_retry(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(pg_engine)
+    failed_at = NOW + timedelta(seconds=2)
+    with pg_engine.begin() as connection:
+        record_run_completion_outcome(
+            connection,
+            workflow_id=workflow_id,
+            succeeded=False,
+            output_reference=None,
+            error_summary={"error_type": "ValueError", "message": "broken"},
+            terminal_at=failed_at,
+        )
+
+    retry_run_completion(
+        "run-retry",
+        engine=pg_engine,
+        client=_as_dbos_client(_RecordingClient()),
+        registry=registry,
+        clock=lambda: NOW + timedelta(seconds=3),
+    )
+
+    with (
+        pytest.raises(
+            RunCompletionOutcomeError,
+            match="does not match the current attempt",
+        ),
+        pg_engine.begin() as connection,
+    ):
+        record_run_completion_outcome(
+            connection,
+            workflow_id=workflow_id,
+            succeeded=False,
+            output_reference=None,
+            error_summary={"error_type": "ValueError", "message": "late"},
+            terminal_at=NOW + timedelta(seconds=4),
+        )
 
 
 def test_retry_run_completion_rejects_non_failed_execution(
