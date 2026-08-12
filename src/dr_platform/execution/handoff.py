@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import traceback
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
@@ -15,6 +16,11 @@ from dr_platform._core.ledger.executions import (
 )
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.terminal_summary import (
+    TerminalSummaryField,
+    TerminalSummaryProducer,
+    build_terminal_summary,
+)
 from dr_platform.admission.runner import AdmissionPayload
 from dr_platform.completion.execution import (
     is_run_completion_wrapped,
@@ -23,6 +29,7 @@ from dr_platform.completion.execution import (
 from dr_platform.execution._checkpoint import (
     _require_ledger_checkpoint_executor,
 )
+from dr_platform.execution.failures import StageApplicationFailure
 from dr_platform.pipeline.definitions import (
     AsyncWorkflowCallable,
     PipelineDefinition,
@@ -148,6 +155,7 @@ def _wrap_stage_workflow(
         output_reference: str | None,
         terminal_summary: Mapping[str, object],
         terminal_reference: str | None,
+        evidence_reference: str | None,
         next_stage_key: str | None,
         next_stage_index: int | None,
     ) -> None:
@@ -163,6 +171,7 @@ def _wrap_stage_workflow(
             output_reference=output_reference,
             terminal_summary=terminal_summary,
             terminal_reference=terminal_reference,
+            evidence_reference=evidence_reference,
             next_stage_key=next_stage_key,
             next_stage_index=next_stage_index,
             completed_at=clock(),
@@ -185,6 +194,11 @@ def _wrap_stage_workflow(
             )
         except Exception as error:  # noqa: BLE001 -- application boundary
             error_type = f"{type(error).__module__}.{type(error).__qualname__}"
+            evidence_reference = (
+                error.evidence_reference
+                if isinstance(error, StageApplicationFailure)
+                else None
+            )
             await checkpoint_executor.run(
                 complete_stage,
                 workflow_id=workflow_id,
@@ -194,14 +208,19 @@ def _wrap_stage_workflow(
                 stage_index=stage_index,
                 succeeded=False,
                 output_reference=None,
-                terminal_summary={
-                    "outcome": StageExecutionState.FAILED.value,
-                    "error_type": error_type,
-                    "message": _safe_error_message(
-                        error, error_type=error_type
+                terminal_summary=build_terminal_summary(
+                    outcome=StageExecutionState.FAILED.value,
+                    producer=TerminalSummaryProducer.APPLICATION_FAILURE,
+                    error_type=error_type,
+                    message=_safe_error_message(error, error_type=error_type),
+                    traceback_text="".join(
+                        traceback.format_exception(
+                            type(error), error, error.__traceback__
+                        )
                     ),
-                },
+                ),
                 terminal_reference=None,
+                evidence_reference=evidence_reference,
                 next_stage_key=None,
                 next_stage_index=None,
             )
@@ -216,8 +235,13 @@ def _wrap_stage_workflow(
             stage_index=stage_index,
             succeeded=True,
             output_reference=output_reference,
-            terminal_summary={"outcome": StageExecutionState.SUCCEEDED.value},
+            terminal_summary={
+                TerminalSummaryField.OUTCOME: (
+                    StageExecutionState.SUCCEEDED.value
+                ),
+            },
             terminal_reference=output_reference,
+            evidence_reference=None,
             next_stage_key=(
                 None if next_stage is None else next_stage.key.value
             ),
@@ -230,7 +254,7 @@ def _wrap_stage_workflow(
     return cast("AsyncWorkflowCallable", run_stage)
 
 
-def _complete_stage_in_transaction(  # noqa: PLR0913
+def _complete_stage_in_transaction(  # noqa: PLR0912, PLR0913
     connection: Connection,
     *,
     workflow_id: str,
@@ -242,6 +266,7 @@ def _complete_stage_in_transaction(  # noqa: PLR0913
     output_reference: str | None,
     terminal_summary: Mapping[str, object],
     terminal_reference: str | None,
+    evidence_reference: str | None,
     next_stage_key: str | None,
     next_stage_index: int | None,
     completed_at: datetime,
@@ -284,6 +309,10 @@ def _complete_stage_in_transaction(  # noqa: PLR0913
     stage_execution_id = source["stage_execution_id"]
     if succeeded:
         assert output_reference is not None
+        if evidence_reference is not None:
+            raise ValueError(
+                "a succeeded stage cannot store an evidence reference"
+            )
         transition_stage_execution(
             connection,
             stage_execution_id=stage_execution_id,
@@ -295,6 +324,10 @@ def _complete_stage_in_transaction(  # noqa: PLR0913
     else:
         if output_reference is not None:
             raise ValueError("a failed stage cannot store an output reference")
+        if evidence_reference is not None and not evidence_reference.strip():
+            raise ValueError(
+                "evidence reference must be a non-empty string when present"
+            )
         if next_stage_key is not None or next_stage_index is not None:
             raise ValueError("a failed stage cannot create a successor")
         transition_stage_execution(
@@ -312,6 +345,7 @@ def _complete_stage_in_transaction(  # noqa: PLR0913
         terminal_at=completed_at,
         terminal_summary=terminal_summary,
         terminal_reference=terminal_reference,
+        evidence_reference=evidence_reference,
         schema=selected_schema,
     )
     if not succeeded:

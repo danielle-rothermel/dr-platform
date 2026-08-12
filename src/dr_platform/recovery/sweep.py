@@ -12,6 +12,10 @@ from dr_platform._core.ledger.attempts import record_stage_attempt_terminal
 from dr_platform._core.ledger.executions import transition_stage_execution
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.terminal_summary import (
+    TerminalSummaryProducer,
+    build_terminal_summary,
+)
 from dr_platform._core.validation import validate_positive_integer
 
 if TYPE_CHECKING:
@@ -131,12 +135,16 @@ def sweep_abandoned_stages(
                 target_state = StageExecutionState.FAILED
             else:
                 continue
-            terminal_summary: dict[str, object] = {
-                "outcome": target_state.value,
-                "dbos_status": status.status,
-            }
-            if status.error is not None:
-                terminal_summary["message"] = _safe_error_message(status.error)
+            terminal_summary = build_terminal_summary(
+                outcome=target_state.value,
+                producer=TerminalSummaryProducer.ABANDONMENT,
+                dbos_status=status.status,
+                message=(
+                    None
+                    if status.error is None
+                    else _safe_error_message(status.error)
+                ),
+            )
             # Read per projection so committed pages cannot move time backward.
             terminal_at = clock()
             with engine.begin() as connection:

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel, ConfigDict, StrictInt, field_validator
-from sqlalchemy import Text, and_, column, func, select, values
+from sqlalchemy import Text, and_, column, func, or_, select, values
 
+from dr_platform._core.frozen import immutable_json_mapping
 from dr_platform._core.identities import CampaignKey, RunKey, StageKey, WorkKey
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
@@ -17,6 +18,10 @@ from dr_platform.inspection._validation import (
     normalize_work_key,
     require_campaign,
     require_run,
+)
+from dr_platform.inspection.terminal_filters import (
+    TerminalSummaryFilter,
+    terminal_summary_filter_clause,
 )
 
 if TYPE_CHECKING:
@@ -55,6 +60,25 @@ class BulkWorkStatus:
 class BulkStatusResult:
     campaign_key: CampaignKey
     statuses: Mapping[WorkKey, BulkWorkStatus]
+
+
+@dataclass(frozen=True, slots=True)
+class BulkWorkTerminalStatus:
+    work_key: WorkKey
+    present: bool
+    work_item_id: int | None
+    stage_execution_id: int | None
+    current_stage_key: StageKey | None
+    current_stage_index: int | None
+    state: StageExecutionState | None
+    terminal_summary: Mapping[str, object] | None
+    evidence_reference: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BulkTerminalStatusResult:
+    campaign_key: CampaignKey
+    statuses: Mapping[WorkKey, BulkWorkTerminalStatus]
 
 
 def campaign_state_counts(
@@ -183,6 +207,60 @@ def bulk_work_statuses(
     )
 
 
+def bulk_work_terminal_statuses(  # noqa: PLR0913 -- explicit reader filters
+    campaign_key: CampaignKey | str,
+    work_keys: Iterable[WorkKey | str],
+    *,
+    engine: Engine,
+    terminal_filter: TerminalSummaryFilter | None = None,
+    chunk_size: int = DEFAULT_BULK_STATUS_CHUNK_SIZE,
+    schema: StagingSchema | None = None,
+) -> BulkTerminalStatusResult:
+    """Execute exactly one SELECT per input chunk over current attempts."""
+    validate_positive_integer(
+        chunk_size, label="bulk terminal status chunk size"
+    )
+    normalized_campaign = normalize_campaign_key(campaign_key)
+    normalized_keys = tuple(
+        dict.fromkeys(normalize_work_key(key) for key in work_keys)
+    )
+    selected_schema = schema or StagingSchema()
+    if terminal_filter is None:
+        statuses: dict[WorkKey, BulkWorkTerminalStatus] = {
+            key: BulkWorkTerminalStatus(
+                work_key=key,
+                present=False,
+                work_item_id=None,
+                stage_execution_id=None,
+                current_stage_key=None,
+                current_stage_index=None,
+                state=None,
+                terminal_summary=None,
+                evidence_reference=None,
+            )
+            for key in normalized_keys
+        }
+    else:
+        statuses = {}
+    with engine.connect() as connection:
+        for start in range(0, len(normalized_keys), chunk_size):
+            chunk = normalized_keys[start : start + chunk_size]
+            for row in connection.execute(
+                _bulk_terminal_status_statement(
+                    campaign_key=normalized_campaign,
+                    work_keys=chunk,
+                    terminal_filter=terminal_filter,
+                    schema=selected_schema,
+                )
+            ).mappings():
+                decoded = _decode_bulk_work_terminal_status(row)
+                statuses[decoded.work_key] = decoded
+    return BulkTerminalStatusResult(
+        campaign_key=normalized_campaign,
+        statuses=MappingProxyType(statuses),
+    )
+
+
 def _state_counts(
     *,
     engine: Engine,
@@ -287,6 +365,171 @@ def _bulk_status_statement(
             items.c.work_key.in_([key.value for key in work_keys]),
         )
         .order_by(items.c.work_key)
+    )
+
+
+def _bulk_terminal_status_statement(
+    *,
+    campaign_key: CampaignKey,
+    work_keys: tuple[WorkKey, ...],
+    terminal_filter: TerminalSummaryFilter | None,
+    schema: StagingSchema,
+):
+    items = schema.work_items
+    executions = schema.stage_executions
+    attempts = schema.stage_attempts
+    if terminal_filter is None:
+        requested_item_ids = select(items.c.work_item_id).where(
+            items.c.campaign_key == campaign_key.value,
+            items.c.work_key.in_([key.value for key in work_keys]),
+        )
+        current = current_stage_indexes(schema, requested_item_ids)
+        return (
+            select(
+                items.c.work_key,
+                items.c.work_item_id,
+                executions.c.stage_execution_id,
+                executions.c.stage_key,
+                executions.c.stage_index,
+                executions.c.state,
+                attempts.c.terminal_summary,
+                attempts.c.evidence_reference,
+            )
+            .select_from(
+                items.join(
+                    current,
+                    current.c.work_item_id == items.c.work_item_id,
+                )
+                .join(
+                    executions,
+                    and_(
+                        executions.c.work_item_id == current.c.work_item_id,
+                        executions.c.stage_index == current.c.stage_index,
+                    ),
+                )
+                .outerjoin(
+                    attempts,
+                    and_(
+                        attempts.c.stage_execution_id
+                        == executions.c.stage_execution_id,
+                        attempts.c.attempt_number
+                        == executions.c.current_attempt,
+                    ),
+                )
+            )
+            .where(
+                items.c.campaign_key == campaign_key.value,
+                items.c.work_key.in_([key.value for key in work_keys]),
+            )
+            .order_by(items.c.work_key)
+        )
+
+    requested = (
+        values(column("work_key", Text), name="requested_work_keys")
+        .data([(key.value,) for key in work_keys])
+        .cte("requested_work_keys")
+    )
+    requested_item_ids = select(items.c.work_item_id).where(
+        items.c.campaign_key == campaign_key.value,
+        items.c.work_key.in_([key.value for key in work_keys]),
+    )
+    current = current_stage_indexes(schema, requested_item_ids)
+    return (
+        select(
+            requested.c.work_key,
+            items.c.work_item_id,
+            executions.c.stage_execution_id,
+            executions.c.stage_key,
+            executions.c.stage_index,
+            executions.c.state,
+            attempts.c.terminal_summary,
+            attempts.c.evidence_reference,
+        )
+        .select_from(
+            requested.outerjoin(
+                items,
+                and_(
+                    items.c.campaign_key == campaign_key.value,
+                    items.c.work_key == requested.c.work_key,
+                ),
+            )
+            .outerjoin(
+                current,
+                current.c.work_item_id == items.c.work_item_id,
+            )
+            .outerjoin(
+                executions,
+                and_(
+                    executions.c.work_item_id == current.c.work_item_id,
+                    executions.c.stage_index == current.c.stage_index,
+                ),
+            )
+            .outerjoin(
+                attempts,
+                and_(
+                    attempts.c.stage_execution_id
+                    == executions.c.stage_execution_id,
+                    attempts.c.attempt_number == executions.c.current_attempt,
+                ),
+            )
+        )
+        .where(
+            or_(
+                items.c.work_item_id.is_(None),
+                executions.c.stage_execution_id.is_(None),
+                terminal_summary_filter_clause(
+                    terminal_filter,
+                    schema=schema,
+                ),
+            )
+        )
+        .order_by(requested.c.work_key)
+    )
+
+
+def _decode_bulk_work_terminal_status(row) -> BulkWorkTerminalStatus:
+    work_key = WorkKey(row["work_key"])
+    if row["work_item_id"] is None:
+        return BulkWorkTerminalStatus(
+            work_key=work_key,
+            present=False,
+            work_item_id=None,
+            stage_execution_id=None,
+            current_stage_key=None,
+            current_stage_index=None,
+            state=None,
+            terminal_summary=None,
+            evidence_reference=None,
+        )
+    summary = row["terminal_summary"]
+    stage_key = row["stage_key"]
+    state = row["state"]
+    if row["stage_execution_id"] is None:
+        return BulkWorkTerminalStatus(
+            work_key=work_key,
+            present=False,
+            work_item_id=row["work_item_id"],
+            stage_execution_id=None,
+            current_stage_key=None,
+            current_stage_index=None,
+            state=None,
+            terminal_summary=None,
+            evidence_reference=None,
+        )
+    return BulkWorkTerminalStatus(
+        work_key=work_key,
+        present=True,
+        work_item_id=row["work_item_id"],
+        stage_execution_id=row["stage_execution_id"],
+        current_stage_key=StageKey(stage_key),
+        current_stage_index=row["stage_index"],
+        state=StageExecutionState(state),
+        terminal_summary=(
+            None
+            if summary is None
+            else immutable_json_mapping(cast("Mapping[str, object]", summary))
+        ),
+        evidence_reference=row["evidence_reference"],
     )
 
 

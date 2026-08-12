@@ -23,8 +23,9 @@ application boundary, but compatibility is not yet promised.
   label-specific capacity, with pause and resume controls that leave running
   work uninterrupted.
 - **[Execution and handoff](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/execution)**
-  make admitted stages DBOS-durable, record outcomes, and create the next ready
-  stage transactionally.
+  make admitted stages DBOS-durable, record outcomes—including optional partial
+  evidence on application failure—and create the next ready stage
+  transactionally.
 - **[Run completion](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/completion)**
   releases one optional durable fan-in operation after a closed run's members
   settle, without adding graph semantics to item pipelines.
@@ -32,8 +33,9 @@ application boundary, but compatibility is not yet promised.
   reconcile abandoned workflows and provide explicit retry and cancellation
   while preserving stage-attempt history.
 - **[Inspection](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/inspection)**
-  exposes campaigns, runs, work items, stage and attempt history, current state
-  counts, and bulk work status without exposing persistence rows.
+  exposes campaigns, runs, paginated run members, work items, stage and attempt
+  history with pinned terminal summaries, current state counts, and bulk work
+  status without exposing persistence rows or evidence payloads.
 - **Infra**
     - **[Shared core](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/_core)**
       owns nominal identities, immutable values, execution state, and the
@@ -243,6 +245,15 @@ class StageExecutionState(StrEnum):
 class StageHandoffMismatchError(RuntimeError): ...
 
 
+class StageApplicationFailure(Exception):
+    def __init__(
+        self,
+        message: str,
+        *,
+        evidence_reference: str | None = None,
+    ) -> None: ...
+
+
 def wrap_pipeline_workflows(
     pipeline: PipelineDefinition,
 ) -> PipelineDefinition: ...
@@ -339,7 +350,20 @@ sweep_abandoned_stages(DBOS client) -> SweepSummary
 
 Inspection provides read-only projections over stable logical identities rather
 than exposing database rows. Collection readers are bounded; direct work-item
-inspection returns its complete stage-attempt history.
+inspection returns its complete stage-attempt history. Run member listing is
+paginated by membership ordinal and reports current stage state without
+returning evidence payloads.
+
+Terminal attempt summaries use pinned wire keys (`TerminalSummaryField`,
+`TerminalSummaryProducer`) with an explicit producer tag and optional
+traceback capture on application failure. Applications may attach partial
+evidence on failure by raising `StageApplicationFailure` with an optional
+evidence reference, stored separately from success output references.
+`TerminalSummaryFilter` applies exact-match predicates on those pinned keys
+over the current attempt. `bulk_work_terminal_statuses` reads terminal facts
+for a bounded work-key set in one SELECT per chunk; filtered
+`list_run_members` paginates matching run members and includes
+`stage_execution_id` for retry eligibility.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -364,6 +388,33 @@ class WorkItemSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class RunMemberSummary:
+    member_ordinal: int
+    work_key: WorkKey
+    work_item_id: int
+    input_reference: str
+    current_stage_key: StageKey | None
+    current_stage_index: int | None
+    state: StageExecutionState | None
+    stage_execution_id: int | None = None
+    terminal_summary: Mapping[str, object] | None = None
+    evidence_reference: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BulkWorkTerminalStatus:
+    work_key: WorkKey
+    present: bool
+    work_item_id: int | None
+    stage_execution_id: int | None
+    current_stage_key: StageKey | None
+    current_stage_index: int | None
+    state: StageExecutionState | None
+    terminal_summary: Mapping[str, object] | None
+    evidence_reference: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class StageExecutionSummary:
     execution: StageExecutionRecord
     attempts: tuple[StageAttemptRecord, ...]
@@ -373,12 +424,14 @@ class StageExecutionSummary:
 inspect_campaign(campaign_key) -> CampaignSummary
 list_campaigns(cursor=None, limit=...) -> tuple[CampaignSummary, ...]
 list_runs(campaign_key, cursor=None, limit=...) -> tuple[RunSummary, ...]
+list_run_members(run_key, cursor=None, limit=..., terminal_filter=None) -> tuple[RunMemberSummary, ...]
 list_work_items(campaign_key, state=None, cursor=None, limit=...) -> tuple[WorkItemSummary, ...]
 get_work_item_stages(work_item_id) -> tuple[StageExecutionSummary, ...]
 campaign_state_counts(campaign_key) -> tuple[StateCount, ...]
 run_state_counts(run_key) -> tuple[StateCount, ...]
 bulk_run_state_counts(run_keys) -> Mapping[RunKey, tuple[StateCount, ...] | None]
 bulk_work_statuses(campaign_key, work_keys) -> BulkStatusResult
+bulk_work_terminal_statuses(campaign_key, work_keys, terminal_filter=None) -> BulkTerminalStatusResult
 ```
 
 ## Operational preconditions

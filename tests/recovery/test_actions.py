@@ -496,6 +496,7 @@ def test_cancel_terminalizes_retry_prepared_attempt_without_delegation(
             output_reference=None,
             terminal_summary={"outcome": "failed"},
             terminal_reference=None,
+            evidence_reference=None,
             next_stage_key=None,
             next_stage_index=None,
             completed_at=NOW + timedelta(seconds=1),
@@ -532,6 +533,7 @@ def test_cancel_terminalizes_retry_prepared_attempt_without_delegation(
     assert second_attempt.terminal_at == cancelled_at
     assert second_attempt.terminal_summary == {
         "outcome": "cancelled",
+        "producer": "cancellation",
         "reason": "operator_requested",
     }
     assert second_attempt.terminal_reference is None
@@ -660,6 +662,7 @@ def test_cancellation_delegates_only_an_admitted_exact_attempt(
     assert attempt is not None
     assert attempt.terminal_summary == {
         "outcome": "cancelled",
+        "producer": "cancellation",
         "reason": "operator_requested",
     }
 
@@ -675,6 +678,7 @@ def test_cancellation_delegates_only_an_admitted_exact_attempt(
             output_reference="late-output",
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="late-output",
+            evidence_reference=None,
             next_stage_key="score",
             next_stage_index=1,
             completed_at=NOW + timedelta(seconds=3),
@@ -1056,6 +1060,7 @@ def test_cancel_after_committed_handoff_cancels_the_successor(
                 output_reference="handoff-output",
                 terminal_summary={"outcome": "succeeded"},
                 terminal_reference="handoff-output",
+                evidence_reference=None,
                 next_stage_key="score",
                 next_stage_index=1,
                 completed_at=NOW + timedelta(seconds=1),

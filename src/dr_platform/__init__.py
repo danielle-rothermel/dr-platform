@@ -13,6 +13,10 @@ from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
     StageExecutionState,
 )
+from dr_platform._core.ledger.terminal_summary import (
+    TerminalSummaryField,
+    TerminalSummaryProducer,
+)
 from dr_platform.admission.controls import (
     StageControlRecord,
     pause,
@@ -27,6 +31,7 @@ from dr_platform.completion.execution import (
     RunCompletionPayload,
     inspect_run_completion,
 )
+from dr_platform.execution.failures import StageApplicationFailure
 from dr_platform.execution.handoff import (
     StageHandoffMismatchError,
     wrap_pipeline_workflows,
@@ -38,15 +43,23 @@ from dr_platform.inspection.campaigns import (
     list_campaigns,
     list_runs,
 )
+from dr_platform.inspection.run_members import (
+    RunMemberSummary,
+    list_run_members,
+)
 from dr_platform.inspection.statuses import (
     BulkStatusResult,
+    BulkTerminalStatusResult,
     BulkWorkStatus,
+    BulkWorkTerminalStatus,
     StateCount,
     bulk_run_state_counts,
     bulk_work_statuses,
+    bulk_work_terminal_statuses,
     campaign_state_counts,
     run_state_counts,
 )
+from dr_platform.inspection.terminal_filters import TerminalSummaryFilter
 from dr_platform.inspection.work_items import (
     StageExecutionSummary,
     WorkItemSummary,
@@ -106,7 +119,9 @@ from dr_platform.submission.work_items import WorkItemConflictError
 __all__ = [
     "AdmissionPayload",
     "BulkStatusResult",
+    "BulkTerminalStatusResult",
     "BulkWorkStatus",
+    "BulkWorkTerminalStatus",
     "CampaignKey",
     "CampaignSummary",
     "CancellationDisposition",
@@ -126,9 +141,11 @@ __all__ = [
     "RunCompletionPayload",
     "RunKey",
     "RunMemberInput",
+    "RunMemberSummary",
     "RunMembershipConflictError",
     "RunRegistrationDeclaration",
     "RunSummary",
+    "StageApplicationFailure",
     "StageAttemptRecord",
     "StageControlRecord",
     "StageDefinition",
@@ -144,6 +161,9 @@ __all__ = [
     "SweepProjection",
     "SweepSummary",
     "TelemetryInitializationResult",
+    "TerminalSummaryField",
+    "TerminalSummaryFilter",
+    "TerminalSummaryProducer",
     "UnwrappedPipelineError",
     "WorkCancellationResult",
     "WorkInput",
@@ -154,6 +174,7 @@ __all__ = [
     "build_platform_dbos_config",
     "bulk_run_state_counts",
     "bulk_work_statuses",
+    "bulk_work_terminal_statuses",
     "campaign_state_counts",
     "cancel_work",
     "compute_run_membership_digest",
@@ -163,6 +184,7 @@ __all__ = [
     "inspect_campaign",
     "inspect_run_completion",
     "list_campaigns",
+    "list_run_members",
     "list_runs",
     "list_work_items",
     "pause",
