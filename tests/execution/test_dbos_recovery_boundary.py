@@ -416,6 +416,7 @@ def test_same_identity_crash_recovers_to_failed_and_retry_stage(  # noqa: PLR091
     assert failed.state == StageExecutionState.FAILED.value
     assert failed.terminal_summary == {
         TerminalSummaryField.OUTCOME.value: StageExecutionState.FAILED.value,
+        TerminalSummaryField.PRODUCER.value: "abandonment",
         TerminalSummaryField.DBOS_STATUS.value: (
             "MAX_RECOVERY_ATTEMPTS_EXCEEDED"
         ),
@@ -532,7 +533,7 @@ def test_stale_app_version_pending_projects_without_body_rerun(
         ).scalar_one()
 
     assert state == StageExecutionState.FAILED.value
-    assert terminal_summary[
-        TerminalSummaryField.REASON.value
-    ] == ("stale_app_version")
+    assert terminal_summary[TerminalSummaryField.REASON.value] == (
+        "stale_app_version"
+    )
     assert calls_after_sweep == 0

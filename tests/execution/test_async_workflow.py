@@ -189,6 +189,7 @@ def _run_pipeline(  # noqa: PLR0913 -- explicit integration wiring
         engine=engine,
         registry=registry,
         batch_size=member_count,
+        sweep_cron=None,
     )
     DBOS.launch()
     DBOS.set_latest_application_version(DBOS.application_version)

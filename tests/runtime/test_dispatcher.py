@@ -233,6 +233,7 @@ def test_registration_validates_pool_size_against_checkpoint_workers() -> None:
     config = PlatformDbosConfig(
         database_url="postgresql+psycopg://user:secret@db/platform",
         system_database_url="postgresql+psycopg://user:secret@db/platform",
+        max_recovery_attempts=1,
         pool_size=5,
     )
     engine = create_engine(config.database_url)
@@ -242,6 +243,9 @@ def test_registration_validates_pool_size_against_checkpoint_workers() -> None:
                 config=config,
                 engine=engine,
                 registry=PipelineRegistry(),
+                live_dbos_identity=default_live_dbos_identity(
+                    app_version="test"
+                ),
                 batch_size=10,
                 barrier_batch_size=7,
             )

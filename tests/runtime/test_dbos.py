@@ -371,6 +371,7 @@ def test_build_platform_dbos_config_rejects_non_positive_pool_size() -> None:
     with pytest.raises(ValueError, match="pool size must be positive"):
         dbos_config.build_platform_dbos_config(
             database_url="postgresql://app-user@db.example/platform",
+            max_recovery_attempts=1,
             pool_size=0,
         )
 
@@ -378,6 +379,7 @@ def test_build_platform_dbos_config_rejects_non_positive_pool_size() -> None:
 def test_build_dbos_config_passes_pool_size_through_db_engine_kwargs() -> None:
     config = dbos_config.build_platform_dbos_config(
         database_url="postgresql://app-user@db.example/platform",
+        max_recovery_attempts=1,
         pool_size=512,
     )
     dbos = dbos_config.build_dbos_config(config, app_name="stage-worker")

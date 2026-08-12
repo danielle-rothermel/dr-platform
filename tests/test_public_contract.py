@@ -170,6 +170,7 @@ def test_root_contract_defines_submits_executes_and_inspects(
             config=platform_config,
             engine=pg_engine,
             registry=registry,
+            sweep_cron=None,
         )
         DBOS.launch()
         # DBOSClient enqueues versionless work for the latest-version worker.

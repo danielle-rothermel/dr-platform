@@ -159,7 +159,9 @@ def _launch_dbos(
         )
     )
     registration = register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(app_version="test"),
+        live_dbos_identity=default_live_dbos_identity(
+            app_version=f"handoff-{suffix}"
+        ),
         config=PlatformDbosConfig(
             database_url=database_url,
             system_database_url=database_url,
@@ -167,6 +169,7 @@ def _launch_dbos(
         ),
         engine=engine,
         registry=registry,
+        sweep_cron=None,
     )
     try:
         DBOS.launch()
@@ -904,7 +907,9 @@ def test_application_failure_can_store_evidence_reference(
         key=f"evidence-failure-{suffix}",
         stage_logic=(("execute", raises_with_evidence),),
     )
-    pipeline = wrap_pipeline_workflows(declared, clock=_utc_now)
+    pipeline = wrap_pipeline_workflows(
+        declared, clock=_utc_now, max_recovery_attempts=1
+    )
     registry = PipelineRegistry()
     registry.register(pipeline)
     _configure_controls(pg_engine, pipeline, capacity=1)
