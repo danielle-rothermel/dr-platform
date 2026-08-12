@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
-from sqlalchemy import Engine, event, text
+from sqlalchemy import Engine, event, select, text
 
 from dr_platform._core.identities import PipelineKey, StageKey
+from dr_platform._core.ledger.attempts import (
+    append_stage_attempt,
+    record_stage_attempt_terminal,
+)
+from dr_platform._core.ledger.executions import transition_stage_execution
 from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.terminal_summary import (
+    TerminalSummaryProducer,
+    build_terminal_summary,
+)
 from dr_platform.inspection.run_members import list_run_members
+from dr_platform.inspection.terminal_filters import TerminalSummaryFilter
 from dr_platform.pipeline.definitions import (
     PipelineDefinition,
     StageDefinition,
@@ -18,6 +30,62 @@ from dr_platform.submission.stream import (
     submit,
 )
 from tests.conftest import NOW, _migrate
+
+
+def _fail_member(
+    engine: Engine,
+    *,
+    work_key: str,
+    producer: TerminalSummaryProducer,
+    at,
+) -> None:
+    from dr_platform._core.ledger.schema import StagingSchema
+
+    schema = StagingSchema()
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(
+                schema.stage_executions.c.stage_execution_id,
+            )
+            .select_from(
+                schema.work_items.join(
+                    schema.stage_executions,
+                    schema.work_items.c.work_item_id
+                    == schema.stage_executions.c.work_item_id,
+                )
+            )
+            .where(schema.work_items.c.work_key == work_key)
+        ).one()
+    with engine.begin() as connection:
+        attempt = append_stage_attempt(
+            connection,
+            stage_execution_id=row.stage_execution_id,
+            created_at=at,
+            admitted_at=at,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=row.stage_execution_id,
+            new_state=StageExecutionState.ADMITTED,
+            updated_at=at,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=row.stage_execution_id,
+            new_state=StageExecutionState.FAILED,
+            updated_at=at + timedelta(seconds=1),
+        )
+        record_stage_attempt_terminal(
+            connection,
+            stage_execution_id=row.stage_execution_id,
+            attempt_number=attempt.attempt_number,
+            terminal_at=at + timedelta(seconds=1),
+            terminal_summary=build_terminal_summary(
+                outcome=StageExecutionState.FAILED.value,
+                producer=producer,
+                error_type="builtins.RuntimeError",
+            ),
+        )
 
 
 async def _workflow(value: str) -> str:
@@ -194,6 +262,156 @@ def test_list_run_members_uses_one_query_per_page(
             connection.execute(text("ANALYZE platform_stage_executions"))
             connection.commit()
         page = list_run_members("run-planner", engine=pg_engine, limit=5)
+    finally:
+        event.remove(pg_engine, "before_cursor_execute", before_cursor_execute)
+
+    assert len(page) == 5
+    assert list_queries == 1
+
+
+def test_list_run_members_filters_by_terminal_producer(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    _submit_run(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-filter",
+        work_indexes=(1, 2, 3),
+    )
+    _fail_member(
+        pg_engine,
+        work_key="work-1",
+        producer=TerminalSummaryProducer.APPLICATION_FAILURE,
+        at=NOW,
+    )
+    _fail_member(
+        pg_engine,
+        work_key="work-2",
+        producer=TerminalSummaryProducer.ABANDONMENT,
+        at=NOW + timedelta(seconds=1),
+    )
+
+    members = list_run_members(
+        "run-filter",
+        engine=pg_engine,
+        terminal_filter=TerminalSummaryFilter(
+            producer=TerminalSummaryProducer.APPLICATION_FAILURE,
+        ),
+        limit=10,
+    )
+
+    assert [member.work_key.value for member in members] == ["work-1"]
+    assert members[0].member_ordinal == 0
+    assert members[0].stage_execution_id is not None
+    assert members[0].terminal_summary is not None
+    assert (
+        members[0].terminal_summary["producer"]
+        == TerminalSummaryProducer.APPLICATION_FAILURE.value
+    )
+
+
+def test_list_run_members_filter_respects_membership_scope(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    _submit_run(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-scope-a",
+        work_indexes=(1, 2),
+    )
+    _submit_run(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-scope-b",
+        work_indexes=(2, 3),
+    )
+    _fail_member(
+        pg_engine,
+        work_key="work-1",
+        producer=TerminalSummaryProducer.APPLICATION_FAILURE,
+        at=NOW,
+    )
+    _fail_member(
+        pg_engine,
+        work_key="work-3",
+        producer=TerminalSummaryProducer.APPLICATION_FAILURE,
+        at=NOW + timedelta(seconds=1),
+    )
+
+    members = list_run_members(
+        "run-scope-a",
+        engine=pg_engine,
+        terminal_filter=TerminalSummaryFilter(
+            producer=TerminalSummaryProducer.APPLICATION_FAILURE,
+        ),
+        limit=10,
+    )
+
+    assert [member.work_key.value for member in members] == ["work-1"]
+
+
+def test_list_run_members_uses_one_query_per_filtered_page(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, pipeline = _registry()
+    _submit_run(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-filter-planner",
+        work_indexes=tuple(range(20)),
+    )
+    for index in range(10):
+        _fail_member(
+            pg_engine,
+            work_key=f"work-{index}",
+            producer=TerminalSummaryProducer.APPLICATION_FAILURE,
+            at=NOW + timedelta(seconds=index),
+        )
+
+    list_queries = 0
+
+    def before_cursor_execute(
+        _conn,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        nonlocal list_queries
+        normalized = " ".join(str(statement).split())
+        if (
+            "platform_run_memberships" in normalized
+            and "member_ordinal" in normalized
+            and "terminal_summary" in normalized
+        ):
+            list_queries += 1
+
+    event.listen(pg_engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        with pg_engine.connect() as connection:
+            connection.execute(text("ANALYZE platform_run_memberships"))
+            connection.execute(text("ANALYZE platform_work_items"))
+            connection.execute(text("ANALYZE platform_stage_executions"))
+            connection.execute(text("ANALYZE platform_stage_attempts"))
+            connection.commit()
+        page = list_run_members(
+            "run-filter-planner",
+            engine=pg_engine,
+            terminal_filter=TerminalSummaryFilter(
+                producer=TerminalSummaryProducer.APPLICATION_FAILURE,
+            ),
+            limit=5,
+        )
     finally:
         event.remove(pg_engine, "before_cursor_execute", before_cursor_execute)
 

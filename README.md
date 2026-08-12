@@ -359,6 +359,11 @@ Terminal attempt summaries use pinned wire keys (`TerminalSummaryField`,
 traceback capture on application failure. Applications may attach partial
 evidence on failure by raising `StageApplicationFailure` with an optional
 evidence reference, stored separately from success output references.
+`TerminalSummaryFilter` applies exact-match predicates on those pinned keys
+over the current attempt. `bulk_work_terminal_statuses` reads terminal facts
+for a bounded work-key set in one SELECT per chunk; filtered
+`list_run_members` paginates matching run members and includes
+`stage_execution_id` for retry eligibility.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -391,6 +396,22 @@ class RunMemberSummary:
     current_stage_key: StageKey | None
     current_stage_index: int | None
     state: StageExecutionState | None
+    stage_execution_id: int | None = None
+    terminal_summary: Mapping[str, object] | None = None
+    evidence_reference: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BulkWorkTerminalStatus:
+    work_key: WorkKey
+    present: bool
+    work_item_id: int | None
+    stage_execution_id: int | None
+    current_stage_key: StageKey | None
+    current_stage_index: int | None
+    state: StageExecutionState | None
+    terminal_summary: Mapping[str, object] | None
+    evidence_reference: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,13 +424,14 @@ class StageExecutionSummary:
 inspect_campaign(campaign_key) -> CampaignSummary
 list_campaigns(cursor=None, limit=...) -> tuple[CampaignSummary, ...]
 list_runs(campaign_key, cursor=None, limit=...) -> tuple[RunSummary, ...]
-list_run_members(run_key, cursor=None, limit=...) -> tuple[RunMemberSummary, ...]
+list_run_members(run_key, cursor=None, limit=..., terminal_filter=None) -> tuple[RunMemberSummary, ...]
 list_work_items(campaign_key, state=None, cursor=None, limit=...) -> tuple[WorkItemSummary, ...]
 get_work_item_stages(work_item_id) -> tuple[StageExecutionSummary, ...]
 campaign_state_counts(campaign_key) -> tuple[StateCount, ...]
 run_state_counts(run_key) -> tuple[StateCount, ...]
 bulk_run_state_counts(run_keys) -> Mapping[RunKey, tuple[StateCount, ...] | None]
 bulk_work_statuses(campaign_key, work_keys) -> BulkStatusResult
+bulk_work_terminal_statuses(campaign_key, work_keys, terminal_filter=None) -> BulkTerminalStatusResult
 ```
 
 ## Operational preconditions

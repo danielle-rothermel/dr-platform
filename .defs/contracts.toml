@@ -116,14 +116,16 @@ membership rather than work origin. Bulk run state counts use one aggregate \
 query per bounded input chunk and distinguish missing from present empty \
 runs. Run member inspection uses bounded paginated ``list_run_members`` at \
 platform grain—ordinal, work keys, and current stage state—without result or \
-evidence pagination."""
+evidence pagination. Bulk terminal inspection uses one SELECT per bounded \
+work-key chunk over the current attempt. Filters are exact-match on pinned \
+terminal-summary fields only; evidence payloads stay outside inspection."""
 rationale = """
 Membership is the authoritative run scope, including for reused work. A \
 paginated member listing lets operator tooling enumerate run scope without \
 coupling to application manifests, while keeping evidence payloads out of \
 platform inspection."""
 date = "2026-08-11"
-check = "uv run pytest -q tests/inspection/test_run_membership.py tests/inspection/test_run_members.py"
+check = "uv run pytest -q tests/inspection/test_run_membership.py tests/inspection/test_run_members.py tests/inspection/test_bulk_terminal_statuses.py"
 
 [[contracts]]
 title = "Run barrier releases completion once"

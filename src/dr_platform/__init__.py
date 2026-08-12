@@ -49,13 +49,17 @@ from dr_platform.inspection.run_members import (
 )
 from dr_platform.inspection.statuses import (
     BulkStatusResult,
+    BulkTerminalStatusResult,
     BulkWorkStatus,
+    BulkWorkTerminalStatus,
     StateCount,
     bulk_run_state_counts,
     bulk_work_statuses,
+    bulk_work_terminal_statuses,
     campaign_state_counts,
     run_state_counts,
 )
+from dr_platform.inspection.terminal_filters import TerminalSummaryFilter
 from dr_platform.inspection.work_items import (
     StageExecutionSummary,
     WorkItemSummary,
@@ -115,7 +119,9 @@ from dr_platform.submission.work_items import WorkItemConflictError
 __all__ = [
     "AdmissionPayload",
     "BulkStatusResult",
+    "BulkTerminalStatusResult",
     "BulkWorkStatus",
+    "BulkWorkTerminalStatus",
     "CampaignKey",
     "CampaignSummary",
     "CancellationDisposition",
@@ -156,6 +162,7 @@ __all__ = [
     "SweepSummary",
     "TelemetryInitializationResult",
     "TerminalSummaryField",
+    "TerminalSummaryFilter",
     "TerminalSummaryProducer",
     "UnwrappedPipelineError",
     "WorkCancellationResult",
@@ -167,6 +174,7 @@ __all__ = [
     "build_platform_dbos_config",
     "bulk_run_state_counts",
     "bulk_work_statuses",
+    "bulk_work_terminal_statuses",
     "campaign_state_counts",
     "cancel_work",
     "compute_run_membership_digest",

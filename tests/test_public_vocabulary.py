@@ -16,8 +16,15 @@ from dr_platform._core.ledger import (
 from dr_platform.admission import controls, runner
 from dr_platform.completion import execution as completion_execution
 from dr_platform.execution import failures, handoff
-from dr_platform.inspection import campaigns, run_members, statuses
-from dr_platform.inspection import work_items as inspection_work_items
+from dr_platform.inspection import (
+    campaigns,
+    run_members,
+    statuses,
+    terminal_filters,
+)
+from dr_platform.inspection import (
+    work_items as inspection_work_items,
+)
 from dr_platform.pipeline import definitions, registry
 from dr_platform.recovery import cancellation, retry, sweep
 from dr_platform.runtime import database, dbos, dispatcher, telemetry
@@ -27,7 +34,9 @@ from dr_platform.submission import work_items as submission_work_items
 _ROOT_BINDINGS = {
     "AdmissionPayload": runner.AdmissionPayload,
     "BulkStatusResult": statuses.BulkStatusResult,
+    "BulkTerminalStatusResult": statuses.BulkTerminalStatusResult,
     "BulkWorkStatus": statuses.BulkWorkStatus,
+    "BulkWorkTerminalStatus": statuses.BulkWorkTerminalStatus,
     "CampaignKey": identities.CampaignKey,
     "CampaignSummary": campaigns.CampaignSummary,
     "CancellationDisposition": cancellation.CancellationDisposition,
@@ -69,6 +78,7 @@ _ROOT_BINDINGS = {
     "SweepProjection": sweep.SweepProjection,
     "SweepSummary": sweep.SweepSummary,
     "TerminalSummaryField": ledger_terminal_summary.TerminalSummaryField,
+    "TerminalSummaryFilter": terminal_filters.TerminalSummaryFilter,
     "TerminalSummaryProducer": (
         ledger_terminal_summary.TerminalSummaryProducer
     ),
@@ -82,6 +92,7 @@ _ROOT_BINDINGS = {
     "WorkflowCanceller": cancellation.WorkflowCanceller,
     "build_platform_dbos_config": dbos.build_platform_dbos_config,
     "bulk_work_statuses": statuses.bulk_work_statuses,
+    "bulk_work_terminal_statuses": statuses.bulk_work_terminal_statuses,
     "bulk_run_state_counts": statuses.bulk_run_state_counts,
     "campaign_state_counts": statuses.campaign_state_counts,
     "cancel_work": cancellation.cancel_work,

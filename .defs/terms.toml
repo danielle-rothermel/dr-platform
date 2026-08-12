@@ -286,6 +286,10 @@ exported_symbols = [
   "BulkWorkStatus",
   "BulkStatusResult",
   "bulk_work_statuses",
+  "BulkWorkTerminalStatus",
+  "BulkTerminalStatusResult",
+  "bulk_work_terminal_statuses",
+  "TerminalSummaryFilter",
 ]
 is_a = ["work"]
 part_of = ["campaign"]
