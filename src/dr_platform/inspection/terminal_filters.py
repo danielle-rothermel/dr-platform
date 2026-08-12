@@ -11,7 +11,7 @@ from dr_platform._core.ledger.terminal_summary import (
 if TYPE_CHECKING:
     from sqlalchemy.sql import ColumnElement, Select
 
-    from dr_platform._core.ledger.schema import StagingSchema
+    from dr_platform._core.ledger.schema import LedgerSchema
     from dr_platform._core.ledger.states import StageExecutionState
 
 
@@ -40,7 +40,7 @@ class TerminalSummaryFilter:
 
 def terminal_summary_filter_clause(
     terminal_filter: TerminalSummaryFilter,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> ColumnElement[bool]:
     attempts = schema.stage_attempts
     executions = schema.stage_executions
@@ -79,7 +79,7 @@ def apply_terminal_summary_filter(
     statement: Select,
     *,
     terminal_filter: TerminalSummaryFilter,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> Select:
     return statement.where(
         terminal_summary_filter_clause(terminal_filter, schema=schema)

@@ -12,7 +12,7 @@ from dr_platform._core.identities import (
     RunCompletionKey,
     StageKey,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform.admission.controls import set_stage_capacity
 from dr_platform.completion.execution import (
     RunCompletionPayload,
@@ -160,7 +160,7 @@ def test_run_completion_payload_executes_through_dbos(
         DBOS.launch()
         DBOS.set_latest_application_version(DBOS.application_version)
         registration.workflow(NOW, NOW)
-        schema = StagingSchema()
+        schema = LedgerSchema()
         with pg_engine.connect() as connection:
             stage_workflow_ids = tuple(
                 connection.execute(

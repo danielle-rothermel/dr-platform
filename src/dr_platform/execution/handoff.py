@@ -16,7 +16,7 @@ from dr_platform._core.ledger.executions import (
     insert_stage_execution,
     transition_stage_execution,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.ledger.terminal_summary import (
     TerminalSummaryProducer,
@@ -298,10 +298,10 @@ def _complete_stage_in_transaction(  # noqa: PLR0912, PLR0913
     next_stage_index: int | None,
     completed_at: datetime,
     before_next_stage: Callable[[], None] | None = None,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> None:
     """``before_next_stage`` is a rollback-only test seam."""
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     source = _lock_handoff_source(
         connection,
         workflow_id=workflow_id,
@@ -399,7 +399,7 @@ def _lock_handoff_source(
     connection: Connection,
     *,
     workflow_id: str,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> RowMapping:
     # Preserve execution-then-attempt lock order to avoid sweep deadlocks.
     executions = schema.stage_executions

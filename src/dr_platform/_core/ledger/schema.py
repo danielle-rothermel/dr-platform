@@ -47,7 +47,7 @@ def _enum_check(column_name: str, enum_type: type[StrEnum]) -> str:
     return f"{column_name} IN ({values})"
 
 
-class StagingSchema:
+class LedgerSchema:
     def __init__(self, prefix: str = DEFAULT_PREFIX) -> None:
         if PREFIX_PATTERN.fullmatch(prefix) is None:
             raise ValueError(
@@ -521,7 +521,7 @@ class StagingSchema:
 
 def _declared_identifier_suffixes() -> tuple[str, ...]:
     """Every table, constraint, and index suffix the declarations generate."""
-    schema = StagingSchema(_MEASUREMENT_PREFIX)
+    schema = LedgerSchema(_MEASUREMENT_PREFIX)
     stripped = len(_MEASUREMENT_PREFIX) + 1
     identifiers: list[str] = []
     for table in schema.metadata.tables.values():

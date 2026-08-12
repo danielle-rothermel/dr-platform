@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Iterator, Sized
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from threading import Lock
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from dbos import DBOS, DBOSConfig
 from sqlalchemy import Engine, create_engine, make_url, text
 
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform.recovery.live_identity import LiveDbosIdentity
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
 from dr_platform.runtime.dbos import DEFAULT_POOL_SIZE, PlatformDbosConfig
@@ -22,7 +24,8 @@ from dr_platform.submission.stream import (
 )
 
 if TYPE_CHECKING:
-    from dbos import DBOSClient
+    from dbos import DBOSClient, EnqueueOptions
+    from sqlalchemy import Connection
 
     from dr_platform.admission.runner import AdmissionPayload
 
@@ -137,9 +140,9 @@ def pg_engine(clean_pg: str) -> Iterator[Engine]:
     engine.dispose()
 
 
-def _migrate(engine: Engine) -> StagingSchema:
+def _migrate(engine: Engine) -> LedgerSchema:
     upgrade_platform_schema(engine_dsn(engine))
-    return StagingSchema()
+    return LedgerSchema()
 
 
 def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
@@ -169,6 +172,61 @@ def submit_items(
 
 def _as_dbos_client(client: object) -> DBOSClient:
     return cast("DBOSClient", client)
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkflowStatus:
+    """The DBOS workflow-status attributes the sweeps read."""
+
+    workflow_id: str
+    status: str
+    error: Exception | None = None
+    app_version: str | None = "test"
+    executor_id: str | None = "local"
+
+
+def _payload_of(args: tuple[object, ...]) -> dict[str, object]:
+    payload = args[0]
+    assert isinstance(payload, dict)
+    return cast("dict[str, object]", payload)
+
+
+class _RecordingClient:
+    """Records enqueue options; args and payloads are recorded alongside.
+
+    ``fail_runs`` rejects enqueues whose first positional payload carries a
+    matching ``run_key``, standing in for a client that cannot reach DBOS.
+    """
+
+    def __init__(self, *, fail_runs: frozenset[str] = frozenset()) -> None:
+        self.fail_runs = fail_runs
+        self.enqueued: list[EnqueueOptions] = []
+        self.enqueued_args: list[tuple[object, ...]] = []
+        self._lock = Lock()
+
+    def enqueue_in_transaction(
+        self,
+        _connection: Connection,
+        options: EnqueueOptions,
+        *args: object,
+        **_kwargs: object,
+    ) -> object:
+        if self.fail_runs and args:
+            run_key = _payload_of(args).get("run_key")
+            if run_key in self.fail_runs:
+                raise RuntimeError(f"cannot enqueue {run_key}")
+        with self._lock:
+            self.enqueued.append(cast("EnqueueOptions", dict(options)))
+            self.enqueued_args.append(args)
+        return object()
+
+    def enqueued_payload(self, index: int) -> dict[str, object]:
+        """Read the first positional argument of one enqueue as a mapping."""
+        return _payload_of(self.enqueued_args[index])
+
+    @property
+    def enqueued_payloads(self) -> list[dict[str, object]]:
+        return [_payload_of(args) for args in self.enqueued_args]
 
 
 class _RecordingCanceller:

@@ -19,7 +19,7 @@ from dr_platform._core.identities import (
     WorkKey,
     normalize_key,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.validation import (
     validate_labels,
@@ -229,7 +229,7 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
     engine: Engine,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> SubmissionReceipt:
     """Register one complete ordered membership in bounded transactions."""
     # Phase 1 — validate and normalize; this ordering is load-bearing, since
@@ -238,7 +238,7 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
     validate_pipeline_identity(pipeline)
     if not isinstance(declaration, RunRegistrationDeclaration):
         raise TypeError("declaration must be a RunRegistrationDeclaration")
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_campaign_key = normalize_key(campaign_key, CampaignKey)
     normalized_run_key = normalize_key(run_key, RunKey)
     pipeline_definition = registry.get(
@@ -336,7 +336,7 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
 def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
     *,
     engine: Engine,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     campaign_key: CampaignKey,
     run_key: RunKey,
     first_stage_key: str,
@@ -518,7 +518,7 @@ def _validate_membership_for_closure(
     connection: Connection,
     *,
     run: PipelineRunRecord,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> tuple[str, int, int]:
     memberships = schema.run_memberships
     work_items = schema.work_items

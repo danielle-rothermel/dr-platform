@@ -15,7 +15,7 @@ from dr_platform._core.ledger.executions import (
     StageExecutionRecord,
     transition_stage_execution,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 
 if TYPE_CHECKING:
@@ -36,10 +36,10 @@ def retry_stage(
     *,
     engine: Engine,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageRetryResult:
     """Only FAILED stages may prepare a new attempt for later admission."""
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     with engine.begin() as connection:
         table = selected_schema.stage_executions
         row = (

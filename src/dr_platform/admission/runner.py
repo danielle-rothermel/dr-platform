@@ -41,7 +41,7 @@ from dr_platform._core.ledger.attempts import (
     mark_stage_attempt_admitted,
 )
 from dr_platform._core.ledger.executions import transition_stage_execution
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.validation import (
     validate_non_empty_string,
@@ -346,7 +346,7 @@ def run_admission_pass(  # noqa: PLR0913 -- explicit admission dependencies
     registry: PipelineRegistry,
     batch_size: int = DEFAULT_ADMISSION_BATCH_SIZE,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> AdmissionSummary:
     """Own one transaction and admit at most ``batch_size`` candidates.
 
@@ -356,7 +356,7 @@ def run_admission_pass(  # noqa: PLR0913 -- explicit admission dependencies
     admissions.
     """
     validate_positive_integer(batch_size, label="admission batch size")
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     with engine.begin() as connection:
         return _admit_in_transaction(
             connection,
@@ -375,7 +375,7 @@ def _admit_in_transaction(  # noqa: PLR0912, PLR0913 -- pass evaluation loop
     registry: PipelineRegistry,
     batch_size: int,
     clock: Callable[[], datetime],
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> AdmissionSummary:
     tally = _PassTally()
     admitted_at = clock()
@@ -456,7 +456,7 @@ def _admit_in_transaction(  # noqa: PLR0912, PLR0913 -- pass evaluation loop
 def _lock_page(  # noqa: PLR0913 -- explicit paging predicates
     connection: Connection,
     *,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     limit: int,
     after: tuple[int, int] | None,
     full_control_ids: set[int],
@@ -535,7 +535,7 @@ def _admit_candidate(  # noqa: PLR0913 -- explicit admission facts
     client: DBOSClient,
     registry: PipelineRegistry,
     admitted_at: datetime,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> None:
     stage = _registered_stage(candidate, registry=registry)
     attempt = _attempt_for_admission(
@@ -579,7 +579,7 @@ def _attempt_for_admission(
     *,
     stage_execution_id: int,
     admitted_at: datetime,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> StageAttemptRecord:
     executions = schema.stage_executions
     current_attempt = connection.execute(
@@ -615,7 +615,7 @@ def _attempt_for_admission(
 def _lock_candidates(  # noqa: PLR0913 -- explicit paging predicates
     connection: Connection,
     *,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     limit: int,
     after: tuple[int, int] | None,
     full_control_ids: set[int],
@@ -733,7 +733,7 @@ def _unconfigured_identities(
 def _lock_controls(
     connection: Connection,
     *,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     identities: set[_StageIdentity],
 ) -> tuple[_Control, ...]:
     table = schema.stage_controls
@@ -763,7 +763,7 @@ def _lock_controls(
 def _load_occupancy(
     connection: Connection,
     *,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     control_ids: tuple[int, ...],
 ) -> dict[int, int]:
     controls = schema.stage_controls

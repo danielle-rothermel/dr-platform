@@ -8,10 +8,11 @@ from dr_platform._core.identities import (
 )
 from dr_platform._core.ledger.attempts import StageAttemptRecord
 from dr_platform._core.ledger.executions import StageExecutionRecord
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
     StageExecutionState,
+    StateCount,
 )
 from dr_platform._core.ledger.terminal_summary import (
     TerminalSummaryField,
@@ -52,7 +53,6 @@ from dr_platform.inspection.statuses import (
     BulkTerminalStatusResult,
     BulkWorkStatus,
     BulkWorkTerminalStatus,
-    StateCount,
     bulk_run_state_counts,
     bulk_work_statuses,
     bulk_work_terminal_statuses,
@@ -133,6 +133,7 @@ __all__ = [
     "CampaignSummary",
     "CancellationDisposition",
     "DispatcherRegistration",
+    "LedgerSchema",
     "LiveDbosIdentity",
     "PipelineConflictError",
     "PipelineDefinition",
@@ -166,7 +167,6 @@ __all__ = [
     "StageHandoffMismatchError",
     "StageKey",
     "StageRetryResult",
-    "StagingSchema",
     "StateCount",
     "SubmissionReceipt",
     "SweepProjection",

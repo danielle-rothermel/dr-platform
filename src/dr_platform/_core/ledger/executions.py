@@ -7,7 +7,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from dr_platform._core.identities import StageKey, normalize_key
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.validation import (
     validate_nonnegative_integer,
@@ -70,9 +70,9 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
     stage_key: StageKey | str,
     stage_index: int,
     created_at: datetime,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageExecutionRecord:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_stage_key = normalize_key(stage_key, StageKey)
     validate_positive_integer(work_item_id, label="work item id")
     validate_nonnegative_integer(stage_index, label="stage index")
@@ -140,10 +140,10 @@ def transition_stage_execution(  # noqa: PLR0913 -- explicit transition facts
     new_state: StageExecutionState,
     updated_at: datetime,
     output_reference: str | object = _OUTPUT_REFERENCE_UNSET,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageExecutionRecord:
     """Only SUCCEEDED accepts an output reference; all others preserve it."""
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     if not isinstance(new_state, StageExecutionState):
         raise TypeError("new state must be a StageExecutionState")
     if new_state is StageExecutionState.SUCCEEDED:
@@ -199,9 +199,9 @@ def get_stage_execution(
     connection: Connection,
     *,
     stage_execution_id: int,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageExecutionRecord | None:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     table = selected_schema.stage_executions
     row = (
         connection.execute(
@@ -220,9 +220,9 @@ def _get_stage_execution_for_work(
     *,
     work_item_id: int,
     stage_key: StageKey | str,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageExecutionRecord | None:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_stage_key = normalize_key(stage_key, StageKey)
     table = selected_schema.stage_executions
     row = (

@@ -45,7 +45,7 @@ from dr_platform._core.ledger.executions import (
 from dr_platform._core.ledger.schema import (
     LONGEST_TABLE_SUFFIX,
     MAX_PREFIX_BYTES,
-    StagingSchema,
+    LedgerSchema,
 )
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import upsert_stage_control
@@ -61,7 +61,7 @@ from dr_platform.submission.runs import (
 from tests.conftest import NOW, engine_dsn
 from tests.core.test_evidence import SAMPLE_EVIDENCE_REFERENCE
 
-STAGING_TABLE_SUFFIXES = (
+LEDGER_TABLE_SUFFIXES = (
     "pipeline_runs",
     "run_barrier_cursor",
     "run_memberships",
@@ -72,7 +72,7 @@ STAGING_TABLE_SUFFIXES = (
     "stage_attempts",
     "stage_controls",
 )
-STAGING_TABLES = {f"platform_{suffix}" for suffix in STAGING_TABLE_SUFFIXES}
+LEDGER_TABLES = {f"platform_{suffix}" for suffix in LEDGER_TABLE_SUFFIXES}
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,7 +269,7 @@ def _schema_inventory(
             table=f"{prefix}_{suffix}",
             prefix=prefix,
         )
-        for suffix in STAGING_TABLE_SUFFIXES
+        for suffix in LEDGER_TABLE_SUFFIXES
     }
 
 
@@ -279,7 +279,7 @@ def _trigger_inventory(
     prefix: str,
 ) -> frozenset[_TriggerInventory]:
     scoped_tables = tuple(
-        f"{prefix}_{suffix}" for suffix in STAGING_TABLE_SUFFIXES
+        f"{prefix}_{suffix}" for suffix in LEDGER_TABLE_SUFFIXES
     )
     with engine.connect() as connection:
         rows = connection.execute(
@@ -345,7 +345,7 @@ def _create_stage_execution(
         expected_member_count=0,
         created_at=NOW,
     )
-    work_items = StagingSchema().work_items
+    work_items = LedgerSchema().work_items
     work_item_id = connection.execute(
         work_items.insert()
         .values(
@@ -411,7 +411,7 @@ def test_fresh_baseline_creates_only_the_staged_work_schema(
         ).scalar_one()
 
     assert installed_revision == PLATFORM_HEAD_REVISION
-    assert tables == STAGING_TABLES | {"platform_platform_alembic_version"}
+    assert tables == LEDGER_TABLES | {"platform_platform_alembic_version"}
     with pg_engine.connect() as connection:
         dr_store_installed = connection.execute(
             text("SELECT to_regnamespace('dr_store') IS NOT NULL")
@@ -472,7 +472,7 @@ def test_custom_prefix_upgrade_matches_runtime_names_and_is_idempotent(
     pg_engine: Engine,
 ) -> None:
     prefix = "tenant"
-    schema = StagingSchema(prefix)
+    schema = LedgerSchema(prefix)
 
     upgrade_platform_schema(engine_dsn(pg_engine), prefix=prefix)
 
@@ -520,7 +520,7 @@ def test_migration_and_runtime_schema_inventories_match(
         engine_dsn(pg_engine),
         prefix=migrated_prefix,
     )
-    StagingSchema(runtime_prefix).metadata.create_all(pg_engine)
+    LedgerSchema(runtime_prefix).metadata.create_all(pg_engine)
 
     assert _schema_inventory(
         pg_engine,
@@ -588,25 +588,25 @@ def test_upgrade_rejects_conflicting_table_without_destroying_data(
         )
 
 
-def test_staging_schema_longest_table_suffix_is_pinned() -> None:
+def test_ledger_schema_longest_table_suffix_is_pinned() -> None:
     assert LONGEST_TABLE_SUFFIX == "ix_pipeline_runs_completion_candidates"
 
 
-def test_staging_schema_rejects_overlong_prefix() -> None:
+def test_ledger_schema_rejects_overlong_prefix() -> None:
     with pytest.raises(
         ValueError,
         match=f"maximum is {MAX_PREFIX_BYTES} ASCII bytes",
     ):
-        StagingSchema("x" * (MAX_PREFIX_BYTES + 1))
+        LedgerSchema("x" * (MAX_PREFIX_BYTES + 1))
 
 
-def test_staging_schema_accepts_max_length_prefix() -> None:
-    StagingSchema("x" * MAX_PREFIX_BYTES)
+def test_ledger_schema_accepts_max_length_prefix() -> None:
+    LedgerSchema("x" * MAX_PREFIX_BYTES)
 
 
 def test_campaign_work_identity_is_unique(pg_engine: Engine) -> None:
     _migrate(pg_engine)
-    schema = StagingSchema()
+    schema = LedgerSchema()
     with pg_engine.begin() as connection:
         connection.execute(
             schema.pipeline_runs.insert().values(
@@ -701,7 +701,7 @@ def test_pipeline_run_provenance_rejects_direct_updates(
     changed_value: object,
 ) -> None:
     _migrate(pg_engine)
-    schema = StagingSchema()
+    schema = LedgerSchema()
     with pg_engine.begin() as connection:
         insert_pipeline_run(
             connection,
@@ -731,7 +731,7 @@ def test_pipeline_run_allows_one_registration_closure_update(
     pg_engine: Engine,
 ) -> None:
     _migrate(pg_engine)
-    schema = StagingSchema()
+    schema = LedgerSchema()
     completed_at = NOW + timedelta(seconds=1)
     with pg_engine.begin() as connection:
         insert_pipeline_run(
@@ -1004,7 +1004,7 @@ def test_output_reference_is_required_only_for_success_and_preserved(
     pg_engine: Engine,
 ) -> None:
     _migrate(pg_engine)
-    schema = StagingSchema()
+    schema = LedgerSchema()
     with pg_engine.begin() as connection:
         insert_pipeline_run(
             connection,

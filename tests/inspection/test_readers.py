@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from dbos import EnqueueOptions
 from sqlalchemy import Engine, event, func, select
 
 from dr_platform._core.identities import PipelineKey, StageKey, WorkKey
@@ -17,10 +16,8 @@ from dr_platform._core.ledger.executions import (
     insert_stage_execution,
     transition_stage_execution,
 )
-from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.states import StageExecutionState, StateCount
 from dr_platform.admission.controls import (
-    read_controls,
-    set_selector_capacity,
     set_stage_capacity,
 )
 from dr_platform.admission.runner import run_admission_pass
@@ -31,7 +28,6 @@ from dr_platform.inspection.campaigns import (
     list_runs,
 )
 from dr_platform.inspection.statuses import (
-    StateCount,
     bulk_work_statuses,
     campaign_state_counts,
     run_state_counts,
@@ -53,13 +49,14 @@ from tests.conftest import (
     _args_for,
     _as_dbos_client,
     _migrate,
+    _RecordingClient,
     submit_items,
 )
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection
 
-    from dr_platform._core.ledger.schema import StagingSchema
+    from dr_platform._core.ledger.schema import LedgerSchema
 
 
 async def _workflow(input_reference: str) -> str:
@@ -150,24 +147,9 @@ def _seed_reader_data(engine: Engine) -> None:
     )
 
 
-class _RecordingClient:
-    def __init__(self) -> None:
-        self.enqueued: list[EnqueueOptions] = []
-
-    def enqueue_in_transaction(
-        self,
-        _connection: Connection,
-        options: EnqueueOptions,
-        *_args: object,
-        **_kwargs: object,
-    ) -> object:
-        self.enqueued.append(cast("EnqueueOptions", dict(options)))
-        return object()
-
-
 def _execution_by_work_key(
     engine: Engine,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> dict[str, tuple[int, int]]:
     with engine.connect() as connection:
         rows = connection.execute(
@@ -311,80 +293,6 @@ def test_get_work_item_stages_returns_stage_history(
 
     assert len(stages) == 1
     assert stages[0].attempts == ()
-
-
-def test_read_controls_returns_stage_capacity(
-    pg_engine: Engine,
-) -> None:
-    _migrate(pg_engine)
-    set_stage_capacity(
-        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
-        stage_key="execute",
-        capacity=4,
-        engine=pg_engine,
-        clock=lambda: NOW,
-    )
-
-    controls = read_controls(
-        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
-        stage_key="execute",
-        engine=pg_engine,
-    )
-
-    assert controls[0].capacity == 4
-
-
-def test_read_controls_filters_selectors_by_work_item_labels(
-    pg_engine: Engine,
-) -> None:
-    _migrate(pg_engine)
-    pipeline = PipelineIdentity(PipelineKey("evaluation"), 1)
-    set_stage_capacity(
-        pipeline=pipeline,
-        stage_key="execute",
-        capacity=8,
-        engine=pg_engine,
-        clock=lambda: NOW,
-    )
-    set_selector_capacity(
-        pipeline=pipeline,
-        stage_key="execute",
-        labels={"kind": "sample"},
-        capacity=4,
-        engine=pg_engine,
-        clock=lambda: NOW,
-    )
-    set_selector_capacity(
-        pipeline=pipeline,
-        stage_key="execute",
-        labels={"kind": "sample", "cohort": "blue"},
-        capacity=2,
-        engine=pg_engine,
-        clock=lambda: NOW,
-    )
-    set_selector_capacity(
-        pipeline=pipeline,
-        stage_key="execute",
-        labels={"kind": "other"},
-        capacity=1,
-        engine=pg_engine,
-        clock=lambda: NOW,
-    )
-
-    controls = read_controls(
-        pipeline=pipeline,
-        stage_key="execute",
-        labels={"kind": "sample", "cohort": "blue", "split": "validation"},
-        engine=pg_engine,
-    )
-
-    assert [
-        (dict(control.selector), control.capacity) for control in controls
-    ] == [
-        ({}, 8),
-        ({"kind": "sample"}, 4),
-        ({"kind": "sample", "cohort": "blue"}, 2),
-    ]
 
 
 def test_state_counts_report_current_items_for_campaign_and_run(

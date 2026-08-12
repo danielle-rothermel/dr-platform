@@ -32,7 +32,7 @@ from tests.core.test_evidence import SAMPLE_EVIDENCE_REFERENCE
 if TYPE_CHECKING:
     from sqlalchemy import Connection
 
-    from dr_platform._core.ledger.schema import StagingSchema
+    from dr_platform._core.ledger.schema import LedgerSchema
 
 
 async def _workflow(input_reference: str) -> str:
@@ -60,7 +60,7 @@ def _registry() -> PipelineRegistry:
 
 def _execution_by_work_key(
     engine: Engine,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> dict[str, tuple[int, int]]:
     with engine.connect() as connection:
         rows = connection.execute(
@@ -122,7 +122,7 @@ def _fail_with_terminal_summary(  # noqa: PLR0913 -- explicit seeded facts
     )
 
 
-def _seed_terminal_members(engine: Engine, schema: StagingSchema) -> None:
+def _seed_terminal_members(engine: Engine, schema: LedgerSchema) -> None:
     registry = _registry()
     submit_items(
         campaign_key="campaign-terminal",

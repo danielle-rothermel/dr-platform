@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
 
     from dr_platform._core.identities import CampaignKey, RunKey
-    from dr_platform._core.ledger.schema import StagingSchema
+    from dr_platform._core.ledger.schema import LedgerSchema
 
 DEFAULT_INSPECTION_LIMIT = 10_000
 
@@ -19,7 +19,7 @@ def require_campaign(
     connection: Connection,
     *,
     campaign_key: CampaignKey,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> None:
     exists = connection.execute(
         select(schema.pipeline_runs.c.campaign_key).where(
@@ -34,7 +34,7 @@ def require_run(
     connection: Connection,
     *,
     run_key: RunKey,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> None:
     exists = connection.execute(
         select(schema.pipeline_runs.c.run_key).where(
@@ -49,7 +49,7 @@ def validate_campaign_cursor(
     connection: Connection,
     *,
     cursor: CampaignKey,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> None:
     exists = connection.execute(
         select(schema.pipeline_runs.c.campaign_key).where(
@@ -65,7 +65,7 @@ def validate_work_item_cursor(
     *,
     cursor: int,
     campaign_key: CampaignKey,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> None:
     validate_work_item_id(cursor)
     exists = connection.execute(
@@ -96,7 +96,7 @@ def validate_run_member_cursor(
     *,
     cursor: int,
     run_key: RunKey,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> None:
     if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
         raise ValueError("run member cursor must be a non-negative integer")

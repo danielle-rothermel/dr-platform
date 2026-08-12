@@ -3,10 +3,9 @@ from __future__ import annotations
 from sqlalchemy import Engine, event, text, update
 
 from dr_platform._core.identities import PipelineKey, RunKey, StageKey
-from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.states import StageExecutionState, StateCount
 from dr_platform.inspection.campaigns import _run_summary_statement, list_runs
 from dr_platform.inspection.statuses import (
-    StateCount,
     bulk_run_state_counts,
     run_state_counts,
 )

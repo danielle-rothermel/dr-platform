@@ -31,8 +31,11 @@ from dr_platform._core.ledger.completion_attempts import (
     get_run_completion_attempt_by_workflow_id,
     record_run_completion_attempt_terminal,
 )
-from dr_platform._core.ledger.schema import StagingSchema
-from dr_platform._core.ledger.states import RunCompletionExecutionState
+from dr_platform._core.ledger.schema import LedgerSchema
+from dr_platform._core.ledger.states import (
+    RunCompletionExecutionState,
+    StateCount,
+)
 from dr_platform._core.ledger.terminal_summary import (
     build_run_completion_attempt_summary,
     build_run_completion_error_summary,
@@ -43,7 +46,6 @@ from dr_platform.execution._checkpoint import (
     _require_ledger_checkpoint_executor,
 )
 from dr_platform.execution._recovery_cap import mark_wrapped_recovery_cap
-from dr_platform.inspection.statuses import StateCount  # noqa: TC001
 from dr_platform.pipeline.definitions import RunCompletionDefinition
 
 if TYPE_CHECKING:
@@ -265,9 +267,9 @@ def record_run_completion_outcome(  # noqa: PLR0913
     output_reference: str | None,
     error_summary: Mapping[str, object] | None,
     terminal_at: datetime,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> RunCompletionExecutionRecord:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     attempt = get_run_completion_attempt_by_workflow_id(
         connection,
         workflow_id=workflow_id,
@@ -369,9 +371,9 @@ def inspect_run_completion(
     run_key: RunKey | str,
     *,
     engine: Engine,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> RunCompletionExecutionRecord:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_run_key = normalize_key(run_key, RunKey)
     table = selected_schema.run_completion_executions
     with engine.connect() as connection:

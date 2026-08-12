@@ -18,7 +18,7 @@ from dr_platform._core.ledger.attempts import (
     list_stage_attempts,
 )
 from dr_platform._core.ledger.executions import StageExecutionRecord
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.inspection._validation import (
     DEFAULT_INSPECTION_LIMIT,
@@ -62,12 +62,12 @@ def list_work_items(  # noqa: PLR0913 -- explicit reader filters
     state: StageExecutionState | None = None,
     cursor: int | None = None,
     limit: int = DEFAULT_INSPECTION_LIMIT,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> tuple[WorkItemSummary, ...]:
     validate_limit(limit)
     if state is not None and not isinstance(state, StageExecutionState):
         raise TypeError("state must be a StageExecutionState")
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_campaign = normalize_key(campaign_key, CampaignKey)
     items = selected_schema.work_items
     executions = selected_schema.stage_executions
@@ -129,10 +129,10 @@ def get_work_item_stages(
     work_item_id: int,
     *,
     engine: Engine,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> tuple[StageExecutionSummary, ...]:
     validate_work_item_id(work_item_id)
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     table = selected_schema.stage_executions
     with engine.connect() as connection:
         rows = connection.execute(

@@ -26,21 +26,14 @@ from dr_platform._core.ledger.attempts import (
 from dr_platform._core.ledger.executions import transition_stage_execution
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import (
-    list_stage_controls,
     upsert_stage_control,
 )
 from dr_platform.admission.runner import (
     AdmissionPayload,
     AdmissionSummary,
-    StageAdmissionCount,
     StageIdentityRecord,
-    _Admit,
-    _Candidate,
     _Control,
-    _evaluate_candidate,
     _lock_controls,
-    _PassTally,
-    _SkipFull,
     _StageIdentity,
     run_admission_pass,
 )
@@ -57,17 +50,18 @@ from tests.conftest import (
     _args_for,
     _as_dbos_client,
     _migrate,
+    _RecordingClient,
     dbos_config,
     initialize_dbos_schema,
     submit_items,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from sqlalchemy import Connection
 
-    from dr_platform._core.ledger.schema import StagingSchema
+    from dr_platform._core.ledger.schema import LedgerSchema
 
 _DEFAULT_STAGE_IDENTITY = _StageIdentity("evaluation", 1, "execute")
 
@@ -226,7 +220,7 @@ def _pipeline_control(
 
 def _pipeline_states(
     engine: Engine,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> list[tuple[str, str]]:
     with engine.connect() as connection:
         return list(
@@ -252,21 +246,6 @@ def _pipeline_states(
                 )
             ).tuples()
         )
-
-
-class _RecordingClient:
-    def __init__(self) -> None:
-        self.enqueued: list[tuple[EnqueueOptions, tuple[object, ...]]] = []
-
-    def enqueue_in_transaction(
-        self,
-        _connection: Connection,
-        options: EnqueueOptions,
-        *args: object,
-        **_kwargs: object,
-    ) -> object:
-        self.enqueued.append((cast("EnqueueOptions", dict(options)), args))
-        return object()
 
 
 class _EnqueueThenFail:
@@ -314,7 +293,7 @@ class _EnqueueOnceThenFail:
 
 
 def _execution_states(
-    engine: Engine, schema: StagingSchema
+    engine: Engine, schema: LedgerSchema
 ) -> list[tuple[int, str, int]]:
     with engine.connect() as connection:
         return list(
@@ -336,6 +315,36 @@ def _launch_dbos_schema(database_url: str) -> None:
             application_version="staging-admission-v1",
         )
     )
+
+
+def _submit_two_stage_backlog(
+    engine: Engine,
+    registry: PipelineRegistry,
+) -> None:
+    for suffix in ("a", "b"):
+        submit_items(
+            campaign_key="campaign-two-stage",
+            run_key=f"run-{suffix}",
+            pipeline=PipelineIdentity(PipelineKey(f"pipeline-{suffix}"), 1),
+            execution_config_reference=f"config:{suffix}",
+            items=(
+                WorkInput(
+                    work_key=f"work-{suffix}",
+                    input_reference=f"input-{suffix}",
+                    labels={},
+                ),
+            ),
+            registry=registry,
+            engine=engine,
+            clock=lambda: NOW,
+        )
+
+
+def _states_by_pipeline(
+    engine: Engine,
+    schema: LedgerSchema,
+) -> dict[str, str]:
+    return dict(_pipeline_states(engine, schema))
 
 
 def test_stage_capacity_uses_stable_rank_and_terminal_releases_slot(
@@ -463,7 +472,7 @@ def test_paused_stage_cannot_starve_higher_rank_unpaused_stage(
     )
 
     assert summary.admitted_total == 1
-    assert client.enqueued[0][0]["queue_name"] == "queue-b"
+    assert client.enqueued[0]["queue_name"] == "queue-b"
     assert _pipeline_states(pg_engine, schema) == (
         [("pipeline-a", StageExecutionState.READY.value)] * 5
         + [("pipeline-b", StageExecutionState.ADMITTED.value)]
@@ -500,7 +509,7 @@ def test_capacity_full_stage_cannot_starve_higher_rank_stage_with_room(
 
     assert summary.admitted_total == 1
     assert summary.skipped_for_capacity == 1
-    assert client.enqueued[0][0]["queue_name"] == "queue-b"
+    assert client.enqueued[0]["queue_name"] == "queue-b"
     assert _pipeline_states(pg_engine, schema) == (
         [("pipeline-a", StageExecutionState.READY.value)] * 5
         + [("pipeline-b", StageExecutionState.ADMITTED.value)]
@@ -545,7 +554,7 @@ def test_admission_enqueues_only_the_serialized_platform_payload(
 
     assert observed == []
     assert len(client.enqueued) == 1
-    payload = AdmissionPayload.model_validate(client.enqueued[0][1][0])
+    payload = AdmissionPayload.model_validate(client.enqueued_args[0][0])
     assert payload == AdmissionPayload(
         campaign_key=CampaignKey("campaign-1"),
         work_key=WorkKey("work-0"),
@@ -570,7 +579,7 @@ def test_admission_enqueues_only_the_serialized_platform_payload(
         "attempt_number",
     }
     assert "run_key" not in wire
-    assert client.enqueued[0][0]["queue_name"] == "execute-queue"
+    assert client.enqueued[0]["queue_name"] == "execute-queue"
 
 
 def test_pause_keeps_matching_ready_until_resume(
@@ -659,7 +668,7 @@ def test_selector_paused_after_candidate_selection_skips_admission(
     def pause_before_control_lock(
         connection: Connection,
         *,
-        schema: StagingSchema,
+        schema: LedgerSchema,
         identities: set[_StageIdentity],
     ) -> tuple[_Control, ...]:
         nonlocal lock_calls
@@ -889,243 +898,6 @@ def test_attempt_workflow_id_is_unique(
         append_both()
 
 
-def test_empty_selector_is_default_and_upserts_as_one_control(
-    pg_engine: Engine,
-) -> None:
-    _migrate(pg_engine)
-    with pg_engine.begin() as connection:
-        original = upsert_stage_control(
-            connection,
-            pipeline_key="evaluation",
-            pipeline_version=1,
-            stage_key="execute",
-            selector=None,
-            capacity=1,
-            paused=False,
-            updated_at=NOW,
-        )
-        replaced = upsert_stage_control(
-            connection,
-            pipeline_key="evaluation",
-            pipeline_version=1,
-            stage_key="execute",
-            selector={},
-            capacity=3,
-            paused=True,
-            updated_at=NOW + timedelta(seconds=1),
-        )
-        selected = upsert_stage_control(
-            connection,
-            pipeline_key="evaluation",
-            pipeline_version=1,
-            stage_key="execute",
-            selector={"cohort": "blue"},
-            capacity=1,
-            paused=False,
-            updated_at=NOW,
-        )
-        red_controls = list_stage_controls(
-            connection,
-            pipeline_key="evaluation",
-            pipeline_version=1,
-            stage_key="execute",
-            labels={"cohort": "red"},
-        )
-        blue_controls = list_stage_controls(
-            connection,
-            pipeline_key="evaluation",
-            pipeline_version=1,
-            stage_key="execute",
-            labels={"cohort": "blue"},
-        )
-
-    assert replaced.stage_control_id == original.stage_control_id
-    assert (
-        replaced.selector,
-        replaced.capacity,
-        replaced.paused,
-    ) == ({}, 3, True)
-    assert red_controls == (replaced,)
-    assert blue_controls == (replaced, selected)
-
-
-def _candidate(
-    *,
-    labels: Mapping[str, str],
-    stage_execution_id: int = 1,
-    rank: int = 1,
-    stage_identity: _StageIdentity = _DEFAULT_STAGE_IDENTITY,
-) -> _Candidate:
-    return _Candidate(
-        stage_execution_id=stage_execution_id,
-        rank=rank,
-        stage_index=0,
-        campaign_key="campaign-1",
-        work_key="work-0",
-        origin_run_key="run-1",
-        input_reference="input:0",
-        labels=labels,
-        pipeline_key=stage_identity[0],
-        pipeline_version=stage_identity[1],
-        stage_key=stage_identity[2],
-    )
-
-
-def _make_control(
-    *,
-    control_id: int,
-    selector: Mapping[str, str],
-    capacity: int,
-    paused: bool = False,
-    stage_identity: _StageIdentity = _DEFAULT_STAGE_IDENTITY,
-) -> _Control:
-    return _Control(
-        control_id=control_id,
-        stage_identity=stage_identity,
-        selector=selector,
-        capacity=capacity,
-        paused=paused,
-    )
-
-
-def test_evaluate_candidate_occupancy_at_capacity_is_full() -> None:
-    candidate = _candidate(labels={})
-    control = _make_control(control_id=1, selector={}, capacity=2)
-
-    result = _evaluate_candidate(
-        candidate,
-        controls=(control,),
-        occupancy={1: 2},
-    )
-
-    assert result == _SkipFull(full_control_ids=frozenset({1}))
-
-
-def test_evaluate_candidate_occupancy_below_capacity_admits() -> None:
-    candidate = _candidate(labels={})
-    control = _make_control(control_id=1, selector={}, capacity=2)
-
-    result = _evaluate_candidate(
-        candidate,
-        controls=(control,),
-        occupancy={1: 1},
-    )
-
-    assert result == _Admit(matching=(control,))
-
-
-def test_evaluate_candidate_empty_selector_matches_any_labels() -> None:
-    candidate = _candidate(labels={"cohort": "red", "tier": "gold"})
-    control = _make_control(control_id=1, selector={}, capacity=3)
-
-    result = _evaluate_candidate(
-        candidate,
-        controls=(control,),
-        occupancy={1: 0},
-    )
-
-    assert result == _Admit(matching=(control,))
-
-
-def test_evaluate_candidate_reports_only_the_full_matching_control() -> None:
-    candidate = _candidate(labels={"cohort": "blue"})
-    default = _make_control(control_id=1, selector={}, capacity=5)
-    selective = _make_control(
-        control_id=2,
-        selector={"cohort": "blue"},
-        capacity=1,
-    )
-
-    result = _evaluate_candidate(
-        candidate,
-        controls=(default, selective),
-        occupancy={1: 0, 2: 1},
-    )
-
-    assert result == _SkipFull(full_control_ids=frozenset({2}))
-
-
-def test_evaluate_candidate_full_but_non_matching_control_does_not_block() -> (
-    None
-):
-    candidate = _candidate(labels={"cohort": "red"})
-    default = _make_control(control_id=1, selector={}, capacity=5)
-    other = _make_control(
-        control_id=2,
-        selector={"cohort": "blue"},
-        capacity=1,
-    )
-
-    result = _evaluate_candidate(
-        candidate,
-        controls=(default, other),
-        occupancy={1: 0, 2: 1},
-    )
-
-    assert result == _Admit(matching=(default,))
-
-
-def test_pass_tally_to_summary_sorts_and_converts_stage_keys() -> None:
-    tally = _PassTally()
-    tally.record_admitted(_StageIdentity("evaluation", 1, "zeta"))
-    tally.record_admitted(_StageIdentity("evaluation", 1, "alpha"))
-    tally.skipped_for_capacity += 1
-    tally.skipped_for_pause += 1
-
-    summary = tally.to_summary()
-
-    assert summary.skipped_for_capacity == 1
-    assert summary.skipped_for_pause == 1
-    assert summary.admitted_counts == (
-        StageAdmissionCount(
-            pipeline_key="evaluation",
-            pipeline_version=1,
-            stage_key=StageKey("alpha"),
-            count=1,
-        ),
-        StageAdmissionCount(
-            pipeline_key="evaluation",
-            pipeline_version=1,
-            stage_key=StageKey("zeta"),
-            count=1,
-        ),
-    )
-    assert all(
-        isinstance(item.stage_key, StageKey)
-        for item in summary.admitted_counts
-    )
-
-
-def _submit_two_stage_backlog(
-    engine: Engine,
-    registry: PipelineRegistry,
-) -> None:
-    for suffix in ("a", "b"):
-        submit_items(
-            campaign_key="campaign-two-stage",
-            run_key=f"run-{suffix}",
-            pipeline=PipelineIdentity(PipelineKey(f"pipeline-{suffix}"), 1),
-            execution_config_reference=f"config:{suffix}",
-            items=(
-                WorkInput(
-                    work_key=f"work-{suffix}",
-                    input_reference=f"input-{suffix}",
-                    labels={},
-                ),
-            ),
-            registry=registry,
-            engine=engine,
-            clock=lambda: NOW,
-        )
-
-
-def _states_by_pipeline(
-    engine: Engine,
-    schema: StagingSchema,
-) -> dict[str, str]:
-    return dict(_pipeline_states(engine, schema))
-
-
 def test_unconfigured_stage_is_skipped_and_reported_then_admitted(
     pg_engine: Engine,
 ) -> None:
@@ -1143,7 +915,7 @@ def test_unconfigured_stage_is_skipped_and_reported_then_admitted(
     )
 
     assert first.admitted_total == 1
-    assert client.enqueued[0][0]["queue_name"] == "queue-a"
+    assert client.enqueued[0]["queue_name"] == "queue-a"
     assert _states_by_pipeline(pg_engine, schema) == {
         "pipeline-a": StageExecutionState.ADMITTED.value,
         "pipeline-b": StageExecutionState.READY.value,
@@ -1174,43 +946,49 @@ def test_unconfigured_stage_is_skipped_and_reported_then_admitted(
     }
 
 
+class _UnprintableArgsError(RuntimeError):
+    def __str__(self) -> str:
+        raise RuntimeError("no message for you")
+
+
+def _two_pipeline_registry(
+    failing_args_for: Callable[[AdmissionPayload], tuple[object, ...]],
+) -> PipelineRegistry:
+    """Register a working pipeline-a beside a raising pipeline-b."""
+    registry = PipelineRegistry()
+    for suffix, args_for in (("a", _args_for), ("b", failing_args_for)):
+        registry.register(
+            PipelineDefinition(
+                key=PipelineKey(f"pipeline-{suffix}"),
+                version=1,
+                stages=(
+                    StageDefinition(
+                        key=StageKey(f"stage-{suffix}"),
+                        queue_name=f"queue-{suffix}",
+                        workflow=_workflow,
+                        args_for=args_for,
+                    ),
+                ),
+            )
+        )
+    return registry
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("args_for exploded"), _UnprintableArgsError("boom")],
+    ids=["printable", "unprintable"],
+)
 def test_args_for_failure_cannot_poison_admission_transaction(
     pg_engine: Engine,
+    error: Exception,
 ) -> None:
     schema = _migrate(pg_engine)
 
     def failing_args_for(_payload: AdmissionPayload) -> tuple[object, ...]:
-        raise ValueError("args_for exploded")
+        raise error
 
-    registry = PipelineRegistry()
-    registry.register(
-        PipelineDefinition(
-            key=PipelineKey("pipeline-a"),
-            version=1,
-            stages=(
-                StageDefinition(
-                    key=StageKey("stage-a"),
-                    queue_name="queue-a",
-                    workflow=_workflow,
-                    args_for=_args_for,
-                ),
-            ),
-        )
-    )
-    registry.register(
-        PipelineDefinition(
-            key=PipelineKey("pipeline-b"),
-            version=1,
-            stages=(
-                StageDefinition(
-                    key=StageKey("stage-b"),
-                    queue_name="queue-b",
-                    workflow=_workflow,
-                    args_for=failing_args_for,
-                ),
-            ),
-        )
-    )
+    registry = _two_pipeline_registry(failing_args_for)
     _submit_two_stage_backlog(pg_engine, registry)
     _pipeline_control(pg_engine, suffix="a", capacity=5, paused=False)
     _pipeline_control(pg_engine, suffix="b", capacity=5, paused=False)
@@ -1224,7 +1002,7 @@ def test_args_for_failure_cannot_poison_admission_transaction(
     )
 
     assert summary.admitted_total == 2
-    assert {options["queue_name"] for options, _ in client.enqueued} == {
+    assert {options["queue_name"] for options in client.enqueued} == {
         "queue-a",
         "queue-b",
     }
@@ -1297,7 +1075,7 @@ def test_non_tuple_args_for_is_deferred_outside_admission(
     assert len(client.enqueued) == 2
     assert all(
         isinstance(enqueued_args[0], dict)
-        for _, enqueued_args in client.enqueued
+        for enqueued_args in client.enqueued_args
     )
     with pg_engine.connect() as connection:
         assert (
@@ -1358,7 +1136,7 @@ def test_pipeline_stage_mismatch_is_reported_and_other_stages_admit(
     )
 
     assert summary.admitted_total == 1
-    assert [options["queue_name"] for options, _ in client.enqueued] == [
+    assert [options["queue_name"] for options in client.enqueued] == [
         "queue-a"
     ]
     assert _states_by_pipeline(pg_engine, schema) == {
@@ -1397,7 +1175,7 @@ def test_unconfigured_backlog_cannot_exhaust_considered_budget(
     )
 
     assert summary.admitted_total == 1
-    assert client.enqueued[0][0]["queue_name"] == "queue-b"
+    assert client.enqueued[0]["queue_name"] == "queue-b"
     assert summary.unconfigured_stages == (
         StageIdentityRecord(
             pipeline_key="pipeline-a",
@@ -1409,67 +1187,6 @@ def test_unconfigured_backlog_cannot_exhaust_considered_budget(
         [("pipeline-a", StageExecutionState.READY.value)] * 5
         + [("pipeline-b", StageExecutionState.ADMITTED.value)]
     )
-
-
-def test_unprintable_args_for_failure_cannot_run_in_admission(
-    pg_engine: Engine,
-) -> None:
-    schema = _migrate(pg_engine)
-
-    class _UnprintableError(RuntimeError):
-        def __str__(self) -> str:
-            raise RuntimeError("no message for you")
-
-    def failing_args_for(_payload: AdmissionPayload) -> tuple[object, ...]:
-        raise _UnprintableError("boom")
-
-    registry = PipelineRegistry()
-    registry.register(
-        PipelineDefinition(
-            key=PipelineKey("pipeline-a"),
-            version=1,
-            stages=(
-                StageDefinition(
-                    key=StageKey("stage-a"),
-                    queue_name="queue-a",
-                    workflow=_workflow,
-                    args_for=_args_for,
-                ),
-            ),
-        )
-    )
-    registry.register(
-        PipelineDefinition(
-            key=PipelineKey("pipeline-b"),
-            version=1,
-            stages=(
-                StageDefinition(
-                    key=StageKey("stage-b"),
-                    queue_name="queue-b",
-                    workflow=_workflow,
-                    args_for=failing_args_for,
-                ),
-            ),
-        )
-    )
-    _submit_two_stage_backlog(pg_engine, registry)
-    _pipeline_control(pg_engine, suffix="a", capacity=5, paused=False)
-    _pipeline_control(pg_engine, suffix="b", capacity=5, paused=False)
-    client = _RecordingClient()
-
-    summary = run_admission_pass(
-        pg_engine,
-        client=_as_dbos_client(client),
-        registry=registry,
-        clock=lambda: NOW,
-    )
-
-    assert summary.admitted_total == 2
-    assert _states_by_pipeline(pg_engine, schema) == {
-        "pipeline-a": StageExecutionState.ADMITTED.value,
-        "pipeline-b": StageExecutionState.ADMITTED.value,
-    }
-    assert summary.failed_stages == ()
 
 
 def test_paused_selector_only_stage_is_invisible_until_resume(
