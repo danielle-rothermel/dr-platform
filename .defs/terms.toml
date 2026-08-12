@@ -63,7 +63,22 @@ name = "terminal"
 definition = """
 A permanently settled state or record. A terminal attempt is immutable, and \
 a terminal stage does not reopen unless an eligible explicit operator action \
-creates the next allowed state."""
+creates the next allowed state. Cross-note: dr-platform: finality ‖ dr-graph: \
+topology."""
+
+[[terms]]
+name = "payload"
+definition = """
+The immutable derivation-facts bundle supplied when deriving a durable \
+operation's arguments. Cross-note: dr-platform: derivation-facts bundles ‖ \
+dr-exec: executed content ‖ dr-serialize: document data."""
+
+[[terms]]
+name = "unbudgeted"
+definition = """
+An explicit declaration that the executor installs no policy limit for an \
+axis. It is neither an unlimited-resource promise nor a bounded-return \
+guarantee."""
 
 [[terms]]
 name = "idempotent operation"
@@ -207,8 +222,8 @@ part_of = ["pipeline definition"]
 [[terms]]
 name = "run completion execution"
 definition = """
-The sole durable execution of a run completion for one submission run, \
-identified by a stable workflow identity."""
+The durable execution of a run completion for one submission run, identified \
+by a stable workflow identity per attempt."""
 exported_symbols = [
   "RunCompletionExecutionRecord",
   "inspect_run_completion",

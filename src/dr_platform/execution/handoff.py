@@ -7,9 +7,11 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 from dbos import DBOS
+from dr_store.content_addressing import format_object_reference
 from sqlalchemy import select
 
 from dr_platform._core.ledger.attempts import record_stage_attempt_terminal
+from dr_platform._core.ledger.evidence import STAGE_FAILURE_EVIDENCE_SCHEMA
 from dr_platform._core.ledger.executions import (
     insert_stage_execution,
     transition_stage_execution,
@@ -29,6 +31,11 @@ from dr_platform.completion.execution import (
 from dr_platform.execution._checkpoint import (
     _require_ledger_checkpoint_executor,
 )
+from dr_platform.execution._object_store import (
+    _active_object_store,
+    _object_store_context,
+    _require_object_store,
+)
 from dr_platform.execution._recovery_cap import mark_wrapped_recovery_cap
 from dr_platform.execution.failures import StageApplicationFailure
 from dr_platform.pipeline.definitions import (
@@ -40,6 +47,7 @@ from dr_platform.pipeline.definitions import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    from dr_serialize import Jsonable
     from sqlalchemy import Connection
     from sqlalchemy.engine import RowMapping
 
@@ -47,6 +55,10 @@ if TYPE_CHECKING:
 
 
 _WRAPPED_STAGE_MARKER = "_dr_platform_wrapped_stage"
+
+
+def _checkpoint_connection() -> Connection:
+    return DBOS.sql_session.connection()
 
 
 class StageHandoffMismatchError(RuntimeError):
@@ -160,13 +172,13 @@ def _wrap_stage_workflow(
         output_reference: str | None,
         terminal_summary: Mapping[str, object],
         terminal_reference: str | None,
-        evidence_reference: str | None,
+        evidence: Jsonable | None,
         next_stage_key: str | None,
         next_stage_index: int | None,
     ) -> None:
         # Read nondeterministic time only in the checkpointed transaction.
         _complete_stage_in_transaction(
-            cast("Connection", DBOS.sql_session),
+            _checkpoint_connection(),
             workflow_id=workflow_id,
             pipeline_key=pipeline_key,
             pipeline_version=pipeline_version,
@@ -176,7 +188,7 @@ def _wrap_stage_workflow(
             output_reference=output_reference,
             terminal_summary=terminal_summary,
             terminal_reference=terminal_reference,
-            evidence_reference=evidence_reference,
+            evidence=evidence,
             next_stage_key=next_stage_key,
             next_stage_index=next_stage_index,
             completed_at=clock(),
@@ -202,11 +214,44 @@ def _wrap_stage_workflow(
             )
         except Exception as error:  # noqa: BLE001 -- application boundary
             error_type = f"{type(error).__module__}.{type(error).__qualname__}"
-            evidence_reference = (
-                error.evidence_reference
+            evidence = (
+                error.evidence
                 if isinstance(error, StageApplicationFailure)
                 else None
             )
+            object_store = _require_object_store(run_stage)
+            with _object_store_context(object_store):
+                await checkpoint_executor.run(
+                    complete_stage,
+                    workflow_id=workflow_id,
+                    pipeline_key=pipeline.key.value,
+                    pipeline_version=pipeline.version,
+                    stage_key=stage.key.value,
+                    stage_index=stage_index,
+                    succeeded=False,
+                    output_reference=None,
+                    terminal_summary=build_terminal_summary(
+                        outcome=StageExecutionState.FAILED.value,
+                        producer=TerminalSummaryProducer.APPLICATION_FAILURE,
+                        error_type=error_type,
+                        message=_safe_error_message(
+                            error, error_type=error_type
+                        ),
+                        traceback_text="".join(
+                            traceback.format_exception(
+                                type(error), error, error.__traceback__
+                            )
+                        ),
+                    ),
+                    terminal_reference=None,
+                    evidence=evidence,
+                    next_stage_key=None,
+                    next_stage_index=None,
+                )
+            return None
+
+        object_store = _require_object_store(run_stage)
+        with _object_store_context(object_store):
             await checkpoint_executor.run(
                 complete_stage,
                 workflow_id=workflow_id,
@@ -214,47 +259,22 @@ def _wrap_stage_workflow(
                 pipeline_version=pipeline.version,
                 stage_key=stage.key.value,
                 stage_index=stage_index,
-                succeeded=False,
-                output_reference=None,
-                terminal_summary=build_terminal_summary(
-                    outcome=StageExecutionState.FAILED.value,
-                    producer=TerminalSummaryProducer.APPLICATION_FAILURE,
-                    error_type=error_type,
-                    message=_safe_error_message(error, error_type=error_type),
-                    traceback_text="".join(
-                        traceback.format_exception(
-                            type(error), error, error.__traceback__
-                        )
+                succeeded=True,
+                output_reference=output_reference,
+                terminal_summary={
+                    TerminalSummaryField.OUTCOME: (
+                        StageExecutionState.SUCCEEDED.value
                     ),
+                },
+                terminal_reference=output_reference,
+                evidence=None,
+                next_stage_key=(
+                    None if next_stage is None else next_stage.key.value
                 ),
-                terminal_reference=None,
-                evidence_reference=evidence_reference,
-                next_stage_key=None,
-                next_stage_index=None,
+                next_stage_index=(
+                    None if next_stage is None else stage_index + 1
+                ),
             )
-            return None
-
-        await checkpoint_executor.run(
-            complete_stage,
-            workflow_id=workflow_id,
-            pipeline_key=pipeline.key.value,
-            pipeline_version=pipeline.version,
-            stage_key=stage.key.value,
-            stage_index=stage_index,
-            succeeded=True,
-            output_reference=output_reference,
-            terminal_summary={
-                TerminalSummaryField.OUTCOME: (
-                    StageExecutionState.SUCCEEDED.value
-                ),
-            },
-            terminal_reference=output_reference,
-            evidence_reference=None,
-            next_stage_key=(
-                None if next_stage is None else next_stage.key.value
-            ),
-            next_stage_index=(None if next_stage is None else stage_index + 1),
-        )
         return output_reference
 
     # Dispatcher rejects declarations lacking this package-owned marker.
@@ -275,7 +295,7 @@ def _complete_stage_in_transaction(  # noqa: PLR0912, PLR0913
     output_reference: str | None,
     terminal_summary: Mapping[str, object],
     terminal_reference: str | None,
-    evidence_reference: str | None,
+    evidence: Jsonable | None,
     next_stage_key: str | None,
     next_stage_index: int | None,
     completed_at: datetime,
@@ -316,12 +336,11 @@ def _complete_stage_in_transaction(  # noqa: PLR0912, PLR0913
         )
 
     stage_execution_id = source["stage_execution_id"]
+    evidence_reference: str | None = None
     if succeeded:
         assert output_reference is not None
-        if evidence_reference is not None:
-            raise ValueError(
-                "a succeeded stage cannot store an evidence reference"
-            )
+        if evidence is not None:
+            raise ValueError("a succeeded stage cannot store failure evidence")
         transition_stage_execution(
             connection,
             stage_execution_id=stage_execution_id,
@@ -333,10 +352,13 @@ def _complete_stage_in_transaction(  # noqa: PLR0912, PLR0913
     else:
         if output_reference is not None:
             raise ValueError("a failed stage cannot store an output reference")
-        if evidence_reference is not None and not evidence_reference.strip():
-            raise ValueError(
-                "evidence reference must be a non-empty string when present"
+        if evidence is not None:
+            reference, _ = _active_object_store().put_enlisted(
+                connection,
+                STAGE_FAILURE_EVIDENCE_SCHEMA,
+                evidence,
             )
+            evidence_reference = format_object_reference(reference)
         if next_stage_key is not None or next_stage_index is not None:
             raise ValueError("a failed stage cannot create a successor")
         transition_stage_execution(

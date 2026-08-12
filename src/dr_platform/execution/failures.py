@@ -1,20 +1,18 @@
 from __future__ import annotations
 
-from dr_platform._core.ledger.terminal_summary import (
-    validate_evidence_reference,
-)
+from dr_serialize import Jsonable, validate_strict_json
 
 
 class StageApplicationFailure(Exception):  # noqa: N818 -- public API name
-    """Application failure with optional partial evidence reference."""
+    """Application failure with optional partial evidence payload."""
 
     def __init__(
         self,
         message: str,
         *,
-        evidence_reference: str | None = None,
+        evidence: Jsonable | None = None,
     ) -> None:
         super().__init__(message)
-        self.evidence_reference = validate_evidence_reference(
-            evidence_reference
+        self.evidence = (
+            None if evidence is None else validate_strict_json(evidence)
         )

@@ -8,6 +8,8 @@ from threading import Lock
 from typing import TYPE_CHECKING, cast
 
 from dbos import DBOS, DBOSClient
+from dr_store.object_store import ObjectStore
+from dr_store.storage_backends.postgresql import PostgresBackend
 
 from dr_platform._core.validation import validate_positive_integer
 from dr_platform.admission.runner import (
@@ -24,6 +26,10 @@ from dr_platform.execution._checkpoint import (
     _LedgerCheckpointBinding,
     _LedgerCheckpointExecutor,
     _preflight_ledger_checkpoint_executor,
+)
+from dr_platform.execution._object_store import (
+    _bind_object_store,
+    _ObjectStoreBinding,
 )
 from dr_platform.execution._recovery_cap import validate_registry_recovery_cap
 from dr_platform.execution.handoff import (
@@ -165,11 +171,13 @@ class _DispatcherResources:
         client: DBOSClient,
         checkpoint_executor: _LedgerCheckpointExecutor,
         checkpoint_binding: _LedgerCheckpointBinding,
+        object_store_binding: _ObjectStoreBinding,
         ownership_token: object,
     ) -> None:
         self.client = client
         self.checkpoint_executor = checkpoint_executor
         self.checkpoint_binding = checkpoint_binding
+        self.object_store_binding = object_store_binding
         self.ownership_token = ownership_token
         self._close_lock = Lock()
         self._closed = False
@@ -181,6 +189,7 @@ class _DispatcherResources:
             self.checkpoint_executor.close()
             self.client.destroy()
             self.checkpoint_binding.release()
+            self.object_store_binding.release()
             _DISPATCHER_OWNERSHIP.release(self.ownership_token)
             self._closed = True
 
@@ -229,6 +238,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
     client: DBOSClient | None = None
     checkpoint_executor: _LedgerCheckpointExecutor | None = None
     checkpoint_binding: _LedgerCheckpointBinding | None = None
+    object_store_binding: _ObjectStoreBinding | None = None
     resources: _DispatcherResources | None = None
     sweep_workflow: ScheduledWorkflow | None = None
     try:
@@ -242,10 +252,16 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
             checkpoint_workflows,
             checkpoint_executor,
         )
+        object_store = ObjectStore(PostgresBackend.open_sync(engine))
+        object_store_binding = _bind_object_store(
+            checkpoint_workflows,
+            object_store,
+        )
         resources = _DispatcherResources(
             client=client,
             checkpoint_executor=checkpoint_executor,
             checkpoint_binding=checkpoint_binding,
+            object_store_binding=object_store_binding,
             ownership_token=ownership_token,
         )
 
@@ -383,6 +399,8 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
                 client.destroy()
             if checkpoint_binding is not None:
                 checkpoint_binding.release()
+            if object_store_binding is not None:
+                object_store_binding.release()
             _DISPATCHER_OWNERSHIP.release(ownership_token)
         raise
     else:

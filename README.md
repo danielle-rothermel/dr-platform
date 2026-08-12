@@ -254,7 +254,7 @@ class StageApplicationFailure(Exception):
         self,
         message: str,
         *,
-        evidence_reference: str | None = None,
+        evidence: Jsonable | None = None,
     ) -> None: ...
 
 
@@ -376,9 +376,13 @@ returning evidence payloads.
 
 Terminal attempt summaries use pinned wire keys (`TerminalSummaryField`,
 `TerminalSummaryProducer`) with an explicit producer tag and optional
-traceback capture on application failure. Applications may attach partial
-evidence on failure by raising `StageApplicationFailure` with an optional
-evidence reference, stored separately from success output references.
+traceback capture on application failure. Run-completion attempt summaries
+use the same pinned keys without a producer tag. Applications may attach
+partial evidence on failure by raising `StageApplicationFailure` with an
+optional strict-JSON evidence payload; the platform writes it through
+enlisted `dr-store` in the same checkpoint transaction as the failed attempt
+and records the resulting opaque reference separately from success output
+references.
 `TerminalSummaryFilter` applies exact-match predicates on those pinned keys
 over the current attempt. `bulk_work_terminal_statuses` reads terminal facts
 for a bounded work-key set in one SELECT per chunk; filtered

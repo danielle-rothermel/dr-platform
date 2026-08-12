@@ -36,6 +36,10 @@ from dr_platform._core.ledger.completion_attempts import (
 )
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import RunCompletionExecutionState
+from dr_platform._core.ledger.terminal_summary import (
+    build_run_completion_attempt_summary,
+    build_run_completion_error_summary,
+)
 from dr_platform._core.validation import validate_non_empty_string
 from dr_platform.execution._checkpoint import (
     _require_ledger_checkpoint_executor,
@@ -251,12 +255,10 @@ def wrap_run_completion(
                 workflow_id=workflow_id,
                 succeeded=False,
                 output_reference=None,
-                error_summary={
-                    "error_type": error_type,
-                    "message": _safe_error_message(
-                        error, error_type=error_type
-                    ),
-                },
+                error_summary=build_run_completion_error_summary(
+                    error_type=error_type,
+                    message=_safe_error_message(error, error_type=error_type),
+                ),
             )
             return None
         await checkpoint_executor.run(
@@ -340,9 +342,9 @@ def record_run_completion_outcome(  # noqa: PLR0913
         reference = validate_non_empty_string(
             output_reference, label="run completion output reference"
         )
-        attempt_summary: Mapping[str, object] | None = {
-            "outcome": RunCompletionExecutionState.SUCCEEDED.value,
-        }
+        attempt_summary = build_run_completion_attempt_summary(
+            outcome=RunCompletionExecutionState.SUCCEEDED.value,
+        )
         values = {
             "state": RunCompletionExecutionState.SUCCEEDED.value,
             "output_reference": reference,
@@ -352,10 +354,10 @@ def record_run_completion_outcome(  # noqa: PLR0913
     else:
         if output_reference is not None or error_summary is None:
             raise ValueError("failed run completion requires only an error")
-        attempt_summary = {
-            **dict(error_summary),
-            "outcome": RunCompletionExecutionState.FAILED.value,
-        }
+        attempt_summary = build_run_completion_attempt_summary(
+            outcome=RunCompletionExecutionState.FAILED.value,
+            error_summary=error_summary,
+        )
         values = {
             "state": RunCompletionExecutionState.FAILED.value,
             "output_reference": None,
