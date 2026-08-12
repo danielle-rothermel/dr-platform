@@ -21,7 +21,7 @@ from dr_platform._core.ledger.executions import (
     get_stage_execution,
     transition_stage_execution,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.ledger.terminal_summary import (
     TerminalSummaryProducer,
@@ -73,7 +73,7 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
     campaign_key: CampaignKey | str | None = None,
     work_key: WorkKey | str | None = None,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> WorkCancellationResult:
     """Commit platform cancellation before delegating to DBOS.
 
@@ -81,7 +81,7 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
     cancellation for an admitted, unsuperseded attempt to repair a lost
     post-commit delegation; other terminal work is a no-op.
     """
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     with engine.begin() as connection:
         resolved_work_item_id = _resolve_work_item_id(
             connection,
@@ -133,7 +133,7 @@ def _resolve_work_item_id(
     work_item_id: int | None,
     campaign_key: CampaignKey | str | None,
     work_key: WorkKey | str | None,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> int:
     has_logical_identity = campaign_key is not None or work_key is not None
     if work_item_id is not None and has_logical_identity:
@@ -172,7 +172,7 @@ def _lock_current_stage(
     connection: Connection,
     *,
     work_item_id: int,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> StageExecutionRecord:
     # READ COMMITTED may miss a successor inserted while this lock blocks;
     # reselect until the locked row is still current. The
@@ -217,7 +217,7 @@ def _cancel_current_stage(
     *,
     current: StageExecutionRecord,
     cancelled_at: datetime,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> WorkCancellationResult:
     workflow_id: str | None = None
     if current.state is StageExecutionState.FAILED:
@@ -272,7 +272,7 @@ def _redelegable_workflow_id(
     connection: Connection,
     *,
     current: StageExecutionRecord,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> str | None:
     """Return a workflow eligible to repair lost post-commit delegation.
 

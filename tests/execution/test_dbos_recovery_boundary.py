@@ -9,7 +9,7 @@ from dbos import DBOS, DBOSClient, DBOSConfig, Queue
 from sqlalchemy import Engine, create_engine, func, select, text
 
 from dr_platform._core.identities import PipelineKey, StageKey
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.ledger.terminal_summary import TerminalSummaryField
 from dr_platform.admission.controls import set_stage_capacity
@@ -155,7 +155,7 @@ def _run_recovery_worker(
         )
         DBOS.launch()
         deadline = time.monotonic() + _WORKER_TIMEOUT_SECONDS
-        schema = StagingSchema()
+        schema = LedgerSchema()
         while time.monotonic() < deadline:
             with engine.connect() as connection:
                 state = connection.execute(
@@ -284,7 +284,7 @@ def test_same_identity_crash_recovers_to_failed_and_retry_stage(  # noqa: PLR091
         DBOS.destroy(destroy_registry=True)
     assert summary.admitted_total == 1
 
-    schema = StagingSchema()
+    schema = LedgerSchema()
     with pg_engine.connect() as connection:
         original_attempt = connection.execute(
             select(
@@ -492,7 +492,7 @@ def test_stale_app_version_pending_projects_without_body_rerun(
         DBOS.destroy(destroy_registry=True)
     assert summary.admitted_total == 1
 
-    schema = StagingSchema()
+    schema = LedgerSchema()
     with pg_engine.connect() as connection:
         workflow_id = connection.execute(
             select(schema.stage_attempts.c.workflow_id)

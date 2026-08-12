@@ -12,7 +12,7 @@ from dr_platform._core.identities import (
     WorkKey,
     normalize_key,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.inspection._validation import (
     DEFAULT_INSPECTION_LIMIT,
@@ -54,10 +54,10 @@ def list_run_members(  # noqa: PLR0913 -- explicit reader filters
     cursor: int | None = None,
     limit: int = DEFAULT_INSPECTION_LIMIT,
     terminal_filter: TerminalSummaryFilter | None = None,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> tuple[RunMemberSummary, ...]:
     validate_limit(limit)
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_run = normalize_key(run_key, RunKey)
     memberships = selected_schema.run_memberships
     items = selected_schema.work_items

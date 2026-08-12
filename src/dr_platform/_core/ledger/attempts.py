@@ -15,7 +15,7 @@ from dr_platform._core.identities import (
     StageKey,
     WorkKey,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.validation import validate_positive_integer
 
 if TYPE_CHECKING:
@@ -101,10 +101,10 @@ def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
     terminal_summary: Mapping[str, object] | None = None,
     terminal_reference: str | None = None,
     evidence_reference: str | None = None,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageAttemptRecord:
     """Append the next attempt with a deterministic DBOS workflow ID."""
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     executions = selected_schema.stage_executions
     work_items = selected_schema.work_items
     runs = selected_schema.pipeline_runs
@@ -194,10 +194,10 @@ def mark_stage_attempt_admitted(
     stage_execution_id: int,
     attempt_number: int,
     admitted_at: datetime,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageAttemptRecord:
     """Mark one prepared attempt admitted exactly once."""
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     table = selected_schema.stage_attempts
     row = (
         connection.execute(
@@ -242,10 +242,10 @@ def record_stage_attempt_terminal(  # noqa: PLR0913 -- explicit outcome facts
     terminal_summary: Mapping[str, object],
     terminal_reference: str | None = None,
     evidence_reference: str | None = None,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageAttemptRecord:
     """Record one terminal attempt outcome exactly once."""
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     table = selected_schema.stage_attempts
     row = (
         connection.execute(
@@ -293,9 +293,9 @@ def get_stage_attempt(
     *,
     stage_execution_id: int,
     attempt_number: int,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageAttemptRecord | None:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     table = selected_schema.stage_attempts
     row = (
         connection.execute(
@@ -314,9 +314,9 @@ def list_stage_attempts(
     connection: Connection,
     *,
     stage_execution_id: int,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> tuple[StageAttemptRecord, ...]:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     table = selected_schema.stage_attempts
     statement = (
         select(table)

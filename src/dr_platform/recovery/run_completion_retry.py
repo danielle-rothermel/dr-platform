@@ -17,10 +17,11 @@ from dr_platform._core.ledger.completion_attempts import (
     append_run_completion_attempt,
     get_run_completion_attempt,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
     StageExecutionState,
+    StateCount,
 )
 from dr_platform.completion.execution import (
     RunCompletionExecutionRecord,
@@ -28,7 +29,6 @@ from dr_platform.completion.execution import (
     decode_run_completion_execution,
     is_run_completion_wrapped,
 )
-from dr_platform.inspection.statuses import StateCount
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -54,10 +54,10 @@ def retry_run_completion(  # noqa: PLR0913 -- explicit operator boundary
     client: DBOSClient,
     registry: PipelineRegistry,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> RunCompletionRetryResult:
     """Only FAILED run completions may prepare a new attempt for enqueue."""
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_run_key = normalize_key(run_key, RunKey)
     execution_record: RunCompletionExecutionRecord
     new_attempt_record: RunCompletionAttemptRecord

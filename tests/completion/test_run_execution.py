@@ -9,16 +9,15 @@ from sqlalchemy import Engine
 from dr_platform._core.identities import (
     CampaignKey,
     PipelineKey,
-    RunCompletionKey,
     RunKey,
 )
 from dr_platform._core.ledger.completion_attempts import (
     get_run_completion_attempt,
-    run_completion_workflow_id,
 )
 from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
     StageExecutionState,
+    StateCount,
 )
 from dr_platform.completion.barrier import run_barrier_pass
 from dr_platform.completion.execution import (
@@ -27,7 +26,6 @@ from dr_platform.completion.execution import (
     inspect_run_completion,
     record_run_completion_outcome,
 )
-from dr_platform.inspection.statuses import StateCount
 from tests.completion.test_run_barrier import (
     _members,
     _RecordingClient,
@@ -192,33 +190,3 @@ def test_completion_payload_validates_compact_release_facts() -> None:
         payload.model_copy(update={"member_count": 3}).model_validate(
             payload.model_copy(update={"member_count": 3}).model_dump()
         )
-
-
-def test_completion_workflow_identity_is_stable_and_pipeline_scoped() -> None:
-    first = run_completion_workflow_id(
-        run_key=RunKey("run-1"),
-        pipeline_key=PipelineKey("pipeline-a"),
-        pipeline_version=1,
-        completion_key=RunCompletionKey("aggregate"),
-        attempt_number=1,
-    )
-    replay = run_completion_workflow_id(
-        run_key=RunKey("run-1"),
-        pipeline_key=PipelineKey("pipeline-a"),
-        pipeline_version=1,
-        completion_key=RunCompletionKey("aggregate"),
-        attempt_number=1,
-    )
-    other_pipeline = run_completion_workflow_id(
-        run_key=RunKey("run-1"),
-        pipeline_key=PipelineKey("pipeline-b"),
-        pipeline_version=1,
-        completion_key=RunCompletionKey("aggregate"),
-        attempt_number=1,
-    )
-    assert first == replay
-    assert first != other_pipeline
-    assert first == (
-        "drp-run-23c1e871ca241a532a43c70dbee5b25ccdf2a675ae5f8f120f7"
-        "812cad09ab907-a1"
-    )

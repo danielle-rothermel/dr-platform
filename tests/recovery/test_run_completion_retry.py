@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -32,20 +31,12 @@ from tests.conftest import (
     NOW,
     _as_dbos_client,
     _migrate,
+    _WorkflowStatus,
     default_live_dbos_identity,
 )
 
 if TYPE_CHECKING:
     from dr_platform.pipeline.registry import PipelineRegistry
-
-
-@dataclass(frozen=True, slots=True)
-class _WorkflowStatus:
-    workflow_id: str
-    status: str
-    error: Exception | None = None
-    app_version: str | None = "test"
-    executor_id: str | None = "local"
 
 
 class _StatusClient:
@@ -116,9 +107,7 @@ def test_retry_run_completion_appends_attempt_and_reenqueues(
     assert result.execution.workflow_id == result.new_attempt.workflow_id
     assert result.new_attempt.attempt_number == 2
     assert client.enqueued
-    assert (
-        client.enqueued[-1][0]["workflow_id"] == result.new_attempt.workflow_id
-    )
+    assert client.enqueued[-1]["workflow_id"] == result.new_attempt.workflow_id
 
     with pg_engine.connect() as connection:
         first = get_run_completion_attempt(

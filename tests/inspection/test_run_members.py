@@ -40,9 +40,9 @@ def _fail_member(
     producer: TerminalSummaryProducer,
     at,
 ) -> None:
-    from dr_platform._core.ledger.schema import StagingSchema
+    from dr_platform._core.ledger.schema import LedgerSchema
 
-    schema = StagingSchema()
+    schema = LedgerSchema()
     with engine.connect() as connection:
         row = connection.execute(
             select(

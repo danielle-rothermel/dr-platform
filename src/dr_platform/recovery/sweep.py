@@ -10,7 +10,7 @@ from dr_platform._core.clock import utc_now
 from dr_platform._core.identities import RunKey, StageKey
 from dr_platform._core.ledger.attempts import record_stage_attempt_terminal
 from dr_platform._core.ledger.executions import transition_stage_execution
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
     StageExecutionState,
@@ -140,7 +140,7 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
     live_identity: LiveDbosIdentity,
     batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> SweepSummary:
     """Project terminal DBOS abandonment without resuming or retrying.
 
@@ -152,7 +152,7 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
     with out-of-band DBOS resume through the handoff identity guard.
     """
     validate_positive_integer(batch_size, label="sweep batch size")
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     projections: list[SweepProjection] = []
     inspected_count = 0
     cursor: int | None = None
@@ -240,7 +240,7 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
 def _list_admitted_attempts(
     connection: Connection,
     *,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     limit: int,
     after: int | None = None,
 ) -> tuple[_AdmittedAttempt, ...]:
@@ -289,7 +289,7 @@ def _project_terminal_status(  # noqa: PLR0913 -- explicit projection facts
     target_state: StageExecutionState,
     terminal_summary: Mapping[str, object],
     terminal_at: datetime,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> bool:
     executions = schema.stage_executions
     current = (
@@ -383,7 +383,7 @@ def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection bou
     live_identity: LiveDbosIdentity,
     batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> RunCompletionSweepSummary:
     """Project terminal DBOS abandonment for enqueued run completions.
 
@@ -392,7 +392,7 @@ def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection bou
     and the configured recovery cap.
     """
     validate_positive_integer(batch_size, label="sweep batch size")
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     projections: list[RunCompletionSweepProjection] = []
     inspected_count = 0
     cursor: int | None = None
@@ -461,7 +461,7 @@ def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection bou
 def _list_enqueued_completion_attempts(
     connection: Connection,
     *,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     limit: int,
     after: int | None = None,
 ) -> tuple[_EnqueuedCompletionAttempt, ...]:

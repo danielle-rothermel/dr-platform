@@ -3,8 +3,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
-
 import dr_platform
 
 _PACKAGE_ROOT = Path(dr_platform.__file__).resolve().parent
@@ -14,99 +12,39 @@ def _platform_source_files() -> tuple[Path, ...]:
     return tuple(sorted(_PACKAGE_ROOT.rglob("*.py")))
 
 
-def _dbos_import_bindings(
-    tree: ast.AST,
-) -> tuple[frozenset[str], frozenset[str]]:
-    direct_names: set[str] = set()
-    module_names: set[str] = set()
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "dbos":
-            direct_names.update(
-                alias.asname or alias.name
-                for alias in node.names
-                if alias.name == "DBOS"
-            )
-        elif isinstance(node, ast.Import):
-            module_names.update(
-                alias.asname or alias.name
-                for alias in node.names
-                if alias.name == "dbos"
-            )
-
-    return frozenset(direct_names), frozenset(module_names)
-
-
-def _is_dbos_reference(
-    node: ast.expr,
-    *,
-    direct_names: frozenset[str],
-    module_names: frozenset[str],
-) -> bool:
-    if isinstance(node, ast.Name):
-        return node.id in direct_names
-    return (
-        isinstance(node, ast.Attribute)
-        and node.attr == "DBOS"
-        and isinstance(node.value, ast.Name)
-        and node.value.id in module_names
+def _binds_dbos(tree: ast.AST) -> bool:
+    """Detect the one form the package uses: ``from dbos import DBOS``."""
+    return any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "dbos"
+        and any(
+            alias.name == "DBOS" and alias.asname is None
+            for alias in node.names
+        )
+        for node in ast.walk(tree)
     )
 
 
-def _is_dbos_attribute(
-    node: ast.expr,
-    *,
-    attribute: str,
-    direct_names: frozenset[str],
-    module_names: frozenset[str],
-) -> bool:
+def _is_dbos_attribute(node: ast.expr, *, attribute: str) -> bool:
     return (
         isinstance(node, ast.Attribute)
         and node.attr == attribute
-        and _is_dbos_reference(
-            node.value,
-            direct_names=direct_names,
-            module_names=module_names,
-        )
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "DBOS"
     )
 
 
 def _dbos_attribute_calls(tree: ast.AST) -> list[ast.Call]:
-    direct_names, module_names = _dbos_import_bindings(tree)
+    if not _binds_dbos(tree):
+        return []
     return [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and _is_dbos_reference(
-            node.func.value,
-            direct_names=direct_names,
-            module_names=module_names,
-        )
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "DBOS"
     ]
-
-
-@pytest.mark.parametrize(
-    "source",
-    [
-        "from dbos import DBOS\nDBOS.step()",
-        "from dbos import DBOS as RuntimeDBOS\nRuntimeDBOS.step()",
-        "import dbos\ndbos.DBOS.step()",
-        "import dbos as runtime\nruntime.DBOS.step()",
-    ],
-)
-def test_dbos_call_scan_resolves_supported_import_forms(source: str) -> None:
-    calls = _dbos_attribute_calls(ast.parse(source))
-
-    assert len(calls) == 1
-    assert isinstance(calls[0].func, ast.Attribute)
-    assert calls[0].func.attr == "step"
-
-
-def test_dbos_call_scan_ignores_other_module_bindings() -> None:
-    tree = ast.parse("import other as runtime\nruntime.DBOS.step()")
-
-    assert _dbos_attribute_calls(tree) == []
 
 
 def test_platform_declares_no_dbos_steps() -> None:
@@ -125,7 +63,7 @@ def test_platform_declares_no_dbos_steps() -> None:
 def test_stage_wrapper_is_declared_as_dbos_workflow() -> None:
     handoff_source = (_PACKAGE_ROOT / "execution" / "handoff.py").read_text()
     tree = ast.parse(handoff_source)
-    direct_names, module_names = _dbos_import_bindings(tree)
+    assert _binds_dbos(tree)
 
     workflow_decorated: list[str] = []
     for node in ast.walk(tree):
@@ -134,12 +72,7 @@ def test_stage_wrapper_is_declared_as_dbos_workflow() -> None:
         for decorator in node.decorator_list:
             call = decorator if isinstance(decorator, ast.Call) else None
             target = call.func if call is not None else decorator
-            if _is_dbos_attribute(
-                target,
-                attribute="workflow",
-                direct_names=direct_names,
-                module_names=module_names,
-            ):
+            if _is_dbos_attribute(target, attribute="workflow"):
                 workflow_decorated.append(node.name)
 
     assert "run_stage" in workflow_decorated

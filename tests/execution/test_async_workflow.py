@@ -15,7 +15,7 @@ from dr_platform._core.identities import (
     StageKey,
     WorkKey,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import set_stage_capacity
 from dr_platform.execution.handoff import wrap_pipeline_workflows
@@ -60,7 +60,7 @@ def _await_dbos_result(
 
 
 def _workflow_ids(engine: Engine) -> tuple[str, ...]:
-    schema = StagingSchema()
+    schema = LedgerSchema()
     with engine.connect() as connection:
         return tuple(
             connection.execute(
@@ -300,7 +300,7 @@ def test_args_for_failure_is_recorded_by_the_durable_wrapper(
         assert status.state is StageExecutionState.FAILED
         with pg_engine.connect() as connection:
             summary = connection.execute(
-                select(StagingSchema().stage_attempts.c.terminal_summary)
+                select(LedgerSchema().stage_attempts.c.terminal_summary)
             ).scalar_one()
         assert summary["error_type"] == "builtins.ValueError"
         assert summary["message"] == "cannot derive arguments"

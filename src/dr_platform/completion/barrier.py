@@ -16,20 +16,18 @@ from dr_platform._core.ledger.completion_attempts import (
     create_initial_run_completion_attempt,
     run_completion_workflow_id,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
     StageExecutionState,
+    StateCount,
 )
 from dr_platform._core.validation import validate_positive_integer
 from dr_platform.completion.execution import (
     RunCompletionPayload,
     is_run_completion_wrapped,
 )
-from dr_platform.inspection.statuses import (
-    StateCount,
-    current_stage_indexes_by_run,
-)
+from dr_platform.inspection.statuses import current_stage_indexes_by_run
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -100,7 +98,7 @@ def run_barrier_pass(  # noqa: PLR0913 -- explicit reconciliation boundary
     batch_size: int = DEFAULT_RUN_BARRIER_BATCH_SIZE,
     candidate_budget: int = DEFAULT_RUN_BARRIER_CANDIDATE_BUDGET,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> RunBarrierSummary:
     validate_positive_integer(batch_size, label="run barrier batch size")
     validate_positive_integer(
@@ -110,7 +108,7 @@ def run_barrier_pass(  # noqa: PLR0913 -- explicit reconciliation boundary
         raise ValueError(
             "run barrier candidate budget must be at least the batch size"
         )
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     with engine.begin() as connection:
         return _run_in_transaction(
             connection,
@@ -131,7 +129,7 @@ def _run_in_transaction(  # noqa: PLR0913
     batch_size: int,
     candidate_budget: int,
     clock: Callable[[], datetime],
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> RunBarrierSummary:
     cursor = _acquire_cursor(connection, schema=schema)
     if cursor is _CURSOR_NOT_ACQUIRED:
@@ -217,7 +215,7 @@ _CURSOR_NOT_ACQUIRED = object()
 
 
 def _acquire_cursor(
-    connection: Connection, *, schema: StagingSchema
+    connection: Connection, *, schema: LedgerSchema
 ) -> str | None | object:
     row = connection.execute(
         select(schema.run_barrier_cursor.c.last_run_key)
@@ -239,7 +237,7 @@ def _acquire_cursor(
 def _lock_eligible_page(
     connection: Connection,
     *,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     limit: int,
     after: str | None,
     upper_bound: str | None,
@@ -264,7 +262,7 @@ def _lock_eligible_page(
 
 def _eligible_runs_statement(
     *,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     limit: int,
     after: str | None,
     upper_bound: str | None = None,
@@ -365,7 +363,7 @@ def _eligible_runs_statement(
 def _terminal_counts(
     connection: Connection,
     *,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     run_keys: tuple[str, ...],
 ) -> dict[str, tuple[StateCount, ...]]:
     empty = {
@@ -417,7 +415,7 @@ def _release_candidate(  # noqa: PLR0913 -- explicit release facts
     client: DBOSClient,
     registry: PipelineRegistry,
     released_at: datetime,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> RunBarrierRelease:
     if (
         sum(item.count for item in state_counts)

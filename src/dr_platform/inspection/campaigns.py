@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import and_, func, or_, select
 
 from dr_platform._core.identities import CampaignKey, RunKey, normalize_key
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform.inspection._validation import (
     DEFAULT_INSPECTION_LIMIT,
     require_campaign,
@@ -49,9 +49,9 @@ def inspect_campaign(
     campaign_key: CampaignKey | str,
     *,
     engine: Engine,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> CampaignSummary:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_campaign = normalize_key(campaign_key, CampaignKey)
     statement = _campaign_summary_statement(selected_schema)
     with engine.connect() as connection:
@@ -75,10 +75,10 @@ def list_campaigns(
     engine: Engine,
     cursor: CampaignKey | str | None = None,
     limit: int = DEFAULT_INSPECTION_LIMIT,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> tuple[CampaignSummary, ...]:
     validate_limit(limit)
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_cursor = (
         normalize_key(cursor, CampaignKey) if cursor is not None else None
     )
@@ -106,10 +106,10 @@ def list_runs(
     engine: Engine,
     cursor: RunKey | str | None = None,
     limit: int = DEFAULT_INSPECTION_LIMIT,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> tuple[RunSummary, ...]:
     validate_limit(limit)
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_campaign = normalize_key(campaign_key, CampaignKey)
     normalized_cursor = (
         normalize_key(cursor, RunKey) if cursor is not None else None
@@ -145,7 +145,7 @@ def list_runs(
 
 
 def _run_summary_statement(
-    schema: StagingSchema,
+    schema: LedgerSchema,
     *,
     campaign_key: str,
     limit: int,
@@ -187,7 +187,7 @@ def _run_summary_statement(
     )
 
 
-def _campaign_summary_statement(schema: StagingSchema):
+def _campaign_summary_statement(schema: LedgerSchema):
     runs = schema.pipeline_runs
     items = schema.work_items
     run_agg = (

@@ -7,7 +7,7 @@ from dr_serialize import json_hash
 from sqlalchemy import null, select, update
 
 from dr_platform._core.frozen import immutable_json_mapping
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.validation import validate_positive_integer
 
 if TYPE_CHECKING:
@@ -80,11 +80,11 @@ def create_initial_run_completion_attempt(  # noqa: PLR0913
     completion_key: RunCompletionKey,
     created_at: datetime,
     enqueued_at: datetime,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> RunCompletionAttemptRecord:
     return _insert_run_completion_attempt(
         connection,
-        schema=schema or StagingSchema(),
+        schema=schema or LedgerSchema(),
         run_completion_execution_id=run_completion_execution_id,
         run_key=run_key,
         pipeline_key=pipeline_key,
@@ -112,9 +112,9 @@ def append_run_completion_attempt(  # noqa: PLR0913 -- explicit persistence fact
     terminal_at: datetime | None = None,
     terminal_summary: Mapping[str, object] | None = None,
     terminal_reference: str | None = None,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> RunCompletionAttemptRecord:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     executions = selected_schema.run_completion_executions
     source = (
         connection.execute(
@@ -178,9 +178,9 @@ def record_run_completion_attempt_terminal(  # noqa: PLR0913
     terminal_at: datetime,
     terminal_summary: Mapping[str, object] | None,
     terminal_reference: str | None,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> RunCompletionAttemptRecord:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     attempts = selected_schema.run_completion_attempts
     row = (
         connection.execute(
@@ -230,9 +230,9 @@ def get_run_completion_attempt(
     *,
     run_completion_execution_id: int,
     attempt_number: int,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> RunCompletionAttemptRecord | None:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     attempts = selected_schema.run_completion_attempts
     row = (
         connection.execute(
@@ -254,9 +254,9 @@ def get_run_completion_attempt_by_workflow_id(
     connection: Connection,
     *,
     workflow_id: str,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> RunCompletionAttemptRecord | None:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     attempts = selected_schema.run_completion_attempts
     row = (
         connection.execute(
@@ -273,7 +273,7 @@ def get_run_completion_attempt_by_workflow_id(
 def _insert_run_completion_attempt(  # noqa: PLR0913 -- explicit persistence facts
     connection: Connection,
     *,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     run_completion_execution_id: int,
     run_key: RunKey,
     pipeline_key: PipelineKey,

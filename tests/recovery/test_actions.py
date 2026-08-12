@@ -4,7 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from threading import Barrier
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
@@ -20,7 +20,7 @@ from dr_platform._core.ledger.attempts import (
     record_stage_attempt_terminal,
 )
 from dr_platform._core.ledger.executions import transition_stage_execution
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import (
     pause,
@@ -48,6 +48,7 @@ from tests.conftest import (
     _as_dbos_client,
     _migrate,
     _RecordingCanceller,
+    _RecordingClient,
     dbos_config,
     engine_dsn,
     initialize_dbos_schema,
@@ -56,8 +57,6 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from sqlalchemy import Connection
 
 
 async def _workflow(input_reference: str) -> str:
@@ -120,21 +119,6 @@ def _submit(
     )
 
 
-class _RecordingClient:
-    def __init__(self) -> None:
-        self.enqueued: list[EnqueueOptions] = []
-
-    def enqueue_in_transaction(
-        self,
-        _connection: Connection,
-        options: EnqueueOptions,
-        *_args: object,
-        **_kwargs: object,
-    ) -> object:
-        self.enqueued.append(cast("EnqueueOptions", dict(options)))
-        return object()
-
-
 class _RaisingCanceller:
     def __init__(self) -> None:
         self.attempts: list[tuple[str, bool]] = []
@@ -155,7 +139,7 @@ def _clock_after_execution_lock(
     stage_execution_id: int,
     timestamp: datetime,
 ) -> Callable[[], datetime]:
-    table = StagingSchema().stage_executions
+    table = LedgerSchema().stage_executions
 
     def clock() -> datetime:
         with (
@@ -174,7 +158,7 @@ def _clock_after_execution_lock(
 
 
 def _wait_until_row_locked(engine: Engine, stage_execution_id: int) -> None:
-    schema = StagingSchema()
+    schema = LedgerSchema()
     table = schema.stage_executions
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
@@ -232,7 +216,7 @@ def _launch_dbos_schema(database_url: str, *, suffix: str) -> None:
 def _admit_one(
     engine: Engine,
     registry: PipelineRegistry,
-    schema: StagingSchema,
+    schema: LedgerSchema,
     *,
     run_key: str,
     work_key: str,
@@ -257,7 +241,7 @@ def _admit_one(
 
 def _execution_rows(
     engine: Engine,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> list[tuple[int, int, str, int]]:
     with engine.connect() as connection:
         return list(

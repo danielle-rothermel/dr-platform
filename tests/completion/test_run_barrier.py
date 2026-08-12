@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Event, Lock
+from threading import Event
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -14,7 +14,7 @@ from dr_platform._core.identities import (
     RunKey,
     StageKey,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
     StageExecutionState,
@@ -38,7 +38,13 @@ from dr_platform.submission.stream import (
     compute_run_membership_digest,
     submit,
 )
-from tests.conftest import NOW, _migrate, engine_dsn
+from tests.conftest import (
+    NOW,
+    _migrate,
+    _payload_of,
+    _RecordingClient,
+    engine_dsn,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -134,7 +140,7 @@ def _set_states(
     engine: Engine,
     states: dict[str, StageExecutionState],
 ) -> None:
-    schema = StagingSchema()
+    schema = LedgerSchema()
     with engine.begin() as connection:
         rows = connection.execute(
             select(
@@ -164,32 +170,11 @@ def _set_states(
 
 
 def _barrier_cursor(engine: Engine) -> str | None:
-    schema = StagingSchema()
+    schema = LedgerSchema()
     with engine.connect() as connection:
         return connection.execute(
             select(schema.run_barrier_cursor.c.last_run_key)
         ).scalar_one()
-
-
-class _RecordingClient:
-    def __init__(self, *, fail_runs: frozenset[str] = frozenset()) -> None:
-        self.fail_runs = fail_runs
-        self.enqueued: list[tuple[EnqueueOptions, dict[str, object]]] = []
-        self._lock = Lock()
-
-    def enqueue_in_transaction(
-        self,
-        _connection: Connection,
-        options: EnqueueOptions,
-        payload: dict[str, object],
-    ) -> object:
-        if payload["run_key"] in self.fail_runs:
-            raise RuntimeError(f"cannot enqueue {payload['run_key']}")
-        with self._lock:
-            self.enqueued.append(
-                (cast("EnqueueOptions", dict(options)), dict(payload))
-            )
-        return object()
 
 
 def _plan_nodes(value: object) -> Iterator[dict[str, Any]]:
@@ -243,7 +228,8 @@ def test_barrier_releases_once_with_compact_immutable_facts(
     assert first.failures == ()
     assert second.releases == ()
     assert len(client.enqueued) == 1
-    options, payload = client.enqueued[0]
+    options = client.enqueued[0]
+    payload = client.enqueued_payloads[0]
     assert options["workflow_id"].startswith("drp-run-")
     assert payload["run_key"] == "run-1"
     assert payload["member_count"] == 3
@@ -335,7 +321,9 @@ def test_failure_isolated_keyset_continuation_fills_enqueue_batch(
     assert [release.run_key for release in summary.releases] == [
         RunKey("run-b")
     ]
-    assert [payload["run_key"] for _, payload in client.enqueued] == ["run-b"]
+    assert [payload["run_key"] for payload in client.enqueued_payloads] == [
+        "run-b"
+    ]
 
 
 def test_failed_release_consumes_budget_rotates_and_remains_retryable(
@@ -610,14 +598,15 @@ def test_cursor_lock_loser_does_not_scan_or_duplicate_completion(
             self,
             _connection: Connection,
             options: EnqueueOptions,
-            payload: dict[str, object],
+            *args: object,
+            **kwargs: object,
         ) -> object:
-            if payload["run_key"] == "run-a":
+            if _payload_of(args)["run_key"] == "run-a":
                 self.first_transaction_entered.set()
                 if not self.release_first_transaction.wait(timeout=10):
                     raise TimeoutError("first reconciler was not released")
             return super().enqueue_in_transaction(
-                _connection, options, payload
+                _connection, options, *args, **kwargs
             )
 
     client = GatedClient()
@@ -671,7 +660,9 @@ def test_cursor_lock_loser_does_not_scan_or_duplicate_completion(
         for summary in (first_summary, third)
         for release in summary.releases
     } == {RunKey("run-a"), RunKey("run-b")}
-    assert sorted(payload["run_key"] for _, payload in client.enqueued) == [
+    assert sorted(
+        str(payload["run_key"]) for payload in client.enqueued_payloads
+    ) == [
         "run-a",
         "run-b",
     ]
@@ -746,7 +737,7 @@ def test_empty_completion_run_is_immediately_eligible(
         clock=lambda: NOW + timedelta(seconds=1),
     )
     assert len(summary.releases) == 1
-    assert client.enqueued[0][1]["release_terminal_state_counts"] == [
+    assert client.enqueued_payloads[0]["release_terminal_state_counts"] == [
         {"state": "succeeded", "count": 0},
         {"state": "failed", "count": 0},
         {"state": "cancelled", "count": 0},

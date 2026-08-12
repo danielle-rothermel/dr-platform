@@ -1,11 +1,11 @@
 # ruff: noqa: S608 -- every interpolated identifier uses a prefix validated by
-# StagingSchema; SQL parameters cannot represent DDL identifiers.
+# LedgerSchema; SQL parameters cannot represent DDL identifiers.
 from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import context, op
 
-from dr_platform._core.ledger.schema import DEFAULT_PREFIX, StagingSchema
+from dr_platform._core.ledger.schema import DEFAULT_PREFIX, LedgerSchema
 
 revision = "0001_staging_baseline"
 down_revision = None
@@ -30,7 +30,7 @@ def _execute(sql: str) -> None:
 
 def upgrade() -> None:
     prefix = _prefix()
-    schema = StagingSchema(prefix)
+    schema = LedgerSchema(prefix)
     schema.metadata.create_all(op.get_bind(), checkfirst=False)
     op.bulk_insert(
         schema.run_barrier_cursor,

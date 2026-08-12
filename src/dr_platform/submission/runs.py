@@ -12,7 +12,7 @@ from dr_platform._core.identities import (
     normalize_key,
     validate_key_value,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.validation import (
     validate_non_empty_string,
     validate_nonnegative_integer,
@@ -63,10 +63,10 @@ def insert_pipeline_run(  # noqa: PLR0913 -- explicit persistence facts
     manifest_reference: str | None = None,
     membership_digest: str | None = None,
     run_completion_key: str | None = None,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> PipelineRunRecord:
     """Insert a run, or resolve an identical replay to the stored run."""
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_run_key = normalize_key(run_key, RunKey)
     normalized_campaign_key = normalize_key(campaign_key, CampaignKey)
     validate_key_value(pipeline_key, label="pipeline key")
@@ -164,9 +164,9 @@ def get_pipeline_run(
     *,
     run_key: RunKey | str,
     for_update: bool = False,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> PipelineRunRecord | None:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_run_key = normalize_key(run_key, RunKey)
     table = selected_schema.pipeline_runs
     statement = table.select().where(
@@ -187,7 +187,7 @@ def close_registration(  # noqa: PLR0913 -- explicit receipt facts
     created_work_count: int,
     reused_work_count: int,
     closed_at: datetime,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ) -> PipelineRunRecord:
     table = schema.pipeline_runs
     row = (

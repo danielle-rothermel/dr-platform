@@ -13,7 +13,7 @@ from dr_platform._core.identities import (
     normalize_key,
     validate_key_value,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.validation import (
     validate_labels,
     validate_nonnegative_integer,
@@ -51,7 +51,7 @@ def set_stage_capacity(  # noqa: PLR0913 -- explicit operator dependencies
     capacity: int,
     engine: Engine,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageControlRecord:
     """Set stage-wide capacity while preserving any existing pause flag."""
     return _set_capacity(
@@ -73,7 +73,7 @@ def set_selector_capacity(  # noqa: PLR0913 -- explicit operator dependencies
     capacity: int,
     engine: Engine,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageControlRecord:
     """Set selector capacity while preserving any existing pause flag."""
     return _set_capacity(
@@ -94,7 +94,7 @@ def pause(  # noqa: PLR0913 -- explicit operator dependencies
     labels: Mapping[str, str] | None = None,
     engine: Engine,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageControlRecord:
     return _set_paused(
         pipeline=pipeline,
@@ -114,7 +114,7 @@ def resume(  # noqa: PLR0913 -- explicit operator dependencies
     labels: Mapping[str, str] | None = None,
     engine: Engine,
     clock: Callable[[], datetime] = utc_now,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageControlRecord:
     return _set_paused(
         pipeline=pipeline,
@@ -133,11 +133,11 @@ def read_controls(
     stage_key: StageKey | str,
     engine: Engine,
     labels: Mapping[str, str] | None = None,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> tuple[StageControlRecord, ...]:
     """With work labels, return controls whose selectors they contain."""
     identity = validate_pipeline_identity(pipeline)
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     with engine.connect() as connection:
         return list_stage_controls(
             connection,
@@ -159,9 +159,9 @@ def upsert_stage_control(  # noqa: PLR0913 -- explicit control facts
     capacity: int,
     paused: bool,
     updated_at: datetime,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageControlRecord:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     validate_key_value(pipeline_key, label="pipeline key")
     validate_positive_integer(pipeline_version, label="pipeline version")
     normalized_stage_key = normalize_key(stage_key, StageKey)
@@ -216,9 +216,9 @@ def set_stage_control_capacity(  # noqa: PLR0913 -- explicit control facts
     selector: Mapping[str, str] | None,
     capacity: int,
     updated_at: datetime,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageControlRecord:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_stage_key = normalize_key(stage_key, StageKey)
     normalized_selector = validate_labels(
         {} if selector is None else selector,
@@ -267,9 +267,9 @@ def set_stage_control_paused(  # noqa: PLR0913 -- explicit control identity
     selector: Mapping[str, str] | None,
     paused: bool,
     updated_at: datetime,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> StageControlRecord:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_stage_key = normalize_key(stage_key, StageKey)
     normalized_selector = validate_labels(
         {} if selector is None else selector,
@@ -308,9 +308,9 @@ def list_stage_controls(  # noqa: PLR0913 -- explicit control identity
     pipeline_version: int,
     stage_key: StageKey | str,
     labels: Mapping[str, str] | None = None,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> tuple[StageControlRecord, ...]:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     normalized_stage_key = normalize_key(stage_key, StageKey)
     table = selected_schema.stage_controls
     statement = select(table).where(
@@ -338,10 +338,10 @@ def _set_capacity(  # noqa: PLR0913 -- explicit operator dependencies
     capacity: int,
     engine: Engine,
     clock: Callable[[], datetime],
-    schema: StagingSchema | None,
+    schema: LedgerSchema | None,
 ) -> StageControlRecord:
     identity = validate_pipeline_identity(pipeline)
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     with engine.begin() as connection:
         return set_stage_control_capacity(
             connection,
@@ -363,10 +363,10 @@ def _set_paused(  # noqa: PLR0913 -- explicit operator dependencies
     paused: bool,
     engine: Engine,
     clock: Callable[[], datetime],
-    schema: StagingSchema | None,
+    schema: LedgerSchema | None,
 ) -> StageControlRecord:
     identity = validate_pipeline_identity(pipeline)
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     with engine.begin() as connection:
         return set_stage_control_paused(
             connection,

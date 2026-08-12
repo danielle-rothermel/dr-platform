@@ -12,7 +12,7 @@ External workflow status may lag or race with a committed platform transition. \
 Keeping one logical authority lets completion, cancellation, and sweep races \
 converge on one terminal outcome."""
 date = "2026-08-05"
-check = "uv run pytest -q tests/execution/test_handoff.py -k 'sweep_race'"
+check = "uv run pytest -q tests/recovery/test_sweep.py -k 'sweep_race'"
 
 [[contracts]]
 title = "Application workflows are async"
@@ -359,7 +359,7 @@ The sweep reconciles external execution evidence without time thresholds or \
 automatic policy that could duplicate paid work. Identity projection covers \
 structural orphaning after code or executor changes."""
 date = "2026-08-05"
-check = "uv run pytest -q tests/execution/test_handoff.py -k 'sweep' tests/recovery/test_run_completion_retry.py -k 'sweep'"
+check = "uv run pytest -q tests/recovery/test_sweep.py tests/recovery/test_run_completion_retry.py -k 'sweep'"
 
 [[contracts]]
 title = "Recovery preserves one attempt identity"

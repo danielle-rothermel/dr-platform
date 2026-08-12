@@ -508,7 +508,7 @@ definition = """
 The prefix-configurable relational ledger of submission, membership, \
 execution, completion, attempt, and admission-control facts managed from an \
 irreversible baseline migration."""
-exported_symbols = ["StagingSchema", "upgrade_platform_schema"]
+exported_symbols = ["LedgerSchema", "upgrade_platform_schema"]
 
 [[terms]]
 name = "telemetry initialization"

@@ -72,6 +72,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   idempotent-replay comparison; `_StageIdentity` is a `NamedTuple`; the three
   ledger record modules share one section grammar, `select(table)` idiom, and
   `_decode_<record>` naming.
+- 2026-08-12 vocabulary and test homes (structural audit, wave 3). The public
+  ledger schema class is `LedgerSchema`, matching the `platform ledger` term;
+  the `0001_staging_baseline` revision identity is unchanged. `StateCount`
+  moved to `_core/ledger/states.py` beside the states it counts, so
+  `completion/` no longer imports it from `inspection/`. Test homes now follow
+  the code: the run-completion workflow-id golden sits beside the stage golden
+  in `tests/core/test_workflow_ids.py`; stage-sweep tests live in
+  `tests/recovery/test_sweep.py`; admission control CRUD in
+  `tests/admission/test_controls.py`; pure-unit candidate evaluation in
+  `tests/admission/test_runner_units.py`; conftest-harness safety checks in
+  `tests/test_conftest_database_safety.py`. One `_RecordingClient` and one
+  `_WorkflowStatus` stub in `tests/conftest.py` replace the per-module copies,
+  and the two `args_for`-failure isolation twins are one parametrized test.
 
 ### Removed
 

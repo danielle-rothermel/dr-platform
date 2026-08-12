@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
-from pydantic import BaseModel, ConfigDict, StrictInt, field_validator
 from sqlalchemy import Text, and_, column, func, or_, select, values
 
 from dr_platform._core.frozen import immutable_json_mapping
@@ -15,8 +14,8 @@ from dr_platform._core.identities import (
     WorkKey,
     normalize_key,
 )
-from dr_platform._core.ledger.schema import StagingSchema
-from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.schema import LedgerSchema
+from dr_platform._core.ledger.states import StageExecutionState, StateCount
 from dr_platform._core.validation import validate_positive_integer
 from dr_platform.inspection._validation import (
     require_campaign,
@@ -33,20 +32,6 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine, Select
 
 DEFAULT_BULK_STATUS_CHUNK_SIZE = 10_000
-
-
-class StateCount(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    state: StageExecutionState
-    count: StrictInt
-
-    @field_validator("count")
-    @classmethod
-    def _nonnegative_count(cls, value: int) -> int:
-        if value < 0:
-            raise ValueError("state count must be non-negative")
-        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +73,7 @@ def campaign_state_counts(
     campaign_key: CampaignKey | str,
     *,
     engine: Engine,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> tuple[StateCount, ...]:
     return _state_counts(
         engine=engine,
@@ -102,7 +87,7 @@ def run_state_counts(
     run_key: RunKey | str,
     *,
     engine: Engine,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> tuple[StateCount, ...]:
     """Return state counts for one run.
 
@@ -121,7 +106,7 @@ def bulk_run_state_counts(
     *,
     engine: Engine,
     chunk_size: int = DEFAULT_BULK_STATUS_CHUNK_SIZE,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> Mapping[RunKey, tuple[StateCount, ...] | None]:
     """Return one aggregate result per key with one SELECT per input chunk."""
     validate_positive_integer(chunk_size, label="bulk run count chunk size")
@@ -131,7 +116,7 @@ def bulk_run_state_counts(
     results: dict[RunKey, tuple[StateCount, ...] | None] = dict.fromkeys(
         normalized_keys
     )
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     with engine.connect() as connection:
         for start in range(0, len(normalized_keys), chunk_size):
             chunk = normalized_keys[start : start + chunk_size]
@@ -165,7 +150,7 @@ def bulk_work_statuses(
     *,
     engine: Engine,
     chunk_size: int = DEFAULT_BULK_STATUS_CHUNK_SIZE,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> BulkStatusResult:
     """Execute exactly one SELECT per input chunk."""
     validate_positive_integer(chunk_size, label="bulk status chunk size")
@@ -173,7 +158,7 @@ def bulk_work_statuses(
     normalized_keys = tuple(
         dict.fromkeys(normalize_key(key, WorkKey) for key in work_keys)
     )
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     statuses: dict[WorkKey, BulkWorkStatus] = {
         key: BulkWorkStatus(
             work_key=key,
@@ -217,7 +202,7 @@ def bulk_work_terminal_statuses(  # noqa: PLR0913 -- explicit reader filters
     engine: Engine,
     terminal_filter: TerminalSummaryFilter | None = None,
     chunk_size: int = DEFAULT_BULK_STATUS_CHUNK_SIZE,
-    schema: StagingSchema | None = None,
+    schema: LedgerSchema | None = None,
 ) -> BulkTerminalStatusResult:
     """Execute exactly one SELECT per input chunk over current attempts."""
     validate_positive_integer(
@@ -227,7 +212,7 @@ def bulk_work_terminal_statuses(  # noqa: PLR0913 -- explicit reader filters
     normalized_keys = tuple(
         dict.fromkeys(normalize_key(key, WorkKey) for key in work_keys)
     )
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     if terminal_filter is None:
         statuses: dict[WorkKey, BulkWorkTerminalStatus] = {
             key: BulkWorkTerminalStatus(
@@ -265,7 +250,7 @@ def bulk_work_terminal_statuses(  # noqa: PLR0913 -- explicit reader filters
 
 
 def _current_state_counts_statement(
-    schema: StagingSchema, scoped_item_ids: Select
+    schema: LedgerSchema, scoped_item_ids: Select
 ) -> Select:
     """Count current-stage executions over one scoped set of work items."""
     items = schema.work_items
@@ -291,7 +276,7 @@ def _current_state_counts_statement(
 
 
 def _campaign_state_counts_statement(
-    schema: StagingSchema, campaign_key: CampaignKey
+    schema: LedgerSchema, campaign_key: CampaignKey
 ) -> Select:
     items = schema.work_items
     scoped_item_ids = select(items.c.work_item_id).where(
@@ -303,7 +288,7 @@ def _campaign_state_counts_statement(
 
 
 def _run_state_counts_statement(
-    schema: StagingSchema, run_key: RunKey
+    schema: LedgerSchema, run_key: RunKey
 ) -> Select:
     items = schema.work_items
     memberships = schema.run_memberships
@@ -320,9 +305,9 @@ def _state_counts(
     engine: Engine,
     campaign_key: CampaignKey | None,
     run_key: RunKey | None,
-    schema: StagingSchema | None,
+    schema: LedgerSchema | None,
 ) -> tuple[StateCount, ...]:
-    selected_schema = schema or StagingSchema()
+    selected_schema = schema or LedgerSchema()
     with engine.connect() as connection:
         if campaign_key is not None:
             require_campaign(
@@ -355,7 +340,7 @@ def _bulk_status_statement(
     *,
     campaign_key: CampaignKey,
     work_keys: tuple[WorkKey, ...],
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ):
     items = schema.work_items
     executions = schema.stage_executions
@@ -397,7 +382,7 @@ def _bulk_terminal_status_statement(
     campaign_key: CampaignKey,
     work_keys: tuple[WorkKey, ...],
     terminal_filter: TerminalSummaryFilter | None,
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ):
     items = schema.work_items
     executions = schema.stage_executions
@@ -547,7 +532,7 @@ def _decode_bulk_work_terminal_status(row) -> BulkWorkTerminalStatus:
 def _bulk_run_counts_statement(
     *,
     run_keys: tuple[RunKey, ...],
-    schema: StagingSchema,
+    schema: LedgerSchema,
 ):
     requested = (
         values(column("run_key", Text), name="requested_runs")
@@ -583,7 +568,7 @@ def _bulk_run_counts_statement(
     )
 
 
-def current_stage_indexes(schema: StagingSchema, work_item_ids: Select):
+def current_stage_indexes(schema: LedgerSchema, work_item_ids: Select):
     executions = schema.stage_executions
     scoped_ids = work_item_ids.subquery()
     return (
@@ -603,7 +588,7 @@ def current_stage_indexes(schema: StagingSchema, work_item_ids: Select):
 
 
 def current_stage_indexes_by_run(
-    schema: StagingSchema, run_keys: tuple[str, ...]
+    schema: LedgerSchema, run_keys: tuple[str, ...]
 ):
     """Highest stage index per (run, work item) across the named runs."""
     memberships = schema.run_memberships
