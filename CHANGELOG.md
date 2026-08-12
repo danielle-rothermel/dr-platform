@@ -54,23 +54,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `evidence` and the platform writes the enlisted `dr-store` reference.
 - Qualification harnesses under `qualification/` and recorded rate artifacts
   under `docs/qualification/` and `docs/plans/async-stages-and-run-fan-in/`.
-- 2026-08-12 structural-audit cleanup: the abandoned per-row work-item
-  submission path (`insert_work_item`, `insert_work_item_with_result`,
-  `WorkItemInsertResult`, `get_work_item`, the submission-side
-  `list_work_items`, `WorkItemRecord`) together with the public
+- The abandoned per-row work-item submission path (`insert_work_item`,
+  `insert_work_item_with_result`, `WorkItemInsertResult`, `get_work_item`, the
+  submission-side `list_work_items`, `WorkItemRecord`) together with the public
   `WorkItemConflictError` export; set-oriented `submit` is the only work-item
   creation path.
-- 2026-08-12 structural-audit cleanup: unreferenced symbols
-  `get_stage_control`, `validate_evidence_reference`, the duplicate
-  run-completion workflow-id constants and `RunCompletionWorkflowIdField` in
-  `completion/execution.py`, the `run_completion_workflow_id` pass-through
-  wrapper, the `Engine | Connection` branch on `run_admission_pass` and
-  `run_barrier_pass`, and the unreachable branch in
-  `_decode_bulk_work_terminal_status`.
-- 2026-08-12 structural-audit cleanup: the layout test enumerating pre-rebuild
-  module names, the re-exports in `dr_platform/completion/__init__.py`, and the
-  vestigial `scripts/` and `qualification/` directories that held only
-  `__pycache__`.
+- Unreferenced symbols `get_stage_control`, `validate_evidence_reference`, the
+  duplicate run-completion workflow-id constants and
+  `RunCompletionWorkflowIdField` in `completion/execution.py`, the
+  `run_completion_workflow_id` pass-through wrapper, the `Engine | Connection`
+  branch on `run_admission_pass` and `run_barrier_pass`, and the unreachable
+  branch in `_decode_bulk_work_terminal_status`.
+- The layout test enumerating pre-rebuild module names, the re-exports in
+  `dr_platform/completion/__init__.py`, and the vestigial `scripts/` and
+  `qualification/` directories that held only `__pycache__`.
 
 ### Design notes (from retired async-stages plan)
 
