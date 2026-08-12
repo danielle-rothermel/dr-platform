@@ -5,7 +5,7 @@ from types import MappingProxyType
 from typing import cast
 
 
-def immutable_mapping(value: Mapping[str, str]) -> Mapping[str, str]:
+def immutable_mapping[V](value: Mapping[str, V]) -> Mapping[str, V]:
     return MappingProxyType(dict(value))
 
 

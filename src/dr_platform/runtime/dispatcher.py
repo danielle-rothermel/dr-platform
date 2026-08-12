@@ -50,6 +50,8 @@ from dr_platform.runtime.dbos import (
 if TYPE_CHECKING:
     from sqlalchemy import Engine
 
+    from dr_platform.admission.runner import AdmissionSummary
+    from dr_platform.completion.barrier import RunBarrierSummary
     from dr_platform.pipeline.registry import PipelineRegistry
     from dr_platform.recovery.live_identity import LiveDbosIdentity
 
@@ -137,6 +139,105 @@ def _registry_stage_workflows(
     )
 
 
+def _log_admission_summary(summary: AdmissionSummary) -> None:
+    logger.info(
+        "admission pass admitted=%s skipped_capacity=%s "
+        "skipped_pause=%s unconfigured=%s failed=%s mismatched=%s",
+        summary.admitted_total,
+        summary.skipped_for_capacity,
+        summary.skipped_for_pause,
+        len(summary.unconfigured_stages),
+        len(summary.failed_stages),
+        len(summary.mismatched_stages),
+    )
+    if summary.unconfigured_stages:
+        logger.warning(
+            "admission skipped stages without an empty-selector control: %s",
+            ", ".join(
+                f"{stage.pipeline_key!r} version "
+                f"{stage.pipeline_version} stage "
+                f"{stage.stage_key.value!r}"
+                for stage in summary.unconfigured_stages
+            ),
+        )
+    if summary.failed_stages:
+        logger.warning(
+            "admission failed for stages: %s",
+            ", ".join(
+                f"{stage.pipeline_key!r} version "
+                f"{stage.pipeline_version} stage "
+                f"{stage.stage_key.value!r}: "
+                f"{stage.error_type}: {stage.message}"
+                for stage in summary.failed_stages
+            ),
+        )
+    if summary.mismatched_stages:
+        logger.error(
+            "admission found registry/data drift for stages: %s",
+            ", ".join(
+                f"{stage.pipeline_key!r} version "
+                f"{stage.pipeline_version} stage "
+                f"{stage.stage_key.value!r}: {stage.message}"
+                for stage in summary.mismatched_stages
+            ),
+        )
+
+
+def _log_barrier_summary(summary: RunBarrierSummary) -> None:
+    logger.info(
+        "run barrier pass cursor_acquired=%s examined=%s "
+        "releases=%s failures=%s",
+        summary.cursor_acquired,
+        summary.candidates_examined,
+        len(summary.releases),
+        len(summary.failures),
+    )
+    if summary.failures:
+        logger.error(
+            "run barrier failed for runs: %s",
+            ", ".join(
+                f"{failure.run_key.value!r}: "
+                f"{failure.error_type}: {failure.message}"
+                for failure in summary.failures
+            ),
+        )
+
+
+def _validate_dispatcher_settings(  # noqa: PLR0913
+    *,
+    config: PlatformDbosConfig,
+    engine: Engine,
+    batch_size: int,
+    barrier_batch_size: int,
+    barrier_candidate_budget: int,
+    sweep_cron: str | None,
+    sweep_batch_size: int,
+) -> None:
+    validate_positive_integer(batch_size, label="admission batch size")
+    validate_positive_integer(
+        barrier_batch_size, label="run barrier batch size"
+    )
+    validate_positive_integer(
+        barrier_candidate_budget, label="run barrier candidate budget"
+    )
+    if barrier_candidate_budget < barrier_batch_size:
+        raise ValueError(
+            "run barrier candidate budget must be at least the batch size"
+        )
+    required_checkpoint_workers = max(batch_size, barrier_batch_size)
+    if config.pool_size < required_checkpoint_workers:
+        raise ValueError(
+            "pool size must be at least the larger of admission batch size "
+            "and run barrier batch size"
+        )
+    if sweep_cron is not None:
+        validate_positive_integer(sweep_batch_size, label="sweep batch size")
+    validate_database_colocation(
+        database_url=engine.url.render_as_string(hide_password=False),
+        system_database_url=config.system_database_url,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class DispatcherRegistration:
     """Owns dispatcher and ledger-checkpoint runtime resources."""
@@ -144,35 +245,11 @@ class DispatcherRegistration:
     client: DBOSClient
     workflow: ScheduledWorkflow
     barrier_workflow: ScheduledWorkflow
-    sweep_workflow: ScheduledWorkflow | None = None
-    _resources: _DispatcherResources | None = field(
-        default=None,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _close_lock: Lock = field(
-        default_factory=Lock,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _closed: bool = field(
-        default=False,
-        init=False,
-        repr=False,
-        compare=False,
-    )
+    sweep_workflow: ScheduledWorkflow | None
+    _resources: _DispatcherResources = field(repr=False, compare=False)
 
     def close(self) -> None:
-        with self._close_lock:
-            if self._closed:
-                return
-            if self._resources is None:
-                self.client.destroy()
-            else:
-                self._resources.close()
-            object.__setattr__(self, "_closed", True)
+        self._resources.close()
 
 
 class _DispatcherResources:
@@ -205,7 +282,7 @@ class _DispatcherResources:
             self._closed = True
 
 
-def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
+def register_scheduled_dispatcher(  # noqa: PLR0913
     *,
     config: PlatformDbosConfig,
     engine: Engine,
@@ -220,28 +297,14 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
     sweep_batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
 ) -> DispatcherRegistration:
     """Register admission, run-barrier, and abandoned-stage reconciliation."""
-    validate_positive_integer(batch_size, label="admission batch size")
-    validate_positive_integer(
-        barrier_batch_size, label="run barrier batch size"
-    )
-    validate_positive_integer(
-        barrier_candidate_budget, label="run barrier candidate budget"
-    )
-    if barrier_candidate_budget < barrier_batch_size:
-        raise ValueError(
-            "run barrier candidate budget must be at least the batch size"
-        )
-    required_checkpoint_workers = max(batch_size, barrier_batch_size)
-    if config.pool_size < required_checkpoint_workers:
-        raise ValueError(
-            "pool size must be at least the larger of admission batch size "
-            "and run barrier batch size"
-        )
-    if sweep_cron is not None:
-        validate_positive_integer(sweep_batch_size, label="sweep batch size")
-    validate_database_colocation(
-        database_url=engine.url.render_as_string(hide_password=False),
-        system_database_url=config.system_database_url,
+    _validate_dispatcher_settings(
+        config=config,
+        engine=engine,
+        batch_size=batch_size,
+        barrier_batch_size=barrier_batch_size,
+        barrier_candidate_budget=barrier_candidate_budget,
+        sweep_cron=sweep_cron,
+        sweep_batch_size=sweep_batch_size,
     )
     _require_wrapped_registry(registry)
     validate_registry_recovery_cap(registry, config.max_recovery_attempts)
@@ -288,48 +351,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
                 registry=registry,
                 batch_size=batch_size,
             )
-            logger.info(
-                "admission pass admitted=%s skipped_capacity=%s "
-                "skipped_pause=%s unconfigured=%s failed=%s mismatched=%s",
-                summary.admitted_total,
-                summary.skipped_for_capacity,
-                summary.skipped_for_pause,
-                len(summary.unconfigured_stages),
-                len(summary.failed_stages),
-                len(summary.mismatched_stages),
-            )
-            if summary.unconfigured_stages:
-                logger.warning(
-                    "admission skipped stages without an empty-selector "
-                    "control: %s",
-                    ", ".join(
-                        f"{stage.pipeline_key!r} version "
-                        f"{stage.pipeline_version} stage "
-                        f"{stage.stage_key.value!r}"
-                        for stage in summary.unconfigured_stages
-                    ),
-                )
-            if summary.failed_stages:
-                logger.warning(
-                    "admission failed for stages: %s",
-                    ", ".join(
-                        f"{stage.pipeline_key!r} version "
-                        f"{stage.pipeline_version} stage "
-                        f"{stage.stage_key.value!r}: "
-                        f"{stage.error_type}: {stage.message}"
-                        for stage in summary.failed_stages
-                    ),
-                )
-            if summary.mismatched_stages:
-                logger.error(
-                    "admission found registry/data drift for stages: %s",
-                    ", ".join(
-                        f"{stage.pipeline_key!r} version "
-                        f"{stage.pipeline_version} stage "
-                        f"{stage.stage_key.value!r}: {stage.message}"
-                        for stage in summary.mismatched_stages
-                    ),
-                )
+            _log_admission_summary(summary)
 
         @DBOS.scheduled(barrier_cron)
         @DBOS.workflow(name=RUN_BARRIER_WORKFLOW_NAME)
@@ -344,23 +366,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
                 batch_size=barrier_batch_size,
                 candidate_budget=barrier_candidate_budget,
             )
-            logger.info(
-                "run barrier pass cursor_acquired=%s examined=%s "
-                "releases=%s failures=%s",
-                summary.cursor_acquired,
-                summary.candidates_examined,
-                len(summary.releases),
-                len(summary.failures),
-            )
-            if summary.failures:
-                logger.error(
-                    "run barrier failed for runs: %s",
-                    ", ".join(
-                        f"{failure.run_key.value!r}: "
-                        f"{failure.error_type}: {failure.message}"
-                        for failure in summary.failures
-                    ),
-                )
+            _log_barrier_summary(summary)
 
         if sweep_cron is not None:
 
@@ -398,8 +404,8 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
             workflow=cast("ScheduledWorkflow", dispatch),
             barrier_workflow=cast("ScheduledWorkflow", reconcile_run_barriers),
             sweep_workflow=sweep_workflow,
+            _resources=resources,
         )
-        object.__setattr__(registration, "_resources", resources)
     except Exception:
         if resources is not None:
             resources.close()

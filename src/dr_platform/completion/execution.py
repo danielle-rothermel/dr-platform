@@ -4,7 +4,6 @@ import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003 -- Pydantic resolves it
-from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 from dbos import DBOS
@@ -18,11 +17,13 @@ from pydantic import (
 )
 from sqlalchemy import null, select, update
 
+from dr_platform._core.frozen import immutable_mapping
 from dr_platform._core.identities import (
     CampaignKey,
     PipelineKey,
     RunCompletionKey,
     RunKey,
+    normalize_key,
 )
 from dr_platform._core.ledger.completion_attempts import (
     RunCompletionAttemptRecord,
@@ -75,29 +76,17 @@ class RunCompletionPayload(BaseModel):
     @field_validator("campaign_key", mode="before")
     @classmethod
     def _campaign_key(cls, value: object) -> CampaignKey:
-        if isinstance(value, CampaignKey):
-            return value
-        if not isinstance(value, str):
-            raise TypeError("campaign key must be a string")
-        return CampaignKey(value)
+        return normalize_key(cast("CampaignKey | str", value), CampaignKey)
 
     @field_validator("run_key", mode="before")
     @classmethod
     def _run_key(cls, value: object) -> RunKey:
-        if isinstance(value, RunKey):
-            return value
-        if not isinstance(value, str):
-            raise TypeError("run key must be a string")
-        return RunKey(value)
+        return normalize_key(cast("RunKey | str", value), RunKey)
 
     @field_validator("pipeline_key", mode="before")
     @classmethod
     def _pipeline_key(cls, value: object) -> PipelineKey:
-        if isinstance(value, PipelineKey):
-            return value
-        if not isinstance(value, str):
-            raise TypeError("pipeline key must be a string")
-        return PipelineKey(value)
+        return normalize_key(cast("PipelineKey | str", value), PipelineKey)
 
     @field_serializer("campaign_key", "run_key", "pipeline_key")
     def _serialize_key(self, value: object) -> str:
@@ -248,6 +237,26 @@ def wrap_run_completion(
     )
 
 
+def _matches_recorded_outcome(
+    existing: RunCompletionExecutionRecord,
+    *,
+    succeeded: bool,
+    output_reference: str | None,
+    error_summary: Mapping[str, object] | None,
+) -> bool:
+    """Whether a terminal record already holds exactly this outcome."""
+    expected_state = (
+        RunCompletionExecutionState.SUCCEEDED
+        if succeeded
+        else RunCompletionExecutionState.FAILED
+    )
+    return (
+        existing.state is expected_state
+        and existing.output_reference == output_reference
+        and dict(existing.error_summary or {}) == dict(error_summary or {})
+    )
+
+
 def record_run_completion_outcome(  # noqa: PLR0913
     connection: Connection,
     *,
@@ -292,15 +301,11 @@ def record_run_completion_outcome(  # noqa: PLR0913
         )
     existing = _decode_execution(row, attempt=attempt)
     if existing.state is not RunCompletionExecutionState.ENQUEUED:
-        if (
-            existing.state
-            is (
-                RunCompletionExecutionState.SUCCEEDED
-                if succeeded
-                else RunCompletionExecutionState.FAILED
-            )
-            and existing.output_reference == output_reference
-            and dict(existing.error_summary or {}) == dict(error_summary or {})
+        if _matches_recorded_outcome(
+            existing,
+            succeeded=succeeded,
+            output_reference=output_reference,
+            error_summary=error_summary,
         ):
             return existing
         raise RunCompletionOutcomeError(
@@ -367,9 +372,7 @@ def inspect_run_completion(
     schema: StagingSchema | None = None,
 ) -> RunCompletionExecutionRecord:
     selected_schema = schema or StagingSchema()
-    normalized_run_key = (
-        run_key if isinstance(run_key, RunKey) else RunKey(run_key)
-    )
+    normalized_run_key = normalize_key(run_key, RunKey)
     table = selected_schema.run_completion_executions
     with engine.connect() as connection:
         row = (
@@ -420,9 +423,7 @@ def _decode_execution(
         enqueued_at=row["enqueued_at"],
         output_reference=row["output_reference"],
         error_summary=(
-            None
-            if error_summary is None
-            else MappingProxyType(dict(error_summary))
+            None if error_summary is None else immutable_mapping(error_summary)
         ),
         terminal_at=row["terminal_at"],
     )

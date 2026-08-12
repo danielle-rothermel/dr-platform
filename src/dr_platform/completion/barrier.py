@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import Engine, func, select, true, update
 from sqlalchemy.dialects.postgresql import insert
 
+from dr_platform._core.clock import utc_now
 from dr_platform._core.identities import (
     CampaignKey,
     PipelineKey,
@@ -26,10 +26,14 @@ from dr_platform.completion.execution import (
     RunCompletionPayload,
     is_run_completion_wrapped,
 )
-from dr_platform.inspection.statuses import StateCount
+from dr_platform.inspection.statuses import (
+    StateCount,
+    current_stage_indexes_by_run,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
 
     from dbos import DBOSClient, EnqueueOptions
     from sqlalchemy import Connection
@@ -45,10 +49,6 @@ _TERMINAL_STATES = (
     StageExecutionState.FAILED,
     StageExecutionState.CANCELLED,
 )
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +99,7 @@ def run_barrier_pass(  # noqa: PLR0913 -- explicit reconciliation boundary
     registry: PipelineRegistry,
     batch_size: int = DEFAULT_RUN_BARRIER_BATCH_SIZE,
     candidate_budget: int = DEFAULT_RUN_BARRIER_CANDIDATE_BUDGET,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> RunBarrierSummary:
     validate_positive_integer(batch_size, label="run barrier batch size")
@@ -376,28 +376,8 @@ def _terminal_counts(
     }
     if not run_keys:
         return empty
-    memberships = schema.run_memberships
     executions = schema.stage_executions
-    scoped = (
-        select(memberships.c.run_key, memberships.c.work_item_id)
-        .where(memberships.c.run_key.in_(run_keys))
-        .subquery()
-    )
-    current = (
-        select(
-            scoped.c.run_key,
-            scoped.c.work_item_id,
-            func.max(executions.c.stage_index).label("stage_index"),
-        )
-        .select_from(
-            scoped.join(
-                executions,
-                scoped.c.work_item_id == executions.c.work_item_id,
-            )
-        )
-        .group_by(scoped.c.run_key, scoped.c.work_item_id)
-        .subquery()
-    )
+    current = current_stage_indexes_by_run(schema, run_keys)
     rows = connection.execute(
         select(
             current.c.run_key,

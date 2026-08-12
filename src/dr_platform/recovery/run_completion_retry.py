@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import null, select, update
 
+from dr_platform._core.clock import utc_now
 from dr_platform._core.identities import (
     CampaignKey,
     PipelineKey,
     RunKey,
+    normalize_key,
 )
 from dr_platform._core.ledger.completion_attempts import (
     RunCompletionAttemptRecord,
@@ -31,16 +32,13 @@ from dr_platform.inspection.statuses import StateCount
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from datetime import datetime
 
     from dbos import DBOSClient, EnqueueOptions
     from sqlalchemy import Engine
 
     from dr_platform.pipeline.definitions import RunCompletionDefinition
     from dr_platform.pipeline.registry import PipelineRegistry
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,14 +53,12 @@ def retry_run_completion(  # noqa: PLR0913 -- explicit operator boundary
     engine: Engine,
     client: DBOSClient,
     registry: PipelineRegistry,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> RunCompletionRetryResult:
     """Only FAILED run completions may prepare a new attempt for enqueue."""
     selected_schema = schema or StagingSchema()
-    normalized_run_key = (
-        run_key if isinstance(run_key, RunKey) else RunKey(run_key)
-    )
+    normalized_run_key = normalize_key(run_key, RunKey)
     execution_record: RunCompletionExecutionRecord
     new_attempt_record: RunCompletionAttemptRecord
     with engine.begin() as connection:

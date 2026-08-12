@@ -47,6 +47,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generated identifier suffix rather than an unreachable inner guard.
 - `.defs/terms.toml` aligns run completion execution with per-attempt identity
   and adds `payload`, `terminal` cross-notes, and `unbudgeted`.
+- 2026-08-12 single-path consolidation (structural audit, wave 2). One workflow
+  attribute binding mechanism in `execution/_workflow_binding.py` backs both the
+  object-store and ledger-checkpoint bindings; one private generic
+  `normalize_key` in `_core/identities.py` replaces the three `inspection`
+  helpers, ~19 inline coercion ternaries, and seven hand-written pydantic
+  key validators; one `utc_now` in `_core/clock.py` replaces nine per-module
+  copies; `_core.frozen.immutable_mapping` replaces the inline
+  `MappingProxyType(dict(...))` sites; `_core/validation.py` integer guards
+  replace the hand-rolled copies in `insert_stage_execution` and the stage
+  control writers. `MembershipDigestField` now derives the membership-digest
+  byte fragments it declares, and `_core/ledger/schema.py` derives
+  `MAX_PREFIX_BYTES` from the declared table metadata instead of a
+  hand-maintained suffix list.
+- Dispatcher registration hygiene: `_log_admission_summary`,
+  `_log_barrier_summary`, and `_validate_dispatcher_settings` are module-level
+  helpers, and `DispatcherRegistration` holds a required `_resources` field as
+  its single close-once guard.
+- Shared read paths: `current_stage_indexes_by_run` serves both the bulk run
+  status reader and the run barrier; `_matches_recorded_outcome` names the
+  idempotent-replay comparison; `_StageIdentity` is a `NamedTuple`; the three
+  ledger record modules share one section grammar, `select(table)` idiom, and
+  `_decode_<record>` naming.
 
 ### Removed
 

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from enum import UNIQUE, StrEnum, verify
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Engine, select
 
+from dr_platform._core.clock import utc_now
 from dr_platform._core.identities import RunKey, StageKey
 from dr_platform._core.ledger.attempts import record_stage_attempt_terminal
 from dr_platform._core.ledger.executions import transition_stage_execution
@@ -28,8 +28,9 @@ from dr_platform.completion.execution import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from datetime import datetime
 
-    from dbos import DBOSClient
+    from dbos import DBOSClient, WorkflowStatus
     from sqlalchemy import Connection
 
     from dr_platform.recovery.live_identity import LiveDbosIdentity
@@ -61,10 +62,6 @@ _FAILED_DBOS_STATUSES = frozenset(
         DbosWorkflowStatus.MAX_RECOVERY_ATTEMPTS_EXCEEDED.value,
     }
 )
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _safe_error_message(error: object) -> str:
@@ -142,7 +139,7 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
     client: DBOSClient,
     live_identity: LiveDbosIdentity,
     batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> SweepSummary:
     """Project terminal DBOS abandonment without resuming or retrying.
@@ -336,31 +333,28 @@ def _project_terminal_status(  # noqa: PLR0913 -- explicit projection facts
     return True
 
 
-def _dbos_failure_error_summary(status: object) -> dict[str, object]:
-    dbos_status = getattr(status, "status", None)
-    error = getattr(status, "error", None)
-    message = str(dbos_status)
-    if error is not None:
-        message = _safe_error_message(error)
+def _dbos_failure_error_summary(status: WorkflowStatus) -> dict[str, object]:
+    message = str(status.status)
+    if status.error is not None:
+        message = _safe_error_message(status.error)
     return build_run_completion_error_summary(
         error_type="dbos.abandonment",
         message=message,
-        dbos_status=str(dbos_status),
+        dbos_status=str(status.status),
     )
 
 
 def _run_completion_abandonment_error_summary(
-    status: object,
+    status: WorkflowStatus,
     *,
     live_identity: LiveDbosIdentity,
 ) -> dict[str, object] | None:
-    dbos_status = getattr(status, "status", None)
-    if dbos_status in _FAILED_DBOS_STATUSES:
+    if status.status in _FAILED_DBOS_STATUSES:
         return _dbos_failure_error_summary(status)
-    if dbos_status == DbosWorkflowStatus.PENDING.value:
+    if status.status == DbosWorkflowStatus.PENDING.value:
         evidence = _pending_abandonment_evidence(
-            app_version=getattr(status, "app_version", None),
-            executor_id=getattr(status, "executor_id", None),
+            app_version=status.app_version,
+            executor_id=status.executor_id,
             live_identity=live_identity,
         )
         if evidence is None:
@@ -368,7 +362,7 @@ def _run_completion_abandonment_error_summary(
         return build_run_completion_error_summary(
             error_type="dbos.abandonment",
             message=evidence.value,
-            dbos_status=str(dbos_status),
+            dbos_status=str(status.status),
             reason=evidence.value,
         )
     return None
@@ -388,7 +382,7 @@ def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection bou
     client: DBOSClient,
     live_identity: LiveDbosIdentity,
     batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> RunCompletionSweepSummary:
     """Project terminal DBOS abandonment for enqueued run completions.
@@ -453,7 +447,7 @@ def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection bou
                     ),
                     run_key=attempt.run_key,
                     state=RunCompletionExecutionState.FAILED,
-                    dbos_status=str(getattr(status, "status", "")),
+                    dbos_status=str(status.status),
                 )
             )
         if len(enqueued) < batch_size:

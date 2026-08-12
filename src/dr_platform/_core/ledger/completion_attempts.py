@@ -70,6 +70,35 @@ def run_completion_workflow_id(
     return f"{RUN_COMPLETION_WORKFLOW_ID_PREFIX}{digest}-a{attempt_number}"
 
 
+def create_initial_run_completion_attempt(  # noqa: PLR0913
+    connection: Connection,
+    *,
+    run_completion_execution_id: int,
+    run_key: RunKey,
+    pipeline_key: PipelineKey,
+    pipeline_version: int,
+    completion_key: RunCompletionKey,
+    created_at: datetime,
+    enqueued_at: datetime,
+    schema: StagingSchema | None = None,
+) -> RunCompletionAttemptRecord:
+    return _insert_run_completion_attempt(
+        connection,
+        schema=schema or StagingSchema(),
+        run_completion_execution_id=run_completion_execution_id,
+        run_key=run_key,
+        pipeline_key=pipeline_key,
+        pipeline_version=pipeline_version,
+        completion_key=completion_key,
+        attempt_number=1,
+        created_at=created_at,
+        enqueued_at=enqueued_at,
+        terminal_at=None,
+        terminal_summary=None,
+        terminal_reference=None,
+    )
+
+
 def append_run_completion_attempt(  # noqa: PLR0913 -- explicit persistence facts
     connection: Connection,
     *,
@@ -110,32 +139,20 @@ def append_run_completion_attempt(  # noqa: PLR0913 -- explicit persistence fact
         )
 
     attempt_number = source["current_attempt"] + 1
-    workflow_id = run_completion_workflow_id(
+    record = _insert_run_completion_attempt(
+        connection,
+        schema=selected_schema,
+        run_completion_execution_id=run_completion_execution_id,
         run_key=run_key,
         pipeline_key=pipeline_key,
         pipeline_version=pipeline_version,
         completion_key=completion_key,
         attempt_number=attempt_number,
-    )
-    summary = null() if terminal_summary is None else dict(terminal_summary)
-    attempts = selected_schema.run_completion_attempts
-    row = (
-        connection.execute(
-            attempts.insert()
-            .values(
-                run_completion_execution_id=run_completion_execution_id,
-                attempt_number=attempt_number,
-                workflow_id=workflow_id,
-                terminal_summary=summary,
-                terminal_reference=terminal_reference,
-                created_at=created_at,
-                enqueued_at=enqueued_at,
-                terminal_at=terminal_at,
-            )
-            .returning(*attempts.c)
-        )
-        .mappings()
-        .one()
+        created_at=created_at,
+        enqueued_at=enqueued_at,
+        terminal_at=terminal_at,
+        terminal_summary=terminal_summary,
+        terminal_reference=terminal_reference,
     )
     changed = connection.execute(
         update(executions)
@@ -150,91 +167,7 @@ def append_run_completion_attempt(  # noqa: PLR0913 -- explicit persistence fact
         raise RunCompletionAttemptSequenceError(
             "run completion attempt sequence changed while appending"
         )
-    return _decode_attempt(row)
-
-
-def create_initial_run_completion_attempt(  # noqa: PLR0913
-    connection: Connection,
-    *,
-    run_completion_execution_id: int,
-    run_key: RunKey,
-    pipeline_key: PipelineKey,
-    pipeline_version: int,
-    completion_key: RunCompletionKey,
-    created_at: datetime,
-    enqueued_at: datetime,
-    schema: StagingSchema | None = None,
-) -> RunCompletionAttemptRecord:
-    workflow_id = run_completion_workflow_id(
-        run_key=run_key,
-        pipeline_key=pipeline_key,
-        pipeline_version=pipeline_version,
-        completion_key=completion_key,
-        attempt_number=1,
-    )
-    selected_schema = schema or StagingSchema()
-    attempts = selected_schema.run_completion_attempts
-    row = (
-        connection.execute(
-            attempts.insert()
-            .values(
-                run_completion_execution_id=run_completion_execution_id,
-                attempt_number=1,
-                workflow_id=workflow_id,
-                created_at=created_at,
-                enqueued_at=enqueued_at,
-            )
-            .returning(*attempts.c)
-        )
-        .mappings()
-        .one()
-    )
-    return _decode_attempt(row)
-
-
-def get_run_completion_attempt(
-    connection: Connection,
-    *,
-    run_completion_execution_id: int,
-    attempt_number: int,
-    schema: StagingSchema | None = None,
-) -> RunCompletionAttemptRecord | None:
-    selected_schema = schema or StagingSchema()
-    attempts = selected_schema.run_completion_attempts
-    row = (
-        connection.execute(
-            select(attempts).where(
-                attempts.c.run_completion_execution_id
-                == run_completion_execution_id,
-                attempts.c.attempt_number == attempt_number,
-            )
-        )
-        .mappings()
-        .one_or_none()
-    )
-    if row is None:
-        return None
-    return _decode_attempt(row)
-
-
-def get_run_completion_attempt_by_workflow_id(
-    connection: Connection,
-    *,
-    workflow_id: str,
-    schema: StagingSchema | None = None,
-) -> RunCompletionAttemptRecord | None:
-    selected_schema = schema or StagingSchema()
-    attempts = selected_schema.run_completion_attempts
-    row = (
-        connection.execute(
-            select(attempts).where(attempts.c.workflow_id == workflow_id)
-        )
-        .mappings()
-        .one_or_none()
-    )
-    if row is None:
-        return None
-    return _decode_attempt(row)
+    return record
 
 
 def record_run_completion_attempt_terminal(  # noqa: PLR0913
@@ -289,10 +222,103 @@ def record_run_completion_attempt_terminal(  # noqa: PLR0913
         .mappings()
         .one()
     )
-    return _decode_attempt(updated)
+    return _decode_run_completion_attempt(updated)
 
 
-def _decode_attempt(row: RowMapping) -> RunCompletionAttemptRecord:
+def get_run_completion_attempt(
+    connection: Connection,
+    *,
+    run_completion_execution_id: int,
+    attempt_number: int,
+    schema: StagingSchema | None = None,
+) -> RunCompletionAttemptRecord | None:
+    selected_schema = schema or StagingSchema()
+    attempts = selected_schema.run_completion_attempts
+    row = (
+        connection.execute(
+            select(attempts).where(
+                attempts.c.run_completion_execution_id
+                == run_completion_execution_id,
+                attempts.c.attempt_number == attempt_number,
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        return None
+    return _decode_run_completion_attempt(row)
+
+
+def get_run_completion_attempt_by_workflow_id(
+    connection: Connection,
+    *,
+    workflow_id: str,
+    schema: StagingSchema | None = None,
+) -> RunCompletionAttemptRecord | None:
+    selected_schema = schema or StagingSchema()
+    attempts = selected_schema.run_completion_attempts
+    row = (
+        connection.execute(
+            select(attempts).where(attempts.c.workflow_id == workflow_id)
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        return None
+    return _decode_run_completion_attempt(row)
+
+
+def _insert_run_completion_attempt(  # noqa: PLR0913 -- explicit persistence facts
+    connection: Connection,
+    *,
+    schema: StagingSchema,
+    run_completion_execution_id: int,
+    run_key: RunKey,
+    pipeline_key: PipelineKey,
+    pipeline_version: int,
+    completion_key: RunCompletionKey,
+    attempt_number: int,
+    created_at: datetime,
+    enqueued_at: datetime | None,
+    terminal_at: datetime | None,
+    terminal_summary: Mapping[str, object] | None,
+    terminal_reference: str | None,
+) -> RunCompletionAttemptRecord:
+    workflow_id = run_completion_workflow_id(
+        run_key=run_key,
+        pipeline_key=pipeline_key,
+        pipeline_version=pipeline_version,
+        completion_key=completion_key,
+        attempt_number=attempt_number,
+    )
+    summary = null() if terminal_summary is None else dict(terminal_summary)
+    attempts = schema.run_completion_attempts
+    row = (
+        connection.execute(
+            attempts.insert()
+            .values(
+                run_completion_execution_id=run_completion_execution_id,
+                attempt_number=attempt_number,
+                workflow_id=workflow_id,
+                terminal_summary=summary,
+                terminal_reference=terminal_reference,
+                created_at=created_at,
+                enqueued_at=enqueued_at,
+                terminal_at=terminal_at,
+            )
+            .returning(*attempts.c)
+        )
+        .mappings()
+        .one()
+    )
+    return _decode_run_completion_attempt(row)
+
+
+def _decode_run_completion_attempt(
+    row: RowMapping,
+) -> RunCompletionAttemptRecord:
     terminal_summary = row["terminal_summary"]
     return RunCompletionAttemptRecord(
         run_completion_attempt_id=row["run_completion_attempt_id"],

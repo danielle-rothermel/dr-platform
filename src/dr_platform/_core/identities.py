@@ -37,6 +37,15 @@ class _ValidatedKey:
         return self.value
 
 
+def normalize_key[K: _ValidatedKey](value: K | str, key_type: type[K]) -> K:
+    """Coerce a string into ``key_type``, passing through existing keys."""
+    if isinstance(value, key_type):
+        return value
+    if not isinstance(value, str):
+        raise TypeError(f"{key_type._label} must be a string")
+    return key_type(value)
+
+
 @dataclass(frozen=True, slots=True)
 class CampaignKey(_ValidatedKey):
     _label: ClassVar[str] = "campaign key"

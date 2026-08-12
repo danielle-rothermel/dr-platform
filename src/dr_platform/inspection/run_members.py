@@ -6,12 +6,16 @@ from typing import TYPE_CHECKING, cast
 from sqlalchemy import and_, select
 
 from dr_platform._core.frozen import immutable_json_mapping
-from dr_platform._core.identities import RunKey, StageKey, WorkKey
+from dr_platform._core.identities import (
+    RunKey,
+    StageKey,
+    WorkKey,
+    normalize_key,
+)
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.inspection._validation import (
     DEFAULT_INSPECTION_LIMIT,
-    normalize_run_key,
     require_run,
     validate_limit,
     validate_run_member_cursor,
@@ -54,7 +58,7 @@ def list_run_members(  # noqa: PLR0913 -- explicit reader filters
 ) -> tuple[RunMemberSummary, ...]:
     validate_limit(limit)
     selected_schema = schema or StagingSchema()
-    normalized_run = normalize_run_key(run_key)
+    normalized_run = normalize_key(run_key, RunKey)
     memberships = selected_schema.run_memberships
     items = selected_schema.work_items
     executions = selected_schema.stage_executions

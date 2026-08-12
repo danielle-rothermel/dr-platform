@@ -6,7 +6,13 @@ from typing import TYPE_CHECKING
 from sqlalchemy import and_, select
 
 from dr_platform._core.frozen import immutable_mapping
-from dr_platform._core.identities import CampaignKey, RunKey, StageKey, WorkKey
+from dr_platform._core.identities import (
+    CampaignKey,
+    RunKey,
+    StageKey,
+    WorkKey,
+    normalize_key,
+)
 from dr_platform._core.ledger.attempts import (
     StageAttemptRecord,
     list_stage_attempts,
@@ -16,7 +22,6 @@ from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.inspection._validation import (
     DEFAULT_INSPECTION_LIMIT,
-    normalize_campaign_key,
     require_campaign,
     validate_limit,
     validate_work_item_cursor,
@@ -63,7 +68,7 @@ def list_work_items(  # noqa: PLR0913 -- explicit reader filters
     if state is not None and not isinstance(state, StageExecutionState):
         raise TypeError("state must be a StageExecutionState")
     selected_schema = schema or StagingSchema()
-    normalized_campaign = normalize_campaign_key(campaign_key)
+    normalized_campaign = normalize_key(campaign_key, CampaignKey)
     items = selected_schema.work_items
     executions = selected_schema.stage_executions
     campaign_item_ids = select(items.c.work_item_id).where(

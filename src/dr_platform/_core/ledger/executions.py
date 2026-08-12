@@ -6,29 +6,19 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 
-from dr_platform._core.identities import StageKey
+from dr_platform._core.identities import StageKey, normalize_key
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.validation import (
+    validate_nonnegative_integer,
+    validate_positive_integer,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from sqlalchemy import Connection
     from sqlalchemy.engine import RowMapping
-
-
-@dataclass(frozen=True, slots=True)
-class StageExecutionRecord:
-    stage_execution_id: int
-    work_item_id: int
-    stage_key: StageKey
-    stage_index: int
-    state: StageExecutionState
-    current_attempt: int
-    rank: int
-    output_reference: str | None
-    created_at: datetime
-    updated_at: datetime
 
 
 VALID_STAGE_TRANSITIONS = {
@@ -48,6 +38,21 @@ VALID_STAGE_TRANSITIONS = {
     StageExecutionState.SUCCEEDED: frozenset(),
     StageExecutionState.CANCELLED: frozenset(),
 }
+_OUTPUT_REFERENCE_UNSET = object()
+
+
+@dataclass(frozen=True, slots=True)
+class StageExecutionRecord:
+    stage_execution_id: int
+    work_item_id: int
+    stage_key: StageKey
+    stage_index: int
+    state: StageExecutionState
+    current_attempt: int
+    rank: int
+    output_reference: str | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class StageExecutionConflictError(RuntimeError):
@@ -56,9 +61,6 @@ class StageExecutionConflictError(RuntimeError):
 
 class StageTransitionError(RuntimeError):
     pass
-
-
-_OUTPUT_REFERENCE_UNSET = object()
 
 
 def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
@@ -71,21 +73,9 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
     schema: StagingSchema | None = None,
 ) -> StageExecutionRecord:
     selected_schema = schema or StagingSchema()
-    normalized_stage_key = (
-        stage_key if isinstance(stage_key, StageKey) else StageKey(stage_key)
-    )
-    if (
-        isinstance(work_item_id, bool)
-        or not isinstance(work_item_id, int)
-        or work_item_id <= 0
-    ):
-        raise ValueError("work item id must be a positive integer")
-    if (
-        isinstance(stage_index, bool)
-        or not isinstance(stage_index, int)
-        or stage_index < 0
-    ):
-        raise ValueError("stage index must be a non-negative integer")
+    normalized_stage_key = normalize_key(stage_key, StageKey)
+    validate_positive_integer(work_item_id, label="work item id")
+    validate_nonnegative_integer(stage_index, label="stage index")
 
     work_items = selected_schema.work_items
     rank = connection.execute(
@@ -143,51 +133,6 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
     return _decode_stage_execution(row)
 
 
-def get_stage_execution(
-    connection: Connection,
-    *,
-    stage_execution_id: int,
-    schema: StagingSchema | None = None,
-) -> StageExecutionRecord | None:
-    selected_schema = schema or StagingSchema()
-    table = selected_schema.stage_executions
-    row = (
-        connection.execute(
-            table.select().where(
-                table.c.stage_execution_id == stage_execution_id
-            )
-        )
-        .mappings()
-        .one_or_none()
-    )
-    return None if row is None else _decode_stage_execution(row)
-
-
-def _get_stage_execution_for_work(
-    connection: Connection,
-    *,
-    work_item_id: int,
-    stage_key: StageKey | str,
-    schema: StagingSchema | None = None,
-) -> StageExecutionRecord | None:
-    selected_schema = schema or StagingSchema()
-    normalized_stage_key = (
-        stage_key if isinstance(stage_key, StageKey) else StageKey(stage_key)
-    )
-    table = selected_schema.stage_executions
-    row = (
-        connection.execute(
-            table.select().where(
-                table.c.work_item_id == work_item_id,
-                table.c.stage_key == normalized_stage_key.value,
-            )
-        )
-        .mappings()
-        .one_or_none()
-    )
-    return None if row is None else _decode_stage_execution(row)
-
-
 def transition_stage_execution(  # noqa: PLR0913 -- explicit transition facts
     connection: Connection,
     *,
@@ -213,9 +158,9 @@ def transition_stage_execution(  # noqa: PLR0913 -- explicit transition facts
     table = selected_schema.stage_executions
     row = (
         connection.execute(
-            table.select()
+            select(table)
             .where(table.c.stage_execution_id == stage_execution_id)
-            .with_for_update()
+            .with_for_update(of=table)
         )
         .mappings()
         .one_or_none()
@@ -248,6 +193,49 @@ def transition_stage_execution(  # noqa: PLR0913 -- explicit transition facts
         .one()
     )
     return _decode_stage_execution(updated_row)
+
+
+def get_stage_execution(
+    connection: Connection,
+    *,
+    stage_execution_id: int,
+    schema: StagingSchema | None = None,
+) -> StageExecutionRecord | None:
+    selected_schema = schema or StagingSchema()
+    table = selected_schema.stage_executions
+    row = (
+        connection.execute(
+            select(table).where(
+                table.c.stage_execution_id == stage_execution_id
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    return None if row is None else _decode_stage_execution(row)
+
+
+def _get_stage_execution_for_work(
+    connection: Connection,
+    *,
+    work_item_id: int,
+    stage_key: StageKey | str,
+    schema: StagingSchema | None = None,
+) -> StageExecutionRecord | None:
+    selected_schema = schema or StagingSchema()
+    normalized_stage_key = normalize_key(stage_key, StageKey)
+    table = selected_schema.stage_executions
+    row = (
+        connection.execute(
+            select(table).where(
+                table.c.work_item_id == work_item_id,
+                table.c.stage_key == normalized_stage_key.value,
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    return None if row is None else _decode_stage_execution(row)
 
 
 def _decode_stage_execution(row: RowMapping) -> StageExecutionRecord:

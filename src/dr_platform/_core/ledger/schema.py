@@ -32,83 +32,13 @@ if TYPE_CHECKING:
 
 PREFIX_PATTERN = re.compile(r"[a-z_][a-z0-9_]*")
 POSTGRESQL_MAX_IDENTIFIER_BYTES = 63
-_TABLE_NAME_SUFFIXES: tuple[str, ...] = (
-    "pipeline_runs",
-    "ck_pipeline_runs_version",
-    "ck_pipeline_runs_member_count",
-    "ck_pipeline_runs_manifest_binding",
-    "ck_pipeline_runs_completion_manifest",
-    "ck_pipeline_runs_registration_time",
-    "ck_pipeline_runs_registration_count",
-    "ck_pipeline_runs_receipt_presence",
-    "ck_pipeline_runs_receipt_counts",
-    "ck_pipeline_runs_release_time",
-    "ck_pipeline_runs_release_counts",
-    "ix_pipeline_runs_completion_candidates",
-    "ix_pipeline_runs_campaign_cursor",
-    "run_barrier_cursor",
-    "ck_run_barrier_cursor_singleton",
-    "work_items",
-    "fk_work_items_origin_run",
-    "uq_work_items_campaign_work",
-    "uq_work_items_id_rank",
-    "ck_work_items_labels_object",
-    "ck_work_items_rank",
-    "ix_work_items_labels",
-    "run_memberships",
-    "fk_run_memberships_run",
-    "fk_run_memberships_work_item",
-    "uq_run_memberships_run_work",
-    "ck_run_memberships_ordinal",
-    "stage_executions",
-    "fk_stage_executions_work_item",
-    "uq_stage_executions_work_stage",
-    "ck_stage_executions_index",
-    "ck_stage_executions_state",
-    "ck_stage_executions_current_attempt",
-    "ck_stage_executions_rank",
-    "ck_stage_executions_updated_time",
-    "ix_stage_executions_ready_admission",
-    "ix_stage_executions_nonterminal_work",
-    "stage_attempts",
-    "fk_stage_attempts_execution",
-    "uq_stage_attempts_execution_number",
-    "uq_stage_attempts_workflow",
-    "ck_stage_attempts_number",
-    "ck_stage_attempts_summary_object",
-    "ck_stage_attempts_admitted_time",
-    "ck_stage_attempts_terminal_time",
-    "ck_stage_attempts_time_order",
-    "stage_controls",
-    "uq_stage_controls_stage_selector",
-    "ck_stage_controls_version",
-    "ck_stage_controls_selector_object",
-    "ck_stage_controls_capacity",
-    "run_completion_executions",
-    "fk_run_completion_executions_run",
-    "ck_run_completion_executions_state",
-    "ck_run_completion_executions_attempt",
-    "ck_rc_exec_terminal_time",
-    "ck_run_completion_executions_outcome",
-    "run_completion_attempts",
-    "fk_rc_attempts_execution",
-    "uq_rc_attempt_exec_no",
-    "uq_rc_attempt_workflow",
-    "ck_rc_attempt_number",
-    "ck_rc_attempt_summary",
-    "ck_rc_attempt_enqueued",
-    "ck_rc_attempt_terminal",
-    "ck_rc_attempt_time_order",
-)
-LONGEST_TABLE_SUFFIX = max(
-    _TABLE_NAME_SUFFIXES,
-    key=lambda suffix: len(suffix.encode()),
-)
-LONGEST_TABLE_SUFFIX_BYTES = len(LONGEST_TABLE_SUFFIX.encode())
-MAX_PREFIX_BYTES = (
-    POSTGRESQL_MAX_IDENTIFIER_BYTES - 1 - LONGEST_TABLE_SUFFIX_BYTES
-)
 DEFAULT_PREFIX = "platform"
+# Sentinel used once at import time to measure generated identifier suffixes;
+# every identifier this schema declares is named f"{prefix}_{suffix}".
+_MEASUREMENT_PREFIX = "p"
+# Filled in below, once the declarations have been measured; the prefix-length
+# guard is inert for the single measurement construction.
+MAX_PREFIX_BYTES = POSTGRESQL_MAX_IDENTIFIER_BYTES
 
 
 def _enum_check(column_name: str, enum_type: type[StrEnum]) -> str:
@@ -586,3 +516,31 @@ class StagingSchema:
                 name=name("ck_rc_attempt_time_order"),
             ),
         )
+
+
+def _declared_identifier_suffixes() -> tuple[str, ...]:
+    """Every table, constraint, and index suffix the declarations generate."""
+    schema = StagingSchema(_MEASUREMENT_PREFIX)
+    stripped = len(_MEASUREMENT_PREFIX) + 1
+    identifiers: list[str] = []
+    for table in schema.metadata.tables.values():
+        identifiers.append(table.name)
+        identifiers.extend(
+            constraint.name
+            for constraint in table.constraints
+            if isinstance(constraint.name, str)
+        )
+        identifiers.extend(
+            index.name for index in table.indexes if index.name is not None
+        )
+    return tuple(identifier[stripped:] for identifier in identifiers)
+
+
+LONGEST_TABLE_SUFFIX = max(
+    _declared_identifier_suffixes(),
+    key=lambda suffix: len(suffix.encode()),
+)
+LONGEST_TABLE_SUFFIX_BYTES = len(LONGEST_TABLE_SUFFIX.encode())
+MAX_PREFIX_BYTES = (
+    POSTGRESQL_MAX_IDENTIFIER_BYTES - 1 - LONGEST_TABLE_SUFFIX_BYTES
+)

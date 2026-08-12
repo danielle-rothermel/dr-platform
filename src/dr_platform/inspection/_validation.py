@@ -4,12 +4,12 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
-from dr_platform._core.identities import CampaignKey, RunKey, WorkKey
 from dr_platform._core.validation import validate_positive_integer
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection
 
+    from dr_platform._core.identities import CampaignKey, RunKey
     from dr_platform._core.ledger.schema import StagingSchema
 
 DEFAULT_INSPECTION_LIMIT = 10_000
@@ -108,15 +108,3 @@ def validate_run_member_cursor(
     ).scalar_one_or_none()
     if exists is None:
         raise ValueError("run member cursor is unknown in this run")
-
-
-def normalize_campaign_key(value: CampaignKey | str) -> CampaignKey:
-    return value if isinstance(value, CampaignKey) else CampaignKey(value)
-
-
-def normalize_run_key(value: RunKey | str) -> RunKey:
-    return value if isinstance(value, RunKey) else RunKey(value)
-
-
-def normalize_work_key(value: WorkKey | str) -> WorkKey:
-    return value if isinstance(value, WorkKey) else WorkKey(value)
