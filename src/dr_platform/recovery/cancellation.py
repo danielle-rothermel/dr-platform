@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 from sqlalchemy import func, select
 
+from dr_platform._core.clock import utc_now
 from dr_platform._core.identities import (
     CampaignKey,
     CampaignWorkIdentity,
     WorkKey,
+    normalize_key,
 )
 from dr_platform._core.ledger.attempts import (
     get_stage_attempt,
@@ -29,14 +30,11 @@ from dr_platform._core.ledger.terminal_summary import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
 
     from sqlalchemy import Connection, Engine
 
     from dr_platform._core.ledger.executions import StageExecutionRecord
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 class WorkflowCanceller(Protocol):
@@ -74,7 +72,7 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
     work_item_id: int | None = None,
     campaign_key: CampaignKey | str | None = None,
     work_key: WorkKey | str | None = None,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> WorkCancellationResult:
     """Commit platform cancellation before delegating to DBOS.
@@ -155,10 +153,8 @@ def _resolve_work_item_id(
         )
     elif campaign_key is not None and work_key is not None:
         identity = CampaignWorkIdentity(
-            campaign_key
-            if isinstance(campaign_key, CampaignKey)
-            else CampaignKey(campaign_key),
-            work_key if isinstance(work_key, WorkKey) else WorkKey(work_key),
+            normalize_key(campaign_key, CampaignKey),
+            normalize_key(work_key, WorkKey),
         )
         statement = select(table.c.work_item_id).where(
             table.c.campaign_key == identity.campaign_key.value,

@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping  # noqa: TC003 -- Pydantic resolves it
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from pydantic import (
     BaseModel,
@@ -25,12 +23,15 @@ from sqlalchemy import (
     tuple_,
 )
 
+from dr_platform._core.clock import utc_now
+from dr_platform._core.frozen import immutable_mapping
 from dr_platform._core.identities import (
     CampaignKey,
     PipelineKey,
     RunKey,
     StageKey,
     WorkKey,
+    normalize_key,
     validate_key_value,
 )
 from dr_platform._core.ledger.attempts import (
@@ -49,6 +50,7 @@ from dr_platform._core.validation import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
 
     from dbos import DBOSClient, EnqueueOptions
     from sqlalchemy.engine import RowMapping
@@ -60,11 +62,13 @@ DEFAULT_ADMISSION_BATCH_SIZE = 10_000
 # Watchdog against an unbounded capacity-skip scan within one admission pass.
 MAX_CAPACITY_SKIPS_PER_PASS = 1_000_000
 
-_StageIdentity = tuple[str, int, str]
 
+class _StageIdentity(NamedTuple):
+    """Row-value identity; stays a real tuple for SQLAlchemy IN predicates."""
 
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
+    pipeline_key: str
+    pipeline_version: int
+    stage_key: str
 
 
 def _failure_message(error: Exception) -> str:
@@ -98,43 +102,27 @@ class AdmissionPayload(BaseModel):
     @field_validator("campaign_key", mode="before")
     @classmethod
     def _campaign_key(cls, value: object) -> CampaignKey:
-        if isinstance(value, CampaignKey):
-            return value
-        if not isinstance(value, str):
-            raise TypeError("campaign key must be a string")
-        return CampaignKey(value)
+        return normalize_key(cast("CampaignKey | str", value), CampaignKey)
 
     @field_validator("work_key", mode="before")
     @classmethod
     def _work_key(cls, value: object) -> WorkKey:
-        if isinstance(value, WorkKey):
-            return value
-        if not isinstance(value, str):
-            raise TypeError("work key must be a string")
-        return WorkKey(value)
+        return normalize_key(cast("WorkKey | str", value), WorkKey)
 
     @field_validator("origin_run_key", mode="before")
     @classmethod
     def _origin_run_key(cls, value: object) -> RunKey:
-        if isinstance(value, RunKey):
-            return value
-        if not isinstance(value, str):
-            raise TypeError("origin run key must be a string")
-        return RunKey(value)
+        return normalize_key(cast("RunKey | str", value), RunKey)
 
     @field_validator("stage_key", mode="before")
     @classmethod
     def _stage_key(cls, value: object) -> StageKey:
-        if isinstance(value, StageKey):
-            return value
-        if not isinstance(value, str):
-            raise TypeError("stage key must be a string")
-        return StageKey(value)
+        return normalize_key(cast("StageKey | str", value), StageKey)
 
     @field_validator("labels", mode="after")
     @classmethod
     def _labels(cls, value: Mapping[str, str]) -> Mapping[str, str]:
-        return MappingProxyType(dict(value))
+        return immutable_mapping(value)
 
     @field_serializer(
         "campaign_key",
@@ -228,7 +216,11 @@ class _Candidate:
 
     @property
     def stage_identity(self) -> _StageIdentity:
-        return self.pipeline_key, self.pipeline_version, self.stage_key
+        return _StageIdentity(
+            pipeline_key=self.pipeline_key,
+            pipeline_version=self.pipeline_version,
+            stage_key=self.stage_key,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,21 +250,8 @@ class _PassTally:
     def admitted_total(self) -> int:
         return sum(self.admitted.values())
 
-    @property
-    def excluded(self) -> set[_StageIdentity]:
-        return set(self.unconfigured)
-
     def record_admitted(self, identity: _StageIdentity) -> None:
         self.admitted[identity] = self.admitted.get(identity, 0) + 1
-
-    def record_pause_skip(self) -> None:
-        self.skipped_for_pause += 1
-
-    def record_capacity_skip(self) -> None:
-        self.skipped_for_capacity += 1
-
-    def record_unconfigured(self, identities: set[_StageIdentity]) -> None:
-        self.unconfigured.update(identities)
 
     def record_failure(self, candidate: _Candidate, error: Exception) -> None:
         identity = candidate.stage_identity
@@ -280,9 +259,9 @@ class _PassTally:
         self.failed.setdefault(
             identity,
             StageAdmissionFailure(
-                pipeline_key=identity[0],
-                pipeline_version=identity[1],
-                stage_key=StageKey(identity[2]),
+                pipeline_key=identity.pipeline_key,
+                pipeline_version=identity.pipeline_version,
+                stage_key=StageKey(identity.stage_key),
                 error_type=type(error).__name__,
                 message=_failure_message(error),
             ),
@@ -296,9 +275,9 @@ class _PassTally:
         self.mismatched.setdefault(
             identity,
             StageMismatch(
-                pipeline_key=identity[0],
-                pipeline_version=identity[1],
-                stage_key=StageKey(identity[2]),
+                pipeline_key=identity.pipeline_key,
+                pipeline_version=identity.pipeline_version,
+                stage_key=StageKey(identity.stage_key),
                 message=_failure_message(error),
             ),
         )
@@ -306,18 +285,18 @@ class _PassTally:
     def to_summary(self) -> AdmissionSummary:
         counts = tuple(
             StageAdmissionCount(
-                pipeline_key=identity[0],
-                pipeline_version=identity[1],
-                stage_key=StageKey(identity[2]),
+                pipeline_key=identity.pipeline_key,
+                pipeline_version=identity.pipeline_version,
+                stage_key=StageKey(identity.stage_key),
                 count=count,
             )
             for identity, count in sorted(self.admitted.items())
         )
         unconfigured_stages = tuple(
             StageIdentityRecord(
-                pipeline_key=identity[0],
-                pipeline_version=identity[1],
-                stage_key=StageKey(identity[2]),
+                pipeline_key=identity.pipeline_key,
+                pipeline_version=identity.pipeline_version,
+                stage_key=StageKey(identity.stage_key),
             )
             for identity in sorted(self.unconfigured)
         )
@@ -366,7 +345,7 @@ def run_admission_pass(  # noqa: PLR0913 -- explicit admission dependencies
     client: DBOSClient,
     registry: PipelineRegistry,
     batch_size: int = DEFAULT_ADMISSION_BATCH_SIZE,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> AdmissionSummary:
     """Own one transaction and admit at most ``batch_size`` candidates.
@@ -415,7 +394,7 @@ def _admit_in_transaction(  # noqa: PLR0912, PLR0913 -- pass evaluation loop
             ),
             after=after,
             full_control_ids=full_control_ids,
-            excluded=tally.excluded,
+            excluded=tally.unconfigured,
             excluded_candidates=tally.excluded_candidates,
         )
         if page is None:
@@ -423,10 +402,10 @@ def _admit_in_transaction(  # noqa: PLR0912, PLR0913 -- pass evaluation loop
         considered += len(page.candidates)
         last_candidate = page.candidates[-1]
         after = last_candidate.rank, last_candidate.stage_execution_id
-        tally.record_unconfigured(page.unconfigured)
+        tally.unconfigured.update(page.unconfigured)
 
         for candidate in page.candidates:
-            if candidate.stage_identity in tally.excluded:
+            if candidate.stage_identity in tally.unconfigured:
                 continue
             if candidate.stage_execution_id in tally.excluded_candidates:
                 continue
@@ -437,9 +416,9 @@ def _admit_in_transaction(  # noqa: PLR0912, PLR0913 -- pass evaluation loop
                 occupancy=page.occupancy,
             ):
                 case _SkipPaused():
-                    tally.record_pause_skip()
+                    tally.skipped_for_pause += 1
                 case _SkipFull(full_control_ids=ids):
-                    tally.record_capacity_skip()
+                    tally.skipped_for_capacity += 1
                     full_control_ids.update(ids)
                 case _Admit(matching=matching):
                     # Ledger-write and enqueue failures roll back only this
@@ -869,7 +848,7 @@ def _decode_candidate(row: RowMapping) -> _Candidate:
         work_key=row["work_key"],
         origin_run_key=row["origin_run_key"],
         input_reference=row["input_reference"],
-        labels=MappingProxyType(dict(row["labels"])),
+        labels=immutable_mapping(row["labels"]),
         pipeline_key=row["pipeline_key"],
         pipeline_version=row["pipeline_version"],
         stage_key=row["stage_key"],
@@ -879,12 +858,12 @@ def _decode_candidate(row: RowMapping) -> _Candidate:
 def _decode_control(row: RowMapping) -> _Control:
     return _Control(
         control_id=row["stage_control_id"],
-        stage_identity=(
-            row["pipeline_key"],
-            row["pipeline_version"],
-            row["stage_key"],
+        stage_identity=_StageIdentity(
+            pipeline_key=row["pipeline_key"],
+            pipeline_version=row["pipeline_version"],
+            stage_key=row["stage_key"],
         ),
-        selector=MappingProxyType(dict(row["selector"])),
+        selector=immutable_mapping(row["selector"]),
         capacity=row["capacity"],
         paused=row["paused"],
     )

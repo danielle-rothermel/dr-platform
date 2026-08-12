@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 import re
 import traceback
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 from dbos import DBOS
 from dr_store.content_addressing import format_object_reference
 from sqlalchemy import select
 
+from dr_platform._core.clock import utc_now
 from dr_platform._core.ledger.attempts import record_stage_attempt_terminal
 from dr_platform._core.ledger.evidence import STAGE_FAILURE_EVIDENCE_SCHEMA
 from dr_platform._core.ledger.executions import (
@@ -47,6 +47,7 @@ from dr_platform.pipeline.definitions import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from datetime import datetime
 
     from dr_serialize import Jsonable
     from sqlalchemy import Connection
@@ -90,10 +91,6 @@ def _pipeline_stage_workflows(
     return tuple(stage.workflow for stage in pipeline.stages)
 
 
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
 def _safe_error_message(error: BaseException, *, error_type: str) -> str:
     try:
         return str(error)
@@ -105,7 +102,7 @@ def wrap_pipeline_workflows(
     pipeline: PipelineDefinition,
     *,
     max_recovery_attempts: int,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
 ) -> PipelineDefinition:
     """Return a declaration whose stages use package-owned DBOS wrappers.
 

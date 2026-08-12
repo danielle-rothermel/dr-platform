@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from enum import UNIQUE, StrEnum, verify
+from functools import partial
 from typing import TYPE_CHECKING
 
 from dr_serialize import canonical_json_bytes
 from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 
+from dr_platform._core.clock import utc_now
 from dr_platform._core.frozen import immutable_mapping
 from dr_platform._core.identities import (
     CampaignKey,
     CampaignWorkIdentity,
     RunKey,
     WorkKey,
+    normalize_key,
 )
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
@@ -39,6 +41,7 @@ from dr_platform.submission.work_items import stable_random_rank
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
+    from datetime import datetime
 
     from sqlalchemy import Connection, Engine
 
@@ -50,7 +53,8 @@ MEMBERSHIP_DIGEST_SCHEMA = "dr-platform/run-membership/v1"
 
 @verify(UNIQUE)
 class MembershipDigestField(StrEnum):
-    """Persisted digest keys; spell them out at encoding sites."""
+    """Persisted digest keys; the byte fragments below name members
+    individually, never iterate."""
 
     ENTRIES = "entries"
     EXPECTED_MEMBER_COUNT = "expected_member_count"
@@ -60,8 +64,18 @@ class MembershipDigestField(StrEnum):
     WORK_KEY = "work_key"
 
 
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
+def _digest_key_bytes(field: MembershipDigestField) -> bytes:
+    return b'"' + field.encode() + b'":'
+
+
+_ENTRIES_OPEN = b"{" + _digest_key_bytes(MembershipDigestField.ENTRIES) + b"["
+_ENTRY_OPEN = b"{" + _digest_key_bytes(MembershipDigestField.INPUT_REFERENCE)
+_ENTRY_ORDINAL = b"," + _digest_key_bytes(MembershipDigestField.ORDINAL)
+_ENTRY_WORK_KEY = b"," + _digest_key_bytes(MembershipDigestField.WORK_KEY)
+_ENTRIES_CLOSE = b"]," + _digest_key_bytes(
+    MembershipDigestField.EXPECTED_MEMBER_COUNT
+)
+_DIGEST_SCHEMA_KEY = b"," + _digest_key_bytes(MembershipDigestField.SCHEMA)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -77,9 +91,7 @@ class WorkInput:
         input_reference: str,
         labels: Mapping[str, str],
     ) -> None:
-        normalized_work_key = (
-            work_key if isinstance(work_key, WorkKey) else WorkKey(work_key)
-        )
+        normalized_work_key = normalize_key(work_key, WorkKey)
         normalized_input_reference = validate_non_empty_string(
             input_reference,
             label="input reference",
@@ -153,7 +165,7 @@ class _MembershipDigester:
     def __init__(self, *, expected_member_count: int) -> None:
         self._hash = hashlib.sha256()
         self._first = True
-        self._hash.update(b'{"entries":[')
+        self._hash.update(_ENTRIES_OPEN)
         self._expected_member_count = expected_member_count
 
     def add(
@@ -162,18 +174,18 @@ class _MembershipDigester:
         if not self._first:
             self._hash.update(b",")
         self._first = False
-        self._hash.update(b'{"input_reference":')
+        self._hash.update(_ENTRY_OPEN)
         self._hash.update(canonical_json_bytes(input_reference))
-        self._hash.update(b',"ordinal":')
+        self._hash.update(_ENTRY_ORDINAL)
         self._hash.update(canonical_json_bytes(ordinal))
-        self._hash.update(b',"work_key":')
+        self._hash.update(_ENTRY_WORK_KEY)
         self._hash.update(canonical_json_bytes(work_key))
         self._hash.update(b"}")
 
     def finish(self) -> str:
-        self._hash.update(b'],"expected_member_count":')
+        self._hash.update(_ENTRIES_CLOSE)
         self._hash.update(canonical_json_bytes(self._expected_member_count))
-        self._hash.update(b',"schema":')
+        self._hash.update(_DIGEST_SCHEMA_KEY)
         self._hash.update(canonical_json_bytes(MEMBERSHIP_DIGEST_SCHEMA))
         self._hash.update(b"}")
         return self._hash.hexdigest()
@@ -216,7 +228,7 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
     registry: PipelineRegistry,
     engine: Engine,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> SubmissionReceipt:
     """Register one complete ordered membership in bounded transactions."""
@@ -227,14 +239,8 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
     if not isinstance(declaration, RunRegistrationDeclaration):
         raise TypeError("declaration must be a RunRegistrationDeclaration")
     selected_schema = schema or StagingSchema()
-    normalized_campaign_key = (
-        campaign_key
-        if isinstance(campaign_key, CampaignKey)
-        else CampaignKey(campaign_key)
-    )
-    normalized_run_key = (
-        run_key if isinstance(run_key, RunKey) else RunKey(run_key)
-    )
+    normalized_campaign_key = normalize_key(campaign_key, CampaignKey)
+    normalized_run_key = normalize_key(run_key, RunKey)
     pipeline_definition = registry.get(
         key=pipeline.key,
         version=pipeline.version,
@@ -268,6 +274,15 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
             return _receipt(run)
 
     # Phase 3 — stream members into bounded per-chunk transactions.
+    flush = partial(
+        _commit_chunk,
+        engine=engine,
+        schema=selected_schema,
+        campaign_key=normalized_campaign_key,
+        run_key=normalized_run_key,
+        first_stage_key=pipeline_definition.stages[0].key.value,
+        clock=clock,
+    )
     chunk: list[RunMemberInput] = []
     for member in members:
         if not isinstance(member, RunMemberInput):
@@ -275,26 +290,10 @@ def submit(  # noqa: PLR0913 -- explicit submission boundary
         chunk.append(member)
         if len(chunk) < chunk_size:
             continue
-        _commit_chunk(
-            engine=engine,
-            schema=selected_schema,
-            campaign_key=normalized_campaign_key,
-            run_key=normalized_run_key,
-            first_stage_key=pipeline_definition.stages[0].key.value,
-            chunk=chunk,
-            clock=clock,
-        )
+        flush(chunk=chunk)
         chunk.clear()
     if chunk:
-        _commit_chunk(
-            engine=engine,
-            schema=selected_schema,
-            campaign_key=normalized_campaign_key,
-            run_key=normalized_run_key,
-            first_stage_key=pipeline_definition.stages[0].key.value,
-            chunk=chunk,
-            clock=clock,
-        )
+        flush(chunk=chunk)
 
     # Phase 4 — verify the recorded membership and close registration.
     with engine.begin() as connection:
@@ -354,6 +353,14 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
         raise RunMembershipConflictError(
             "a registration chunk contains duplicate member ordinals"
         )
+    ranks_by_work_key = {
+        member.work.work_key.value: stable_random_rank(
+            work_identity=CampaignWorkIdentity(
+                campaign_key, member.work.work_key
+            )
+        )
+        for member in chunk
+    }
 
     with engine.begin() as connection:
         run = get_pipeline_run(
@@ -380,11 +387,7 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
                         "origin_run_key": run_key.value,
                         "input_reference": member.work.input_reference,
                         "labels": dict(member.work.labels),
-                        "rank": stable_random_rank(
-                            work_identity=CampaignWorkIdentity(
-                                campaign_key, member.work.work_key
-                            )
-                        ),
+                        "rank": ranks_by_work_key[member.work.work_key.value],
                     }
                     for member in chunk
                 ]
@@ -426,11 +429,7 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
             )
         for member in chunk:
             row = by_key[member.work.work_key.value]
-            expected_rank = stable_random_rank(
-                work_identity=CampaignWorkIdentity(
-                    campaign_key, member.work.work_key
-                )
-            )
+            expected_rank = ranks_by_work_key[member.work.work_key.value]
             if (
                 row["input_reference"] != member.work.input_reference
                 or dict(row["labels"]) != dict(member.work.labels)

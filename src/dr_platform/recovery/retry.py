@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
+from dr_platform._core.clock import utc_now
 from dr_platform._core.ledger.attempts import (
     StageAttemptRecord,
     append_stage_attempt,
@@ -20,12 +20,9 @@ from dr_platform._core.ledger.states import StageExecutionState
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
 
     from sqlalchemy import Engine
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +35,7 @@ def retry_stage(
     stage_execution_id: int,
     *,
     engine: Engine,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> StageRetryResult:
     """Only FAILED stages may prepare a new attempt for later admission."""

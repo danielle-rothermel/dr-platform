@@ -9,6 +9,13 @@ from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 from dbos import DBOS
 
+from dr_platform.execution._workflow_binding import (
+    _WorkflowBinding,
+    bind,
+    preflight,
+    require,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
@@ -18,7 +25,6 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 _CHECKPOINT_EXECUTOR_ATTRIBUTE = "_dr_platform_ledger_checkpoint_executor"
-_MISSING = object()
 
 
 class _LedgerCheckpointExecutor:
@@ -61,114 +67,45 @@ class _LedgerCheckpointExecutor:
         self._executor.shutdown(wait=True)
 
 
-class _LedgerCheckpointBinding:
-    def __init__(
-        self,
-        *,
-        workflows: tuple[Callable[..., object], ...],
-        previous: tuple[object, ...],
-        executor: _LedgerCheckpointExecutor,
-    ) -> None:
-        self._workflows = workflows
-        self._previous = previous
-        self._executor = executor
-        self._release_lock = Lock()
-        self._released = False
-
-    def release(self) -> None:
-        with self._release_lock:
-            if self._released:
-                return
-            for workflow, previous in zip(
-                self._workflows,
-                self._previous,
-                strict=True,
-            ):
-                if (
-                    getattr(workflow, _CHECKPOINT_EXECUTOR_ATTRIBUTE, _MISSING)
-                    is not self._executor
-                ):
-                    continue
-                if previous is _MISSING:
-                    delattr(workflow, _CHECKPOINT_EXECUTOR_ATTRIBUTE)
-                else:
-                    setattr(
-                        workflow,
-                        _CHECKPOINT_EXECUTOR_ATTRIBUTE,
-                        previous,
-                    )
-            self._released = True
+def _checkpoint_executor_is_live(existing: object) -> bool:
+    """Only an executor that has not been closed still owns the workflow."""
+    return not cast("_LedgerCheckpointExecutor", existing).closed
 
 
-def _distinct_workflows(
-    workflows: Iterable[Callable[..., object]],
-) -> tuple[Callable[..., object], ...]:
-    distinct: list[Callable[..., object]] = []
-    identities: set[int] = set()
-    for workflow in workflows:
-        identity = id(workflow)
-        if identity in identities:
-            continue
-        identities.add(identity)
-        distinct.append(workflow)
-    return tuple(distinct)
+class _LedgerCheckpointBinding(_WorkflowBinding):
+    """Binds one ledger checkpoint executor to wrapped stage workflows."""
 
 
 def _preflight_ledger_checkpoint_executor(
     workflows: Iterable[Callable[..., object]],
 ) -> tuple[Callable[..., object], ...]:
-    bound_workflows = _distinct_workflows(workflows)
-    for workflow in bound_workflows:
-        existing = getattr(workflow, _CHECKPOINT_EXECUTOR_ATTRIBUTE, None)
-        existing_executor = cast("_LedgerCheckpointExecutor | None", existing)
-        if existing_executor is not None and not existing_executor.closed:
-            raise RuntimeError(
-                "wrapped workflow already has a live runtime owner"
-            )
-    return bound_workflows
+    return preflight(
+        workflows,
+        attribute=_CHECKPOINT_EXECUTOR_ATTRIBUTE,
+        is_live=_checkpoint_executor_is_live,
+    )
 
 
 def _bind_ledger_checkpoint_executor(
     workflows: Iterable[Callable[..., object]],
     executor: _LedgerCheckpointExecutor,
 ) -> _LedgerCheckpointBinding:
-    bound_workflows = _preflight_ledger_checkpoint_executor(workflows)
-    previous = tuple(
-        getattr(workflow, _CHECKPOINT_EXECUTOR_ATTRIBUTE, _MISSING)
-        for workflow in bound_workflows
-    )
-    changed: list[tuple[Callable[..., object], object]] = []
-    try:
-        for workflow, prior in zip(
-            bound_workflows,
-            previous,
-            strict=True,
-        ):
-            setattr(workflow, _CHECKPOINT_EXECUTOR_ATTRIBUTE, executor)
-            changed.append((workflow, prior))
-    except Exception:
-        for workflow, prior in reversed(changed):
-            if prior is _MISSING:
-                delattr(workflow, _CHECKPOINT_EXECUTOR_ATTRIBUTE)
-            else:
-                setattr(workflow, _CHECKPOINT_EXECUTOR_ATTRIBUTE, prior)
-        raise
-    return _LedgerCheckpointBinding(
-        workflows=bound_workflows,
-        previous=previous,
-        executor=executor,
+    return bind(
+        workflows,
+        executor,
+        attribute=_CHECKPOINT_EXECUTOR_ATTRIBUTE,
+        is_live=_checkpoint_executor_is_live,
+        binding_type=_LedgerCheckpointBinding,
     )
 
 
 def _require_ledger_checkpoint_executor(
     workflow: Callable[..., object],
 ) -> _LedgerCheckpointExecutor:
-    executor = getattr(workflow, _CHECKPOINT_EXECUTOR_ATTRIBUTE, None)
-    if executor is None:
-        raise RuntimeError(
-            "wrapped workflow requires a live dispatcher registration"
-        )
-    return cast("_LedgerCheckpointExecutor", executor)
+    return cast(
+        "_LedgerCheckpointExecutor",
+        require(workflow, attribute=_CHECKPOINT_EXECUTOR_ATTRIBUTE),
+    )
 
 
 def _ledger_checkpoint_connection() -> Connection:

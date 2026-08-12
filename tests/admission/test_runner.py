@@ -41,6 +41,7 @@ from dr_platform.admission.runner import (
     _lock_controls,
     _PassTally,
     _SkipFull,
+    _StageIdentity,
     run_admission_pass,
 )
 from dr_platform.pipeline.definitions import (
@@ -67,6 +68,8 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
 
     from dr_platform._core.ledger.schema import StagingSchema
+
+_DEFAULT_STAGE_IDENTITY = _StageIdentity("evaluation", 1, "execute")
 
 
 async def _workflow(input_reference: str) -> str:
@@ -657,7 +660,7 @@ def test_selector_paused_after_candidate_selection_skips_admission(
         connection: Connection,
         *,
         schema: StagingSchema,
-        identities: set[tuple[str, int, str]],
+        identities: set[_StageIdentity],
     ) -> tuple[_Control, ...]:
         nonlocal lock_calls
         lock_calls += 1
@@ -951,7 +954,7 @@ def _candidate(
     labels: Mapping[str, str],
     stage_execution_id: int = 1,
     rank: int = 1,
-    stage_identity: tuple[str, int, str] = ("evaluation", 1, "execute"),
+    stage_identity: _StageIdentity = _DEFAULT_STAGE_IDENTITY,
 ) -> _Candidate:
     return _Candidate(
         stage_execution_id=stage_execution_id,
@@ -974,7 +977,7 @@ def _make_control(
     selector: Mapping[str, str],
     capacity: int,
     paused: bool = False,
-    stage_identity: tuple[str, int, str] = ("evaluation", 1, "execute"),
+    stage_identity: _StageIdentity = _DEFAULT_STAGE_IDENTITY,
 ) -> _Control:
     return _Control(
         control_id=control_id,
@@ -1064,10 +1067,10 @@ def test_evaluate_candidate_full_but_non_matching_control_does_not_block() -> (
 
 def test_pass_tally_to_summary_sorts_and_converts_stage_keys() -> None:
     tally = _PassTally()
-    tally.record_admitted(("evaluation", 1, "zeta"))
-    tally.record_admitted(("evaluation", 1, "alpha"))
-    tally.record_capacity_skip()
-    tally.record_pause_skip()
+    tally.record_admitted(_StageIdentity("evaluation", 1, "zeta"))
+    tally.record_admitted(_StageIdentity("evaluation", 1, "alpha"))
+    tally.skipped_for_capacity += 1
+    tally.skipped_for_pause += 1
 
     summary = tally.to_summary()
 

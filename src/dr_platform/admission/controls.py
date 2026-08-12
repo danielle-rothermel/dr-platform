@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import cast, select, update
 from sqlalchemy.dialects.postgresql import JSONB, insert
 
+from dr_platform._core.clock import utc_now
 from dr_platform._core.frozen import immutable_mapping
-from dr_platform._core.identities import StageKey, validate_key_value
+from dr_platform._core.identities import (
+    StageKey,
+    normalize_key,
+    validate_key_value,
+)
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.validation import (
     validate_labels,
+    validate_nonnegative_integer,
     validate_positive_integer,
 )
 from dr_platform.pipeline.definitions import (
@@ -21,6 +26,7 @@ from dr_platform.pipeline.definitions import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from datetime import datetime
 
     from sqlalchemy import Connection, Engine
     from sqlalchemy.engine import RowMapping
@@ -38,17 +44,13 @@ class StageControlRecord:
     updated_at: datetime
 
 
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
 def set_stage_capacity(  # noqa: PLR0913 -- explicit operator dependencies
     *,
     pipeline: PipelineIdentity,
     stage_key: StageKey | str,
     capacity: int,
     engine: Engine,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
     """Set stage-wide capacity while preserving any existing pause flag."""
@@ -70,7 +72,7 @@ def set_selector_capacity(  # noqa: PLR0913 -- explicit operator dependencies
     labels: Mapping[str, str],
     capacity: int,
     engine: Engine,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
     """Set selector capacity while preserving any existing pause flag."""
@@ -91,7 +93,7 @@ def pause(  # noqa: PLR0913 -- explicit operator dependencies
     stage_key: StageKey | str,
     labels: Mapping[str, str] | None = None,
     engine: Engine,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
     return _set_paused(
@@ -111,7 +113,7 @@ def resume(  # noqa: PLR0913 -- explicit operator dependencies
     stage_key: StageKey | str,
     labels: Mapping[str, str] | None = None,
     engine: Engine,
-    clock: Callable[[], datetime] = _utc_now,
+    clock: Callable[[], datetime] = utc_now,
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
     return _set_paused(
@@ -162,19 +164,12 @@ def upsert_stage_control(  # noqa: PLR0913 -- explicit control facts
     selected_schema = schema or StagingSchema()
     validate_key_value(pipeline_key, label="pipeline key")
     validate_positive_integer(pipeline_version, label="pipeline version")
-    normalized_stage_key = (
-        stage_key if isinstance(stage_key, StageKey) else StageKey(stage_key)
-    )
+    normalized_stage_key = normalize_key(stage_key, StageKey)
     normalized_selector = validate_labels(
         {} if selector is None else selector,
         label="stage control selector",
     )
-    if (
-        isinstance(capacity, bool)
-        or not isinstance(capacity, int)
-        or capacity < 0
-    ):
-        raise ValueError("stage control capacity must be non-negative")
+    validate_nonnegative_integer(capacity, label="stage control capacity")
     if not isinstance(paused, bool):
         raise TypeError("stage control paused flag must be a bool")
 
@@ -224,19 +219,12 @@ def set_stage_control_capacity(  # noqa: PLR0913 -- explicit control facts
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
     selected_schema = schema or StagingSchema()
-    normalized_stage_key = (
-        stage_key if isinstance(stage_key, StageKey) else StageKey(stage_key)
-    )
+    normalized_stage_key = normalize_key(stage_key, StageKey)
     normalized_selector = validate_labels(
         {} if selector is None else selector,
         label="stage control selector",
     )
-    if (
-        isinstance(capacity, bool)
-        or not isinstance(capacity, int)
-        or capacity < 0
-    ):
-        raise ValueError("stage control capacity must be non-negative")
+    validate_nonnegative_integer(capacity, label="stage control capacity")
     validate_key_value(pipeline_key, label="pipeline key")
     validate_positive_integer(pipeline_version, label="pipeline version")
 
@@ -282,9 +270,7 @@ def set_stage_control_paused(  # noqa: PLR0913 -- explicit control identity
     schema: StagingSchema | None = None,
 ) -> StageControlRecord:
     selected_schema = schema or StagingSchema()
-    normalized_stage_key = (
-        stage_key if isinstance(stage_key, StageKey) else StageKey(stage_key)
-    )
+    normalized_stage_key = normalize_key(stage_key, StageKey)
     normalized_selector = validate_labels(
         {} if selector is None else selector,
         label="stage control selector",
@@ -325,9 +311,7 @@ def list_stage_controls(  # noqa: PLR0913 -- explicit control identity
     schema: StagingSchema | None = None,
 ) -> tuple[StageControlRecord, ...]:
     selected_schema = schema or StagingSchema()
-    normalized_stage_key = (
-        stage_key if isinstance(stage_key, StageKey) else StageKey(stage_key)
-    )
+    normalized_stage_key = normalize_key(stage_key, StageKey)
     table = selected_schema.stage_controls
     statement = select(table).where(
         table.c.pipeline_key == pipeline_key,

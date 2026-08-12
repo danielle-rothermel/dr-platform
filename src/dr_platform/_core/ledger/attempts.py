@@ -54,6 +54,14 @@ class StageAttemptRecord:
     terminal_at: datetime | None
 
 
+class StageAttemptSequenceError(RuntimeError):
+    pass
+
+
+class StageAttemptTerminalError(RuntimeError):
+    pass
+
+
 def stage_workflow_id(
     *,
     work_identity: CampaignWorkIdentity,
@@ -81,14 +89,6 @@ def stage_workflow_id(
         length=WORKFLOW_ID_DIGEST_LENGTH,
     )
     return f"{WORKFLOW_ID_PREFIX}{digest}-a{attempt_number}"
-
-
-class StageAttemptSequenceError(RuntimeError):
-    pass
-
-
-class StageAttemptTerminalError(RuntimeError):
-    pass
 
 
 def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
@@ -188,28 +188,6 @@ def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
     return _decode_stage_attempt(row)
 
 
-def get_stage_attempt(
-    connection: Connection,
-    *,
-    stage_execution_id: int,
-    attempt_number: int,
-    schema: StagingSchema | None = None,
-) -> StageAttemptRecord | None:
-    selected_schema = schema or StagingSchema()
-    table = selected_schema.stage_attempts
-    row = (
-        connection.execute(
-            table.select().where(
-                table.c.stage_execution_id == stage_execution_id,
-                table.c.attempt_number == attempt_number,
-            )
-        )
-        .mappings()
-        .one_or_none()
-    )
-    return None if row is None else _decode_stage_attempt(row)
-
-
 def mark_stage_attempt_admitted(
     connection: Connection,
     *,
@@ -223,12 +201,12 @@ def mark_stage_attempt_admitted(
     table = selected_schema.stage_attempts
     row = (
         connection.execute(
-            table.select()
+            select(table)
             .where(
                 table.c.stage_execution_id == stage_execution_id,
                 table.c.attempt_number == attempt_number,
             )
-            .with_for_update()
+            .with_for_update(of=table)
         )
         .mappings()
         .one_or_none()
@@ -255,25 +233,6 @@ def mark_stage_attempt_admitted(
     return _decode_stage_attempt(updated_row)
 
 
-def list_stage_attempts(
-    connection: Connection,
-    *,
-    stage_execution_id: int,
-    schema: StagingSchema | None = None,
-) -> tuple[StageAttemptRecord, ...]:
-    selected_schema = schema or StagingSchema()
-    table = selected_schema.stage_attempts
-    statement = (
-        table.select()
-        .where(table.c.stage_execution_id == stage_execution_id)
-        .order_by(table.c.attempt_number)
-    )
-    return tuple(
-        _decode_stage_attempt(row)
-        for row in connection.execute(statement).mappings()
-    )
-
-
 def record_stage_attempt_terminal(  # noqa: PLR0913 -- explicit outcome facts
     connection: Connection,
     *,
@@ -290,12 +249,12 @@ def record_stage_attempt_terminal(  # noqa: PLR0913 -- explicit outcome facts
     table = selected_schema.stage_attempts
     row = (
         connection.execute(
-            table.select()
+            select(table)
             .where(
                 table.c.stage_execution_id == stage_execution_id,
                 table.c.attempt_number == attempt_number,
             )
-            .with_for_update()
+            .with_for_update(of=table)
         )
         .mappings()
         .one_or_none()
@@ -327,6 +286,47 @@ def record_stage_attempt_terminal(  # noqa: PLR0913 -- explicit outcome facts
         .one()
     )
     return _decode_stage_attempt(updated_row)
+
+
+def get_stage_attempt(
+    connection: Connection,
+    *,
+    stage_execution_id: int,
+    attempt_number: int,
+    schema: StagingSchema | None = None,
+) -> StageAttemptRecord | None:
+    selected_schema = schema or StagingSchema()
+    table = selected_schema.stage_attempts
+    row = (
+        connection.execute(
+            select(table).where(
+                table.c.stage_execution_id == stage_execution_id,
+                table.c.attempt_number == attempt_number,
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    return None if row is None else _decode_stage_attempt(row)
+
+
+def list_stage_attempts(
+    connection: Connection,
+    *,
+    stage_execution_id: int,
+    schema: StagingSchema | None = None,
+) -> tuple[StageAttemptRecord, ...]:
+    selected_schema = schema or StagingSchema()
+    table = selected_schema.stage_attempts
+    statement = (
+        select(table)
+        .where(table.c.stage_execution_id == stage_execution_id)
+        .order_by(table.c.attempt_number)
+    )
+    return tuple(
+        _decode_stage_attempt(row)
+        for row in connection.execute(statement).mappings()
+    )
 
 
 def _decode_stage_attempt(row: RowMapping) -> StageAttemptRecord:

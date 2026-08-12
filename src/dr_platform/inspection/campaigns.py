@@ -5,12 +5,10 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import and_, func, or_, select
 
-from dr_platform._core.identities import CampaignKey, RunKey
+from dr_platform._core.identities import CampaignKey, RunKey, normalize_key
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform.inspection._validation import (
     DEFAULT_INSPECTION_LIMIT,
-    normalize_campaign_key,
-    normalize_run_key,
     require_campaign,
     validate_campaign_cursor,
     validate_limit,
@@ -54,7 +52,7 @@ def inspect_campaign(
     schema: StagingSchema | None = None,
 ) -> CampaignSummary:
     selected_schema = schema or StagingSchema()
-    normalized_campaign = normalize_campaign_key(campaign_key)
+    normalized_campaign = normalize_key(campaign_key, CampaignKey)
     statement = _campaign_summary_statement(selected_schema)
     with engine.connect() as connection:
         row = (
@@ -82,7 +80,7 @@ def list_campaigns(
     validate_limit(limit)
     selected_schema = schema or StagingSchema()
     normalized_cursor = (
-        normalize_campaign_key(cursor) if cursor is not None else None
+        normalize_key(cursor, CampaignKey) if cursor is not None else None
     )
     statement = _campaign_summary_statement(selected_schema).limit(limit)
     with engine.connect() as connection:
@@ -112,9 +110,9 @@ def list_runs(
 ) -> tuple[RunSummary, ...]:
     validate_limit(limit)
     selected_schema = schema or StagingSchema()
-    normalized_campaign = normalize_campaign_key(campaign_key)
+    normalized_campaign = normalize_key(campaign_key, CampaignKey)
     normalized_cursor = (
-        normalize_run_key(cursor) if cursor is not None else None
+        normalize_key(cursor, RunKey) if cursor is not None else None
     )
     runs = selected_schema.pipeline_runs
     with engine.connect() as connection:

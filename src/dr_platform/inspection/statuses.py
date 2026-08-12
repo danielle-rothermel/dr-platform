@@ -8,14 +8,17 @@ from pydantic import BaseModel, ConfigDict, StrictInt, field_validator
 from sqlalchemy import Text, and_, column, func, or_, select, values
 
 from dr_platform._core.frozen import immutable_json_mapping
-from dr_platform._core.identities import CampaignKey, RunKey, StageKey, WorkKey
+from dr_platform._core.identities import (
+    CampaignKey,
+    RunKey,
+    StageKey,
+    WorkKey,
+    normalize_key,
+)
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.validation import validate_positive_integer
 from dr_platform.inspection._validation import (
-    normalize_campaign_key,
-    normalize_run_key,
-    normalize_work_key,
     require_campaign,
     require_run,
 )
@@ -89,7 +92,7 @@ def campaign_state_counts(
 ) -> tuple[StateCount, ...]:
     return _state_counts(
         engine=engine,
-        campaign_key=normalize_campaign_key(campaign_key),
+        campaign_key=normalize_key(campaign_key, CampaignKey),
         run_key=None,
         schema=schema,
     )
@@ -108,7 +111,7 @@ def run_state_counts(
     return _state_counts(
         engine=engine,
         campaign_key=None,
-        run_key=normalize_run_key(run_key),
+        run_key=normalize_key(run_key, RunKey),
         schema=schema,
     )
 
@@ -123,7 +126,7 @@ def bulk_run_state_counts(
     """Return one aggregate result per key with one SELECT per input chunk."""
     validate_positive_integer(chunk_size, label="bulk run count chunk size")
     normalized_keys = tuple(
-        dict.fromkeys(normalize_run_key(key) for key in run_keys)
+        dict.fromkeys(normalize_key(key, RunKey) for key in run_keys)
     )
     results: dict[RunKey, tuple[StateCount, ...] | None] = dict.fromkeys(
         normalized_keys
@@ -166,9 +169,9 @@ def bulk_work_statuses(
 ) -> BulkStatusResult:
     """Execute exactly one SELECT per input chunk."""
     validate_positive_integer(chunk_size, label="bulk status chunk size")
-    normalized_campaign = normalize_campaign_key(campaign_key)
+    normalized_campaign = normalize_key(campaign_key, CampaignKey)
     normalized_keys = tuple(
-        dict.fromkeys(normalize_work_key(key) for key in work_keys)
+        dict.fromkeys(normalize_key(key, WorkKey) for key in work_keys)
     )
     selected_schema = schema or StagingSchema()
     statuses: dict[WorkKey, BulkWorkStatus] = {
@@ -220,9 +223,9 @@ def bulk_work_terminal_statuses(  # noqa: PLR0913 -- explicit reader filters
     validate_positive_integer(
         chunk_size, label="bulk terminal status chunk size"
     )
-    normalized_campaign = normalize_campaign_key(campaign_key)
+    normalized_campaign = normalize_key(campaign_key, CampaignKey)
     normalized_keys = tuple(
-        dict.fromkeys(normalize_work_key(key) for key in work_keys)
+        dict.fromkeys(normalize_key(key, WorkKey) for key in work_keys)
     )
     selected_schema = schema or StagingSchema()
     if terminal_filter is None:
@@ -261,28 +264,14 @@ def bulk_work_terminal_statuses(  # noqa: PLR0913 -- explicit reader filters
     )
 
 
-def _state_counts(
-    *,
-    engine: Engine,
-    campaign_key: CampaignKey | None,
-    run_key: RunKey | None,
-    schema: StagingSchema | None,
-) -> tuple[StateCount, ...]:
-    selected_schema = schema or StagingSchema()
-    items = selected_schema.work_items
-    executions = selected_schema.stage_executions
-    if campaign_key is not None:
-        scoped_item_ids = select(items.c.work_item_id).where(
-            items.c.campaign_key == campaign_key.value
-        )
-    else:
-        assert run_key is not None
-        memberships = selected_schema.run_memberships
-        scoped_item_ids = select(memberships.c.work_item_id).where(
-            memberships.c.run_key == run_key.value
-        )
-    current = current_stage_indexes(selected_schema, scoped_item_ids)
-    statement = (
+def _current_state_counts_statement(
+    schema: StagingSchema, scoped_item_ids: Select
+) -> Select:
+    """Count current-stage executions over one scoped set of work items."""
+    items = schema.work_items
+    executions = schema.stage_executions
+    current = current_stage_indexes(schema, scoped_item_ids)
+    return (
         select(executions.c.state, func.count().label("count"))
         .select_from(
             items.join(
@@ -299,11 +288,41 @@ def _state_counts(
         .group_by(executions.c.state)
         .order_by(executions.c.state)
     )
-    if campaign_key is not None:
-        statement = statement.where(items.c.campaign_key == campaign_key.value)
-    else:
-        assert run_key is not None
-        statement = statement.where(items.c.work_item_id.in_(scoped_item_ids))
+
+
+def _campaign_state_counts_statement(
+    schema: StagingSchema, campaign_key: CampaignKey
+) -> Select:
+    items = schema.work_items
+    scoped_item_ids = select(items.c.work_item_id).where(
+        items.c.campaign_key == campaign_key.value
+    )
+    return _current_state_counts_statement(schema, scoped_item_ids).where(
+        items.c.campaign_key == campaign_key.value
+    )
+
+
+def _run_state_counts_statement(
+    schema: StagingSchema, run_key: RunKey
+) -> Select:
+    items = schema.work_items
+    memberships = schema.run_memberships
+    scoped_item_ids = select(memberships.c.work_item_id).where(
+        memberships.c.run_key == run_key.value
+    )
+    return _current_state_counts_statement(schema, scoped_item_ids).where(
+        items.c.work_item_id.in_(scoped_item_ids)
+    )
+
+
+def _state_counts(
+    *,
+    engine: Engine,
+    campaign_key: CampaignKey | None,
+    run_key: RunKey | None,
+    schema: StagingSchema | None,
+) -> tuple[StateCount, ...]:
+    selected_schema = schema or StagingSchema()
     with engine.connect() as connection:
         if campaign_key is not None:
             require_campaign(
@@ -311,13 +330,18 @@ def _state_counts(
                 campaign_key=campaign_key,
                 schema=selected_schema,
             )
-        else:
-            assert run_key is not None
+            statement = _campaign_state_counts_statement(
+                selected_schema, campaign_key
+            )
+        elif run_key is not None:
             require_run(
                 connection,
                 run_key=run_key,
                 schema=selected_schema,
             )
+            statement = _run_state_counts_statement(selected_schema, run_key)
+        else:
+            raise TypeError("either a campaign key or a run key is required")
         return tuple(
             StateCount(
                 state=StageExecutionState(row["state"]),
@@ -531,27 +555,9 @@ def _bulk_run_counts_statement(
         .cte("requested_runs")
     )
     runs = schema.pipeline_runs
-    memberships = schema.run_memberships
     executions = schema.stage_executions
-    scoped = (
-        select(memberships.c.run_key, memberships.c.work_item_id)
-        .where(memberships.c.run_key.in_([key.value for key in run_keys]))
-        .subquery()
-    )
-    current = (
-        select(
-            scoped.c.run_key,
-            scoped.c.work_item_id,
-            func.max(executions.c.stage_index).label("stage_index"),
-        )
-        .select_from(
-            scoped.join(
-                executions,
-                scoped.c.work_item_id == executions.c.work_item_id,
-            )
-        )
-        .group_by(scoped.c.run_key, scoped.c.work_item_id)
-        .subquery()
+    current = current_stage_indexes_by_run(
+        schema, tuple(key.value for key in run_keys)
     )
     current_states = current.join(
         executions,
@@ -592,5 +598,33 @@ def current_stage_indexes(schema: StagingSchema, work_item_ids: Select):
             )
         )
         .group_by(executions.c.work_item_id)
+        .subquery()
+    )
+
+
+def current_stage_indexes_by_run(
+    schema: StagingSchema, run_keys: tuple[str, ...]
+):
+    """Highest stage index per (run, work item) across the named runs."""
+    memberships = schema.run_memberships
+    executions = schema.stage_executions
+    scoped = (
+        select(memberships.c.run_key, memberships.c.work_item_id)
+        .where(memberships.c.run_key.in_(run_keys))
+        .subquery()
+    )
+    return (
+        select(
+            scoped.c.run_key,
+            scoped.c.work_item_id,
+            func.max(executions.c.stage_index).label("stage_index"),
+        )
+        .select_from(
+            scoped.join(
+                executions,
+                scoped.c.work_item_id == executions.c.work_item_id,
+            )
+        )
+        .group_by(scoped.c.run_key, scoped.c.work_item_id)
         .subquery()
     )

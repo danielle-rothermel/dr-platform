@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert
 from dr_platform._core.identities import (
     CampaignKey,
     RunKey,
+    normalize_key,
     validate_key_value,
 )
 from dr_platform._core.ledger.schema import StagingSchema
@@ -66,14 +67,8 @@ def insert_pipeline_run(  # noqa: PLR0913 -- explicit persistence facts
 ) -> PipelineRunRecord:
     """Insert a run, or resolve an identical replay to the stored run."""
     selected_schema = schema or StagingSchema()
-    normalized_run_key = (
-        run_key if isinstance(run_key, RunKey) else RunKey(run_key)
-    )
-    normalized_campaign_key = (
-        campaign_key
-        if isinstance(campaign_key, CampaignKey)
-        else CampaignKey(campaign_key)
-    )
+    normalized_run_key = normalize_key(run_key, RunKey)
+    normalized_campaign_key = normalize_key(campaign_key, CampaignKey)
     validate_key_value(pipeline_key, label="pipeline key")
     validate_positive_integer(pipeline_version, label="pipeline version")
     config_reference = validate_non_empty_string(
@@ -172,9 +167,7 @@ def get_pipeline_run(
     schema: StagingSchema | None = None,
 ) -> PipelineRunRecord | None:
     selected_schema = schema or StagingSchema()
-    normalized_run_key = (
-        run_key if isinstance(run_key, RunKey) else RunKey(run_key)
-    )
+    normalized_run_key = normalize_key(run_key, RunKey)
     table = selected_schema.pipeline_runs
     statement = table.select().where(
         table.c.run_key == normalized_run_key.value
