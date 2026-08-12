@@ -23,8 +23,9 @@ application boundary, but compatibility is not yet promised.
   label-specific capacity, with pause and resume controls that leave running
   work uninterrupted.
 - **[Execution and handoff](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/execution)**
-  make admitted stages DBOS-durable, record outcomes, and create the next ready
-  stage transactionally.
+  make admitted stages DBOS-durable, record outcomes—including optional partial
+  evidence on application failure—and create the next ready stage
+  transactionally.
 - **[Run completion](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/completion)**
   releases one optional durable fan-in operation after a closed run's members
   settle, without adding graph semantics to item pipelines.
@@ -32,8 +33,9 @@ application boundary, but compatibility is not yet promised.
   reconcile abandoned workflows and provide explicit retry and cancellation
   while preserving stage-attempt history.
 - **[Inspection](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/inspection)**
-  exposes campaigns, runs, work items, stage and attempt history, current state
-  counts, and bulk work status without exposing persistence rows.
+  exposes campaigns, runs, paginated run members, work items, stage and attempt
+  history with pinned terminal summaries, current state counts, and bulk work
+  status without exposing persistence rows or evidence payloads.
 - **Infra**
     - **[Shared core](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/_core)**
       owns nominal identities, immutable values, execution state, and the

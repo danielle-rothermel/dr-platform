@@ -65,9 +65,10 @@ Closure freezes membership; matching closed replay returns the same receipt \
 without consuming another member stream."""
 rationale = """
 Normal exhaustion and full validation distinguish a complete stream from a \
-partial prefix. The digest binds closed membership to the application manifest \
-without a member-listing API or per-member outcome snapshot."""
-date = "2026-08-09"
+partial prefix. Closure validates membership through the declared count, \
+ordinals, and digest without listing members or recording per-member outcomes; \
+later inspection may list members separately."""
+date = "2026-08-11"
 check = "uv run pytest -q tests/submission/test_stream.py -k 'interrupted_registration or closed_replay or digest or invalid_membership or database_mutation'"
 
 [[contracts]]
