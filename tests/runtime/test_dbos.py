@@ -355,6 +355,14 @@ def test_dbos_runtime_initialization_failure_is_not_treated_as_telemetry() -> (
         )
 
 
+def test_build_platform_dbos_config_rejects_non_positive_pool_size() -> None:
+    with pytest.raises(ValueError, match="pool size must be positive"):
+        dbos_config.build_platform_dbos_config(
+            database_url="postgresql://app-user@db.example/platform",
+            pool_size=0,
+        )
+
+
 def test_build_dbos_config_passes_pool_size_through_db_engine_kwargs() -> None:
     config = dbos_config.build_platform_dbos_config(
         database_url="postgresql://app-user@db.example/platform",

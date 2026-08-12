@@ -11,6 +11,7 @@ from sqlalchemy import Engine, create_engine, make_url, text
 
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
+from dr_platform.runtime.dbos import DEFAULT_POOL_SIZE
 from dr_platform.submission.stream import (
     RunMemberInput,
     RunRegistrationDeclaration,
@@ -173,6 +174,10 @@ def dbos_config(
         "application_version": application_version,
         "run_admin_server": False,
         "use_listen_notify": False,
+        "db_engine_kwargs": {
+            "pool_size": DEFAULT_POOL_SIZE,
+            "max_overflow": 0,
+        },
     }
     if application_database_url is not None:
         config["application_database_url"] = application_database_url

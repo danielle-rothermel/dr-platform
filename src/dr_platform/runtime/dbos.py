@@ -15,10 +15,12 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StrictStr,
+    field_validator,
     model_validator,
 )
 from sqlalchemy.engine import make_url
 
+from dr_platform._core.validation import validate_positive_integer
 from dr_platform.runtime.telemetry import (
     TelemetryInitializationResult,
     initialize_telemetry_safely,
@@ -65,6 +67,12 @@ class PlatformDbosConfig(BaseModel):
     enable_otlp: StrictBool = False
     otlp_traces_endpoints: tuple[StrictStr, ...] = ()
     otel_attribute_format: Literal["semconv"] = "semconv"
+
+    @field_validator("pool_size")
+    @classmethod
+    def _pool_size(cls, value: int) -> int:
+        validate_positive_integer(value, label="pool size")
+        return value
 
     @model_validator(mode="after")
     def validate_database_colocation(self) -> Self:
