@@ -64,6 +64,7 @@ class PlatformDbosConfig(BaseModel):
     database_url: StrictStr
     system_database_url: StrictStr
     pool_size: StrictInt = DEFAULT_POOL_SIZE
+    max_recovery_attempts: StrictInt
     enable_otlp: StrictBool = False
     otlp_traces_endpoints: tuple[StrictStr, ...] = ()
     otel_attribute_format: Literal["semconv"] = "semconv"
@@ -72,6 +73,12 @@ class PlatformDbosConfig(BaseModel):
     @classmethod
     def _pool_size(cls, value: int) -> int:
         validate_positive_integer(value, label="pool size")
+        return value
+
+    @field_validator("max_recovery_attempts")
+    @classmethod
+    def _max_recovery_attempts(cls, value: int) -> int:
+        validate_positive_integer(value, label="max recovery attempts")
         return value
 
     @model_validator(mode="after")
@@ -159,6 +166,7 @@ def build_platform_dbos_config(  # noqa: PLR0913 -- explicit bootstrap inputs
     database_url_env: str = DATABASE_URL_ENV,
     system_database_url_env: str = DBOS_SYSTEM_DATABASE_URL_ENV,
     database_url_error_suffix: str = "",
+    max_recovery_attempts: int,
     enable_otlp: bool = False,
     otlp_traces_endpoints: tuple[str, ...] = (),
     pool_size: int = DEFAULT_POOL_SIZE,
@@ -173,11 +181,15 @@ def build_platform_dbos_config(  # noqa: PLR0913 -- explicit bootstrap inputs
         or os.environ.get(system_database_url_env)
         or resolved_database_url
     )
+    validate_positive_integer(
+        max_recovery_attempts, label="max recovery attempts"
+    )
     return PlatformDbosConfig(
         database_url=resolved_database_url,
         system_database_url=normalize_postgresql_driver_url(
             resolved_system_database_url
         ),
+        max_recovery_attempts=max_recovery_attempts,
         enable_otlp=enable_otlp,
         otlp_traces_endpoints=otlp_traces_endpoints,
         pool_size=pool_size,

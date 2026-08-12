@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 PREFIX_PATTERN = re.compile(r"[a-z_][a-z0-9_]*")
 MAX_PREFIX_BYTES = 21
+POSTGRESQL_MAX_IDENTIFIER_BYTES = 63
 DEFAULT_PREFIX = "platform"
 
 
@@ -57,7 +58,14 @@ class StagingSchema:
         self.metadata = MetaData()
 
         def name(suffix: str) -> str:
-            return f"{prefix}_{suffix}"
+            identifier = f"{prefix}_{suffix}"
+            if len(identifier.encode()) > POSTGRESQL_MAX_IDENTIFIER_BYTES:
+                raise ValueError(
+                    "generated PostgreSQL identifier exceeds "
+                    f"{POSTGRESQL_MAX_IDENTIFIER_BYTES} bytes: "
+                    f"{identifier!r}"
+                )
+            return identifier
 
         self.pipeline_runs = Table(
             name("pipeline_runs"),
@@ -423,7 +431,7 @@ class StagingSchema:
                 nullable=False,
                 unique=True,
             ),
-            Column("workflow_id", Text, nullable=False, unique=True),
+            Column("current_attempt", Integer, nullable=False),
             Column("state", Text, nullable=False),
             Column("enqueued_at", DateTime(timezone=True), nullable=False),
             Column("output_reference", Text),
@@ -434,8 +442,12 @@ class StagingSchema:
                 name=name("ck_run_completion_executions_state"),
             ),
             CheckConstraint(
+                "current_attempt > 0",
+                name=name("ck_run_completion_executions_attempt"),
+            ),
+            CheckConstraint(
                 "terminal_at IS NULL OR terminal_at >= enqueued_at",
-                name=name("ck_run_completion_executions_terminal_time"),
+                name=name("ck_rc_exec_terminal_time"),
             ),
             CheckConstraint(
                 "(state = 'enqueued' AND terminal_at IS NULL AND "
@@ -445,5 +457,64 @@ class StagingSchema:
                 "(state = 'failed' AND terminal_at IS NOT NULL AND "
                 "output_reference IS NULL AND error_summary IS NOT NULL)",
                 name=name("ck_run_completion_executions_outcome"),
+            ),
+        )
+
+        self.run_completion_attempts = Table(
+            name("run_completion_attempts"),
+            self.metadata,
+            Column(
+                "run_completion_attempt_id",
+                BigInteger,
+                Identity(),
+                primary_key=True,
+            ),
+            Column(
+                "run_completion_execution_id",
+                BigInteger,
+                ForeignKey(
+                    f"{name('run_completion_executions')}.run_completion_execution_id",
+                    name=name("fk_rc_attempts_execution"),
+                    ondelete="RESTRICT",
+                ),
+                nullable=False,
+            ),
+            Column("attempt_number", Integer, nullable=False),
+            Column("workflow_id", Text, nullable=False),
+            Column("terminal_summary", JSONB),
+            Column("terminal_reference", Text),
+            Column("created_at", DateTime(timezone=True), nullable=False),
+            Column("enqueued_at", DateTime(timezone=True)),
+            Column("terminal_at", DateTime(timezone=True)),
+            UniqueConstraint(
+                "run_completion_execution_id",
+                "attempt_number",
+                name=name("uq_rc_attempt_exec_no"),
+            ),
+            UniqueConstraint(
+                "workflow_id",
+                name=name("uq_rc_attempt_workflow"),
+            ),
+            CheckConstraint(
+                "attempt_number > 0",
+                name=name("ck_rc_attempt_number"),
+            ),
+            CheckConstraint(
+                "terminal_summary IS NULL "
+                "OR jsonb_typeof(terminal_summary) = 'object'",
+                name=name("ck_rc_attempt_summary"),
+            ),
+            CheckConstraint(
+                "enqueued_at IS NULL OR enqueued_at >= created_at",
+                name=name("ck_rc_attempt_enqueued"),
+            ),
+            CheckConstraint(
+                "terminal_at IS NULL OR terminal_at >= created_at",
+                name=name("ck_rc_attempt_terminal"),
+            ),
+            CheckConstraint(
+                "enqueued_at IS NULL OR terminal_at IS NULL "
+                "OR terminal_at >= enqueued_at",
+                name=name("ck_rc_attempt_time_order"),
             ),
         )

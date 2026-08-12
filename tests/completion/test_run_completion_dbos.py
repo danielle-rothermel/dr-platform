@@ -37,7 +37,7 @@ from dr_platform.submission.stream import (
     compute_run_membership_digest,
     submit,
 )
-from tests.conftest import NOW, _migrate
+from tests.conftest import NOW, _migrate, default_live_dbos_identity
 from tests.execution.test_async_workflow import _await_dbos_result
 
 if TYPE_CHECKING:
@@ -113,7 +113,7 @@ def test_run_completion_payload_executes_through_dbos(
             args_for=completion_args,
         ),
     )
-    pipeline = wrap_pipeline_workflows(declared)
+    pipeline = wrap_pipeline_workflows(declared, max_recovery_attempts=1)
     registry = PipelineRegistry()
     registry.register(pipeline)
     Queue(pipeline.stages[0].queue_name, concurrency=2)
@@ -138,7 +138,9 @@ def test_run_completion_payload_executes_through_dbos(
         clock=lambda: NOW,
     )
     config = PlatformDbosConfig(
-        database_url=clean_pg, system_database_url=clean_pg
+        database_url=clean_pg,
+        system_database_url=clean_pg,
+        max_recovery_attempts=1,
     )
     initialize_dbos_runtime(config, app_name=f"drp-completion-{suffix}")
     registration = None
@@ -148,6 +150,7 @@ def test_run_completion_payload_executes_through_dbos(
             DBOS, "scheduled", lambda _cron: lambda workflow: workflow
         )
         registration = register_scheduled_dispatcher(
+            live_dbos_identity=default_live_dbos_identity(app_version="test"),
             config=config,
             engine=pg_engine,
             registry=registry,

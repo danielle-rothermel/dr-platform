@@ -9,6 +9,7 @@ from sqlalchemy import Engine
 
 from dr_platform import (
     AdmissionPayload,
+    LiveDbosIdentity,
     PipelineDefinition,
     PipelineKey,
     PipelineRegistry,
@@ -110,7 +111,7 @@ def test_root_contract_defines_submits_executes_and_inspects(
             ),
         ),
     )
-    pipeline = wrap_pipeline_workflows(declared)
+    pipeline = wrap_pipeline_workflows(declared, max_recovery_attempts=1)
     registry = PipelineRegistry()
     registry.register(pipeline)
     for stage in pipeline.stages:
@@ -153,6 +154,7 @@ def test_root_contract_defines_submits_executes_and_inspects(
     platform_config = PlatformDbosConfig(
         database_url=clean_pg,
         system_database_url=clean_pg,
+        max_recovery_attempts=1,
     )
     registration = None
     try:
@@ -161,9 +163,14 @@ def test_root_contract_defines_submits_executes_and_inspects(
             app_name=f"drp-public-{suffix}",
         )
         registration = register_scheduled_dispatcher(
+            live_dbos_identity=LiveDbosIdentity(
+                app_version=DBOS.application_version,
+                executor_ids=frozenset({DBOS.executor_id}),
+            ),
             config=platform_config,
             engine=pg_engine,
             registry=registry,
+            sweep_cron=None,
         )
         DBOS.launch()
         # DBOSClient enqueues versionless work for the latest-version worker.

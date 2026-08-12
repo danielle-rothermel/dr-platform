@@ -82,7 +82,9 @@ def _registry(key: str) -> tuple[PipelineRegistry, PipelineDefinition]:
             args_for=_completion_args,
         ),
     )
-    pipeline = wrap_pipeline_workflows(declared, clock=lambda: NOW)
+    pipeline = wrap_pipeline_workflows(
+        declared, clock=lambda: NOW, max_recovery_attempts=1
+    )
     registry = PipelineRegistry()
     registry.register(pipeline)
     return registry, pipeline

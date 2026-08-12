@@ -82,10 +82,18 @@ from dr_platform.recovery.cancellation import (
     WorkflowCanceller,
     cancel_work,
 )
+from dr_platform.recovery.live_identity import LiveDbosIdentity
 from dr_platform.recovery.retry import StageRetryResult, retry_stage
+from dr_platform.recovery.run_completion_retry import (
+    RunCompletionRetryResult,
+    retry_run_completion,
+)
 from dr_platform.recovery.sweep import (
+    RunCompletionSweepProjection,
+    RunCompletionSweepSummary,
     SweepProjection,
     SweepSummary,
+    sweep_abandoned_run_completions,
     sweep_abandoned_stages,
 )
 from dr_platform.runtime.database import upgrade_platform_schema
@@ -126,6 +134,7 @@ __all__ = [
     "CampaignSummary",
     "CancellationDisposition",
     "DispatcherRegistration",
+    "LiveDbosIdentity",
     "PipelineConflictError",
     "PipelineDefinition",
     "PipelineIdentity",
@@ -139,6 +148,9 @@ __all__ = [
     "RunCompletionExecutionState",
     "RunCompletionKey",
     "RunCompletionPayload",
+    "RunCompletionRetryResult",
+    "RunCompletionSweepProjection",
+    "RunCompletionSweepSummary",
     "RunKey",
     "RunMemberInput",
     "RunMemberSummary",
@@ -191,11 +203,13 @@ __all__ = [
     "read_controls",
     "register_scheduled_dispatcher",
     "resume",
+    "retry_run_completion",
     "retry_stage",
     "run_state_counts",
     "set_selector_capacity",
     "set_stage_capacity",
     "submit",
+    "sweep_abandoned_run_completions",
     "sweep_abandoned_stages",
     "upgrade_platform_schema",
     "wrap_pipeline_workflows",

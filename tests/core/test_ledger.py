@@ -63,6 +63,7 @@ STAGING_TABLE_SUFFIXES = (
     "run_barrier_cursor",
     "run_memberships",
     "run_completion_executions",
+    "run_completion_attempts",
     "work_items",
     "stage_executions",
     "stage_attempts",
@@ -573,6 +574,15 @@ def test_upgrade_rejects_conflicting_table_without_destroying_data(
             ).scalar_one()
             == "preexisting"
         )
+
+
+def test_staging_schema_rejects_overlong_prefix() -> None:
+    with pytest.raises(ValueError, match="maximum is 21 ASCII bytes"):
+        StagingSchema("x" * 22)
+
+
+def test_staging_schema_accepts_max_length_prefix() -> None:
+    StagingSchema("x" * 21)
 
 
 def test_campaign_work_identity_is_unique(pg_engine: Engine) -> None:

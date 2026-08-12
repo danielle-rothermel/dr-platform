@@ -29,6 +29,7 @@ from dr_platform.completion.execution import (
 from dr_platform.execution._checkpoint import (
     _require_ledger_checkpoint_executor,
 )
+from dr_platform.execution._recovery_cap import mark_wrapped_recovery_cap
 from dr_platform.execution.failures import StageApplicationFailure
 from dr_platform.pipeline.definitions import (
     AsyncWorkflowCallable,
@@ -88,13 +89,14 @@ def _safe_error_message(error: BaseException, *, error_type: str) -> str:
 def wrap_pipeline_workflows(
     pipeline: PipelineDefinition,
     *,
+    max_recovery_attempts: int,
     clock: Callable[[], datetime] = _utc_now,
 ) -> PipelineDefinition:
     """Return a declaration whose stages use package-owned DBOS wrappers.
 
-    Register and submit the returned declaration. DBOS recovery may re-execute
-    stage bodies; only completion commits exactly once, so bodies must tolerate
-    at-least-once execution.
+    Register and submit the returned declaration. Recovery is capped by
+    ``max_recovery_attempts``; operator ``retry_stage`` is the visible requeue
+    path after a loud FAILED outcome.
     """
     wrapped_stages = tuple(
         StageDefinition(
@@ -103,6 +105,7 @@ def wrap_pipeline_workflows(
             workflow=_wrap_stage_workflow(
                 pipeline=pipeline,
                 stage_index=stage_index,
+                max_recovery_attempts=max_recovery_attempts,
                 clock=clock,
             ),
             args_for=stage.args_for,
@@ -120,6 +123,7 @@ def wrap_pipeline_workflows(
                 pipeline.run_completion,
                 pipeline_key=pipeline.key,
                 pipeline_version=pipeline.version,
+                max_recovery_attempts=max_recovery_attempts,
                 clock=clock,
             )
         ),
@@ -130,6 +134,7 @@ def _wrap_stage_workflow(
     *,
     pipeline: PipelineDefinition,
     stage_index: int,
+    max_recovery_attempts: int,
     clock: Callable[[], datetime],
 ) -> AsyncWorkflowCallable:
     stage = pipeline.stages[stage_index]
@@ -182,7 +187,10 @@ def _wrap_stage_workflow(
         name=f"{workflow_name}_complete",
     )(_complete_stage_transaction)
 
-    @DBOS.workflow(name=workflow_name)
+    @DBOS.workflow(
+        name=workflow_name,
+        max_recovery_attempts=max_recovery_attempts,
+    )
     async def run_stage(payload_data: dict[str, object]) -> str | None:
         checkpoint_executor = _require_ledger_checkpoint_executor(run_stage)
         workflow_id = _current_workflow_id()
@@ -251,6 +259,7 @@ def _wrap_stage_workflow(
 
     # Dispatcher rejects declarations lacking this package-owned marker.
     setattr(run_stage, _WRAPPED_STAGE_MARKER, True)
+    mark_wrapped_recovery_cap(run_stage, max_recovery_attempts)
     return cast("AsyncWorkflowCallable", run_stage)
 
 

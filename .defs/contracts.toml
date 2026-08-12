@@ -172,16 +172,17 @@ check = "uv run pytest -q tests/completion/test_run_completion_dbos.py"
 [[contracts]]
 title = "Run completion records one outcome"
 statement = """
-Run completion uses one stable workflow identity. Enqueued means durably \
-submitted without a recorded application outcome, not necessarily active; it \
-may record at most one success or application failure. Success requires a \
-non-empty output reference, failure means application failure only, and replay \
-preserves identity."""
+Run completion uses a stable workflow identity per attempt. Enqueued means \
+durably submitted without a recorded application outcome, not necessarily \
+active. Each attempt may record at most one success or application failure; \
+operator retry appends a visible new attempt while barrier release facts remain \
+immutable. Success requires a non-empty output reference, failure means \
+application failure only, and replay preserves identity within an attempt."""
 rationale = """
-This is a truthful durable fan-in ledger without retry, cancellation, controls, \
-sweep, attempt history, or workflow-runtime state projection."""
+Attempt history makes operator retry visible without reopening barrier release \
+facts or silently replacing a failed aggregate."""
 date = "2026-08-09"
-check = "uv run pytest -q tests/completion/test_run_execution.py"
+check = "uv run pytest -q tests/completion/test_run_execution.py tests/recovery/test_run_completion_retry.py"
 
 [[contracts]]
 title = "Pipeline declarations are immutable and linear"
@@ -344,30 +345,37 @@ check = "uv run pytest -q tests/recovery/test_actions.py -k 'cancel or cancellat
 title = "Sweep only projects abandonment"
 statement = """
 The abandoned-stage sweep visits admitted current attempts and projects only \
-cancelled, errored, or recovery-exhausted workflow evidence into terminal \
-platform state. It never retries, resumes, replaces, or waits for work, and a \
-concurrent platform terminal outcome wins."""
+cancelled, errored, recovery-exhausted, or identity-orphaned pending workflow \
+evidence into terminal platform state. The run-completion sweep visits enqueued \
+current attempts and projects only errored, recovery-exhausted, or \
+identity-orphaned pending DBOS evidence into failed platform state. Pending \
+rows that still match the live \
+application version and executor identity are skipped so startup recovery and \
+the configured recovery cap can settle same-process crashes. The sweep never \
+retries, resumes, replaces, or waits for work, and a concurrent platform \
+terminal outcome wins."""
 rationale = """
-The sweep reconciles external execution evidence; it is not a retry scheduler. \
-Keeping it projection-only prevents automatic policy from overriding explicit \
-operator action or a completion transaction."""
+The sweep reconciles external execution evidence without time thresholds or \
+automatic policy that could duplicate paid work. Identity projection covers \
+structural orphaning after code or executor changes."""
 date = "2026-08-05"
-check = "uv run pytest -q tests/execution/test_handoff.py -k 'sweep'"
+check = "uv run pytest -q tests/execution/test_handoff.py -k 'sweep' tests/recovery/test_run_completion_retry.py -k 'sweep'"
 
 [[contracts]]
 title = "Recovery preserves one attempt identity"
 statement = """
 After process interruption, durable-workflow recovery resumes the registered \
 stage body under the same platform attempt and workflow identity when a worker \
-with the matching executor and application version starts; cross-version \
-recovery is not promised."""
+with the matching executor and application version starts and calls launch; \
+cross-version recovery is not promised. When recovery attempts exceed the \
+configured cap, the workflow becomes recovery-exhausted and the sweep projects \
+platform failure for operator retry."""
 rationale = """
 Runtime replay and operator retry are distinct: replay continues one attempt, \
-while retry appends another. Matching registrations and application version \
-are required by the underlying runtime, so the contract does not claim \
-recovery outside that boundary."""
+while retry appends another. Matching registrations, application version, and \
+an explicit recovery cap prevent silent paid re-execution after crash."""
 date = "2026-08-05"
-check = "uv run pytest -q tests/execution/test_dbos_recovery_boundary.py::test_dbos_recovery_reuses_the_platform_stage_attempt"
+check = "uv run pytest -q tests/execution/test_dbos_recovery_boundary.py tests/recovery/test_run_completion_retry.py::test_sweep_projects_exhausted_run_completion_for_operator_retry"
 
 [[contracts]]
 title = "Platform and workflow state are colocated"

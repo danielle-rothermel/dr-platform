@@ -25,12 +25,14 @@ from dr_platform.execution._checkpoint import (
     _LedgerCheckpointExecutor,
     _preflight_ledger_checkpoint_executor,
 )
+from dr_platform.execution._recovery_cap import validate_registry_recovery_cap
 from dr_platform.execution.handoff import (
     _pipeline_checkpoint_workflows,
     is_pipeline_wrapped,
 )
 from dr_platform.recovery.sweep import (
     DEFAULT_SWEEP_BATCH_SIZE,
+    sweep_abandoned_run_completions,
     sweep_abandoned_stages,
 )
 from dr_platform.runtime.dbos import (
@@ -42,11 +44,13 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
     from dr_platform.pipeline.registry import PipelineRegistry
+    from dr_platform.recovery.live_identity import LiveDbosIdentity
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DISPATCHER_CRON = "*/1 * * * * *"
 DEFAULT_RUN_BARRIER_CRON = "*/1 * * * * *"
+DEFAULT_SWEEP_CRON = "*/1 * * * * *"
 DISPATCHER_WORKFLOW_NAME = "dr_platform_staging_dispatcher"
 RUN_BARRIER_WORKFLOW_NAME = "dr_platform_run_barrier"
 SWEEP_WORKFLOW_NAME = "dr_platform_staging_sweep"
@@ -186,15 +190,16 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
     config: PlatformDbosConfig,
     engine: Engine,
     registry: PipelineRegistry,
+    live_dbos_identity: LiveDbosIdentity,
     cron: str = DEFAULT_DISPATCHER_CRON,
     batch_size: int = DEFAULT_ADMISSION_BATCH_SIZE,
     barrier_cron: str = DEFAULT_RUN_BARRIER_CRON,
     barrier_batch_size: int = DEFAULT_RUN_BARRIER_BATCH_SIZE,
     barrier_candidate_budget: int = DEFAULT_RUN_BARRIER_CANDIDATE_BUDGET,
-    sweep_cron: str | None = None,
+    sweep_cron: str | None = DEFAULT_SWEEP_CRON,
     sweep_batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
 ) -> DispatcherRegistration:
-    """Register admission and optional single-sweeper workflows."""
+    """Register admission, run-barrier, and abandoned-stage reconciliation."""
     validate_positive_integer(batch_size, label="admission batch size")
     validate_positive_integer(
         barrier_batch_size, label="run barrier batch size"
@@ -219,6 +224,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
         system_database_url=config.system_database_url,
     )
     _require_wrapped_registry(registry)
+    validate_registry_recovery_cap(registry, config.max_recovery_attempts)
     ownership_token = _DISPATCHER_OWNERSHIP.reserve()
     client: DBOSClient | None = None
     checkpoint_executor: _LedgerCheckpointExecutor | None = None
@@ -254,6 +260,16 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
                 client=client,
                 registry=registry,
                 batch_size=batch_size,
+            )
+            logger.info(
+                "admission pass admitted=%s skipped_capacity=%s "
+                "skipped_pause=%s unconfigured=%s failed=%s mismatched=%s",
+                summary.admitted_total,
+                summary.skipped_for_capacity,
+                summary.skipped_for_pause,
+                len(summary.unconfigured_stages),
+                len(summary.failed_stages),
+                len(summary.mismatched_stages),
             )
             if summary.unconfigured_stages:
                 logger.warning(
@@ -301,6 +317,14 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
                 batch_size=barrier_batch_size,
                 candidate_budget=barrier_candidate_budget,
             )
+            logger.info(
+                "run barrier pass cursor_acquired=%s examined=%s "
+                "releases=%s failures=%s",
+                summary.cursor_acquired,
+                summary.candidates_examined,
+                len(summary.releases),
+                len(summary.failures),
+            )
             if summary.failures:
                 logger.error(
                     "run barrier failed for runs: %s",
@@ -319,10 +343,25 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
                 _scheduled_time: datetime,
                 _actual_time: datetime,
             ) -> None:
-                sweep_abandoned_stages(
+                stage_summary = sweep_abandoned_stages(
                     engine,
                     client=client,
+                    live_identity=live_dbos_identity,
                     batch_size=sweep_batch_size,
+                )
+                completion_summary = sweep_abandoned_run_completions(
+                    engine,
+                    client=client,
+                    live_identity=live_dbos_identity,
+                    batch_size=sweep_batch_size,
+                )
+                logger.info(
+                    "abandoned-stage sweep inspected=%s projected=%s; "
+                    "run-completion sweep inspected=%s projected=%s",
+                    stage_summary.inspected_count,
+                    stage_summary.projected_count,
+                    completion_summary.inspected_count,
+                    completion_summary.projected_count,
                 )
 
             sweep_workflow = cast("ScheduledWorkflow", sweep)

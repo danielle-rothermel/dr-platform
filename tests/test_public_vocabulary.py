@@ -27,6 +27,11 @@ from dr_platform.inspection import (
 )
 from dr_platform.pipeline import definitions, registry
 from dr_platform.recovery import cancellation, retry, sweep
+from dr_platform.recovery.live_identity import LiveDbosIdentity
+from dr_platform.recovery.run_completion_retry import (
+    RunCompletionRetryResult,
+    retry_run_completion,
+)
 from dr_platform.runtime import database, dbos, dispatcher, telemetry
 from dr_platform.submission import runs, stream
 from dr_platform.submission import work_items as submission_work_items
@@ -41,6 +46,7 @@ _ROOT_BINDINGS = {
     "CampaignSummary": campaigns.CampaignSummary,
     "CancellationDisposition": cancellation.CancellationDisposition,
     "DispatcherRegistration": dispatcher.DispatcherRegistration,
+    "LiveDbosIdentity": LiveDbosIdentity,
     "PipelineConflictError": registry.PipelineConflictError,
     "PipelineDefinition": definitions.PipelineDefinition,
     "PipelineIdentity": definitions.PipelineIdentity,
@@ -56,6 +62,9 @@ _ROOT_BINDINGS = {
     "RunCompletionExecutionState": states.RunCompletionExecutionState,
     "RunCompletionKey": identities.RunCompletionKey,
     "RunCompletionPayload": completion_execution.RunCompletionPayload,
+    "RunCompletionRetryResult": RunCompletionRetryResult,
+    "RunCompletionSweepProjection": sweep.RunCompletionSweepProjection,
+    "RunCompletionSweepSummary": sweep.RunCompletionSweepSummary,
     "RunKey": identities.RunKey,
     "RunMemberInput": stream.RunMemberInput,
     "RunMemberSummary": run_members.RunMemberSummary,
@@ -110,11 +119,13 @@ _ROOT_BINDINGS = {
     "read_controls": controls.read_controls,
     "register_scheduled_dispatcher": dispatcher.register_scheduled_dispatcher,
     "resume": controls.resume,
+    "retry_run_completion": retry_run_completion,
     "retry_stage": retry.retry_stage,
     "run_state_counts": statuses.run_state_counts,
     "set_selector_capacity": controls.set_selector_capacity,
     "set_stage_capacity": controls.set_stage_capacity,
     "submit": stream.submit,
+    "sweep_abandoned_run_completions": sweep.sweep_abandoned_run_completions,
     "sweep_abandoned_stages": sweep.sweep_abandoned_stages,
     "upgrade_platform_schema": database.upgrade_platform_schema,
     "wrap_pipeline_workflows": handoff.wrap_pipeline_workflows,

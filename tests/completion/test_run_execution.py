@@ -12,6 +12,9 @@ from dr_platform._core.identities import (
     RunCompletionKey,
     RunKey,
 )
+from dr_platform._core.ledger.completion_attempts import (
+    get_run_completion_attempt,
+)
 from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
     StageExecutionState,
@@ -104,6 +107,38 @@ def test_run_completion_records_application_failure(pg_engine: Engine) -> None:
     }
 
 
+def test_run_completion_attempt_outcome_wins_over_error_summary(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    workflow_id = _enqueue_completion(pg_engine, key="outcome-pin")
+    with pg_engine.begin() as connection:
+        failed = record_run_completion_outcome(
+            connection,
+            workflow_id=workflow_id,
+            succeeded=False,
+            output_reference=None,
+            error_summary={
+                "outcome": "succeeded",
+                "error_type": "ValueError",
+                "message": "broken",
+            },
+            terminal_at=NOW + timedelta(seconds=2),
+        )
+        attempt = get_run_completion_attempt(
+            connection,
+            run_completion_execution_id=failed.run_completion_execution_id,
+            attempt_number=failed.current_attempt,
+            schema=schema,
+        )
+    assert failed.state is RunCompletionExecutionState.FAILED
+    assert attempt is not None
+    assert attempt.terminal_summary is not None
+    assert attempt.terminal_summary["outcome"] == (
+        RunCompletionExecutionState.FAILED.value
+    )
+
+
 def test_run_completion_rejects_a_different_second_outcome(
     pg_engine: Engine,
 ) -> None:
@@ -182,5 +217,5 @@ def test_completion_workflow_identity_is_stable_and_pipeline_scoped() -> None:
     assert first != other_pipeline
     assert first == (
         "drp-run-23c1e871ca241a532a43c70dbee5b25ccdf2a675ae5f8f120f7"
-        "812cad09ab907"
+        "812cad09ab907-a1"
     )

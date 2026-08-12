@@ -228,9 +228,13 @@ read_controls(pipeline, stage_key, labels=None) -> tuple[StageControlRecord, ...
 Execution wraps async application stage callables in package-owned DBOS workflows
 that record one terminal outcome and prepare the next stage transactionally.
 Stage bodies must tolerate at-least-once execution across workflow recovery.
-Crash recovery requires a worker with the matching executor and application
-version and with the workflows registered; cross-version recovery is not
-promised.
+Crash recovery requires `DBOS.launch()` on a worker with the matching executor
+and application version and with the workflows registered; cross-version
+recovery is not promised. Wrapped stage and run completion workflows require an
+explicit `max_recovery_attempts` on `PlatformDbosConfig`; DBOS marks a workflow
+recovery-exhausted when `recovery_attempts > max_recovery_attempts + 1` at
+execution time, after which the sweep projects platform failure for operator
+retry.
 
 ```python
 class StageExecutionState(StrEnum):
@@ -256,6 +260,8 @@ class StageApplicationFailure(Exception):
 
 def wrap_pipeline_workflows(
     pipeline: PipelineDefinition,
+    *,
+    max_recovery_attempts: int,
 ) -> PipelineDefinition: ...
 ```
 
@@ -299,8 +305,14 @@ runtime state.
 ### Recovery and operator actions
 
 Recovery keeps platform state authoritative while delegating physical workflow
-cancellation through a narrow protocol. Retry creates a new attempt, while the
-sweeper only projects terminal DBOS abandonment onto admitted work.
+cancellation through a narrow protocol. Retry creates a new attempt for failed
+stages or run completions, while the sweeper projects terminal DBOS abandonment
+and identity-orphaned pending work onto admitted stages and enqueued run
+completions. Pending rows that still
+match the live application version and executor identity are skipped so startup
+recovery and the recovery cap can settle same-process crashes; projection uses
+structural evidence only (no time thresholds). Deploy one live process per
+executor id so dead-executor detection remains truthful.
 
 ```python
 class WorkflowCanceller(Protocol):
@@ -335,6 +347,12 @@ class StageRetryResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RunCompletionRetryResult:
+    execution: RunCompletionExecutionRecord
+    new_attempt: object
+
+
+@dataclass(frozen=True, slots=True)
 class SweepSummary:
     projections: tuple[SweepProjection, ...]
     inspected_count: int
@@ -343,7 +361,9 @@ class SweepSummary:
 ```text
 cancel_work(work identity, canceller) -> WorkCancellationResult
 retry_stage(stage_execution_id) -> StageRetryResult
-sweep_abandoned_stages(DBOS client) -> SweepSummary
+retry_run_completion(run_key, DBOS client, registry) -> RunCompletionRetryResult
+sweep_abandoned_stages(DBOS client, live_identity) -> SweepSummary
+sweep_abandoned_run_completions(DBOS client, live_identity) -> RunCompletionSweepSummary
 ```
 
 ### Inspection
@@ -447,15 +467,20 @@ Downgrade remains deliberately non-destructive and refuses to delete the
 recorded ledger.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher
-before `DBOS.launch()`. Admission and run-barrier reconciliation have separate
-schedule and batch settings. The barrier also has a candidate budget, which
+before `DBOS.launch()`. Admission, run-barrier reconciliation, and
+abandoned-stage and run-completion sweep have separate schedule and batch
+settings; both register by default unless `sweep_cron=None`. Pass
+`LiveDbosIdentity` from `DBOS.application_version` and the deployment-wide
+set of live executor IDs at dispatcher registration. When multiple worker
+processes run, either disable sweep on all but one reconciler or supply every
+live executor ID to the process that owns sweep so peer work is not projected
+as `dead_executor`.
+The barrier also has a candidate budget, which
 must be at least its release batch size and bounds all evaluated runs, including
 ineligible and lock-skipped candidates. A persisted cursor rotates blocked or
 failed candidates so later runs can make progress. Keep the returned dispatcher
-registration alive while the runtime is active. Production-like deployments
-must also schedule
-`sweep_abandoned_stages`, either through the dispatcher or independently, so
-abandoned workflows do not retain admission capacity indefinitely.
+registration alive while the runtime is active. Each dispatcher pass logs
+admission, barrier, and sweep counts at INFO for reconciliation.
 
 Size admission schedules, barrier schedules, DBOS queue concurrency, stage
 capacity, and the DBOS application-database pool together using
