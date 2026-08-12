@@ -7,7 +7,7 @@ import re
 import sqlalchemy as sa
 from alembic import context, op
 
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import MAX_PREFIX_BYTES, StagingSchema
 
 revision = "0001_staging_baseline"
 down_revision = None
@@ -15,7 +15,6 @@ branch_labels = None
 depends_on = None
 
 DEFAULT_PREFIX = "platform"
-MAX_PREFIX_BYTES = 21
 PREFIX_PATTERN = re.compile(r"[a-z_][a-z0-9_]*")
 
 

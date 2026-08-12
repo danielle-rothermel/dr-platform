@@ -34,6 +34,16 @@ from dr_platform.runtime.dispatcher import UnwrappedPipelineError
 from tests.conftest import default_live_dbos_identity
 
 
+@pytest.fixture(autouse=True)
+def _mock_object_store_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_backend = object()
+    monkeypatch.setattr(
+        dispatcher.PostgresBackend,
+        "open_sync",
+        classmethod(lambda cls, engine, **kwargs: fake_backend),
+    )
+
+
 def _passthrough_dbos_workflow(*, name: str, **kwargs: object):
     del name, kwargs
 
@@ -496,6 +506,7 @@ def test_registration_binds_one_sized_executor_to_every_wrapper(
     )
     assert registration._resources is not None
     bound = registration._resources.checkpoint_executor
+    bound_store = registration._resources.object_store_binding._object_store
     workflows = [stage.workflow for stage in pipeline.stages]
     assert pipeline.run_completion is not None
     workflows.append(pipeline.run_completion.workflow)
@@ -503,6 +514,10 @@ def test_registration_binds_one_sized_executor_to_every_wrapper(
     assert workers == [23]
     assert all(
         vars(workflow)["_dr_platform_ledger_checkpoint_executor"] is bound
+        for workflow in workflows
+    )
+    assert all(
+        vars(workflow)["_dr_platform_object_store"] is bound_store
         for workflow in workflows
     )
 

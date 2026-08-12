@@ -42,11 +42,14 @@ from dr_platform._core.ledger.executions import (
     insert_stage_execution,
     transition_stage_execution,
 )
-from dr_platform._core.ledger.schema import StagingSchema
+from dr_platform._core.ledger.schema import (
+    LONGEST_TABLE_SUFFIX,
+    MAX_PREFIX_BYTES,
+    StagingSchema,
+)
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import upsert_stage_control
 from dr_platform.runtime.database.migrate import (
-    PLATFORM_BASELINE_REVISION,
     PLATFORM_HEAD_REVISION,
     _alembic_config,
     upgrade_platform_schema,
@@ -57,6 +60,7 @@ from dr_platform.submission.runs import (
 )
 from dr_platform.submission.work_items import insert_work_item
 from tests.conftest import NOW, engine_dsn
+from tests.core.test_evidence import SAMPLE_EVIDENCE_REFERENCE
 
 STAGING_TABLE_SUFFIXES = (
     "pipeline_runs",
@@ -402,9 +406,13 @@ def test_fresh_baseline_creates_only_the_staged_work_schema(
             text("SELECT version_num FROM platform_platform_alembic_version")
         ).scalar_one()
 
-    assert PLATFORM_BASELINE_REVISION == PLATFORM_HEAD_REVISION
     assert installed_revision == PLATFORM_HEAD_REVISION
     assert tables == STAGING_TABLES | {"platform_platform_alembic_version"}
+    with pg_engine.connect() as connection:
+        dr_store_installed = connection.execute(
+            text("SELECT to_regnamespace('dr_store') IS NOT NULL")
+        ).scalar_one()
+    assert dr_store_installed is True
 
 
 def test_baseline_downgrade_is_irreversible(pg_engine: Engine) -> None:
@@ -576,13 +584,20 @@ def test_upgrade_rejects_conflicting_table_without_destroying_data(
         )
 
 
+def test_staging_schema_longest_table_suffix_is_pinned() -> None:
+    assert LONGEST_TABLE_SUFFIX == "ix_pipeline_runs_completion_candidates"
+
+
 def test_staging_schema_rejects_overlong_prefix() -> None:
-    with pytest.raises(ValueError, match="maximum is 21 ASCII bytes"):
-        StagingSchema("x" * 22)
+    with pytest.raises(
+        ValueError,
+        match=f"maximum is {MAX_PREFIX_BYTES} ASCII bytes",
+    ):
+        StagingSchema("x" * (MAX_PREFIX_BYTES + 1))
 
 
 def test_staging_schema_accepts_max_length_prefix() -> None:
-    StagingSchema("x" * 21)
+    StagingSchema("x" * MAX_PREFIX_BYTES)
 
 
 def test_campaign_work_identity_is_unique(pg_engine: Engine) -> None:
@@ -943,10 +958,10 @@ def test_stage_attempt_evidence_reference_is_persisted(
             terminal_at=NOW + timedelta(seconds=2),
             terminal_summary={"outcome": "failed"},
             terminal_reference=None,
-            evidence_reference="evidence:partial",
+            evidence_reference=SAMPLE_EVIDENCE_REFERENCE,
         )
 
-    assert terminal.evidence_reference == "evidence:partial"
+    assert terminal.evidence_reference == SAMPLE_EVIDENCE_REFERENCE
 
 
 def test_stage_attempt_terminal_summary_is_recursively_immutable(

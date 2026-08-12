@@ -11,6 +11,15 @@ from uuid import uuid4
 
 import pytest
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
+from dr_serialize import Jsonable
+from dr_store.content_addressing import (
+    OBJECT_REFERENCE_PREFIX,
+    ObjectReference,
+    compute_content_hash,
+    format_object_reference,
+)
+from dr_store.object_store import ObjectStore
+from dr_store.storage_backends.postgresql import PostgresBackend
 from sqlalchemy import Engine, func, select
 
 import dr_platform.recovery.cancellation as cancellation_module
@@ -22,9 +31,11 @@ from dr_platform._core.identities import (
     StageKey,
     WorkKey,
 )
+from dr_platform._core.ledger.evidence import STAGE_FAILURE_EVIDENCE_SCHEMA
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import upsert_stage_control
 from dr_platform.admission.runner import run_admission_pass
+from dr_platform.execution._object_store import _object_store_context
 from dr_platform.execution.failures import StageApplicationFailure
 from dr_platform.execution.handoff import (
     StageHandoffMismatchError,
@@ -497,7 +508,7 @@ def test_completion_and_next_ready_insert_roll_back_together(
             output_reference="output:prepare",
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="output:prepare",
-            evidence_reference=None,
+            evidence=None,
             next_stage_key="execute",
             next_stage_index=1,
             completed_at=_utc_now(),
@@ -582,7 +593,7 @@ def test_completion_identity_mismatch_does_not_mutate_state(
             output_reference="output:prepare",
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="output:prepare",
-            evidence_reference=None,
+            evidence=None,
             next_stage_key="execute",
             next_stage_index=1,
             completed_at=_utc_now(),
@@ -630,7 +641,7 @@ def test_output_reference_is_transported_opaquely_without_parsing(
             output_reference=_TERMINAL_OBJECT_REFERENCE,
             terminal_summary={"outcome": "succeeded"},
             terminal_reference=_TERMINAL_OBJECT_REFERENCE,
-            evidence_reference=None,
+            evidence=None,
             next_stage_key=None,
             next_stage_index=None,
             completed_at=_utc_now(),
@@ -896,11 +907,18 @@ def test_application_failure_can_store_evidence_reference(
 ) -> None:
     schema = _migrate(pg_engine)
     suffix = uuid4().hex[:10]
+    evidence: Jsonable = {"partial": 1}
+    expected_reference = format_object_reference(
+        ObjectReference(
+            schema=STAGE_FAILURE_EVIDENCE_SCHEMA,
+            content_hash=compute_content_hash(evidence),
+        )
+    )
 
     def raises_with_evidence(_input_reference: str) -> str:
         raise StageApplicationFailure(
             "partial graph outcome",
-            evidence_reference="evidence:partial-1",
+            evidence=evidence,
         )
 
     declared = _pipeline(
@@ -982,7 +1000,10 @@ def test_application_failure_can_store_evidence_reference(
 
     assert attempt.output_reference is None
     assert attempt.terminal_reference is None
-    assert attempt.evidence_reference == "evidence:partial-1"
+    assert attempt.evidence_reference == expected_reference
+    assert attempt.evidence_reference.startswith(
+        f"{OBJECT_REFERENCE_PREFIX}:{STAGE_FAILURE_EVIDENCE_SCHEMA}:"
+    )
     assert attempt.terminal_summary["producer"] == "application_failure"
     assert attempt.terminal_summary["message"] == "partial graph outcome"
 
@@ -1142,7 +1163,7 @@ def _commit_successful_handoff(
             output_reference="output:prepare",
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="output:prepare",
-            evidence_reference=None,
+            evidence=None,
             next_stage_key=pipeline.stages[1].key.value,
             next_stage_index=1,
             completed_at=completed_at,
@@ -1801,3 +1822,69 @@ def test_sweep_skips_pending_with_live_identity(
             select(schema.stage_executions.c.state)
         ).scalar_one()
     assert state == StageExecutionState.ADMITTED.value
+
+
+def test_failure_evidence_write_aborts_whole_checkpoint(
+    pg_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema = _migrate(pg_engine)
+    pipeline = _pipeline(
+        key="evidence-abort",
+        stage_logic=(("prepare", lambda input_reference: input_reference),),
+    )
+    workflow_id, _stage_execution_id, _work_item_id = _submit_and_admit_one(
+        pg_engine,
+        schema,
+        pipeline,
+        campaign_key="campaign-evidence-abort",
+        run_key="run-evidence-abort",
+    )
+    object_store = ObjectStore(PostgresBackend.open_sync(pg_engine))
+
+    def explode(*args: object, **kwargs: object) -> tuple[object, object]:
+        raise RuntimeError("evidence store unavailable")
+
+    monkeypatch.setattr(object_store, "put_enlisted", explode)
+
+    with (
+        pytest.raises(RuntimeError, match="evidence store unavailable"),
+        pg_engine.begin() as connection,
+        _object_store_context(object_store),
+    ):
+        _complete_stage_in_transaction(
+            connection,
+            workflow_id=workflow_id,
+            pipeline_key=pipeline.key.value,
+            pipeline_version=pipeline.version,
+            stage_key="prepare",
+            stage_index=0,
+            succeeded=False,
+            output_reference=None,
+            terminal_summary={"outcome": "failed"},
+            terminal_reference=None,
+            evidence={"partial": 1},
+            next_stage_key=None,
+            next_stage_index=None,
+            completed_at=_utc_now(),
+            schema=schema,
+        )
+
+    with pg_engine.connect() as connection:
+        row = connection.execute(
+            select(
+                schema.stage_executions.c.state,
+                schema.stage_attempts.c.terminal_at,
+                schema.stage_attempts.c.evidence_reference,
+            ).select_from(
+                schema.stage_attempts.join(
+                    schema.stage_executions,
+                    schema.stage_attempts.c.stage_execution_id
+                    == schema.stage_executions.c.stage_execution_id,
+                )
+            )
+        ).one()
+
+    assert row.state == StageExecutionState.ADMITTED.value
+    assert row.terminal_at is None
+    assert row.evidence_reference is None

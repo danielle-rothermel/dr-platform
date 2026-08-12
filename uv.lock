@@ -171,6 +171,8 @@ dependencies = [
     { name = "alembic" },
     { name = "dbos", extra = ["otel"] },
     { name = "dr-serialize" },
+    { name = "dr-store" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "sqlalchemy" },
 ]
@@ -178,7 +180,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "pre-commit" },
-    { name = "psycopg", extra = ["binary"] },
     { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
@@ -189,6 +190,8 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.16.2" },
     { name = "dbos", extras = ["otel"], specifier = "==2.27.0" },
     { name = "dr-serialize", specifier = "==0.1.2" },
+    { name = "dr-store", specifier = "==0.2.2" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
 ]
@@ -196,7 +199,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "pre-commit", specifier = ">=4.6.0" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.15.18" },
     { name = "ty", specifier = ">=0.0.51" },
@@ -212,6 +214,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5e/2a/25dd5859ddfd78ee604a59c6ab81a0601669506a6af6ea871fc4438955bc/dr_serialize-0.1.2.tar.gz", hash = "sha256:02662cbb9ad3f1262a81bc14a2f3254f925f880333da69eac6dbda2226d1c51f", size = 17868, upload-time = "2026-08-05T22:00:48.099Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cc/b7/511d474c07440ff8de4c78aa637a461746c5a5dca9e539fca06b2d015722/dr_serialize-0.1.2-py3-none-any.whl", hash = "sha256:785015ceb779906bd03965fd541d1733772b45fefbd2d5473304b7f5db60ce5d", size = 27564, upload-time = "2026-08-05T22:00:46.732Z" },
+]
+
+[[package]]
+name = "dr-store"
+version = "0.2.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "dr-serialize" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/97/bc7f09b89ba656912e4398d19982c86a2d192c27629731bf6d5975f5dbd9/dr_store-0.2.2.tar.gz", hash = "sha256:1667df65bf5c82b1e93bd9c93e2ca8ebd7899192f4115061732db61718c2b4b8", size = 42972, upload-time = "2026-08-12T06:01:53.508Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/64/3c86ac5a87cabf592b06bf58dcae3b85f3c3616bf37bc85fad499a7734c4/dr_store-0.2.2-py3-none-any.whl", hash = "sha256:5b64a26328e46056ef486e91cf21f16f323f5ae0bf628d5e9ed0e32e36d037e1", size = 48229, upload-time = "2026-08-12T06:01:52.031Z" },
 ]
 
 [[package]]

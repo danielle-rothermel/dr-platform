@@ -17,6 +17,7 @@ from dr_platform._core.ledger.states import (
 )
 from dr_platform._core.ledger.terminal_summary import (
     TerminalSummaryProducer,
+    build_run_completion_error_summary,
     build_terminal_summary,
 )
 from dr_platform._core.validation import validate_positive_integer
@@ -343,11 +344,11 @@ def _dbos_failure_error_summary(status: object) -> dict[str, object] | None:
     message = str(dbos_status)
     if error is not None:
         message = _safe_error_message(error)
-    return {
-        "error_type": "dbos.abandonment",
-        "message": message,
-        "dbos_status": dbos_status,
-    }
+    return build_run_completion_error_summary(
+        error_type="dbos.abandonment",
+        message=message,
+        dbos_status=str(dbos_status),
+    )
 
 
 def _run_completion_abandonment_error_summary(
@@ -366,12 +367,12 @@ def _run_completion_abandonment_error_summary(
         )
         if evidence is None:
             return None
-        return {
-            "error_type": "dbos.abandonment",
-            "message": evidence.value,
-            "dbos_status": dbos_status,
-            "reason": evidence.value,
-        }
+        return build_run_completion_error_summary(
+            error_type="dbos.abandonment",
+            message=evidence.value,
+            dbos_status=str(dbos_status),
+            reason=evidence.value,
+        )
     return None
 
 
