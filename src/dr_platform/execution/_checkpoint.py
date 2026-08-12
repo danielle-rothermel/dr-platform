@@ -7,8 +7,12 @@ from functools import partial
 from threading import Lock
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
+from dbos import DBOS
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+
+    from sqlalchemy.engine import Connection
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -165,3 +169,7 @@ def _require_ledger_checkpoint_executor(
             "wrapped workflow requires a live dispatcher registration"
         )
     return cast("_LedgerCheckpointExecutor", executor)
+
+
+def _ledger_checkpoint_connection() -> Connection:
+    return DBOS.sql_session.connection()

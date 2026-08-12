@@ -19,8 +19,8 @@ from dr_platform._core.ledger.executions import (
 from dr_platform._core.ledger.schema import StagingSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.ledger.terminal_summary import (
-    TerminalSummaryField,
     TerminalSummaryProducer,
+    build_terminal_outcome_summary,
     build_terminal_summary,
 )
 from dr_platform.admission.runner import AdmissionPayload
@@ -29,6 +29,7 @@ from dr_platform.completion.execution import (
     wrap_run_completion,
 )
 from dr_platform.execution._checkpoint import (
+    _ledger_checkpoint_connection,
     _require_ledger_checkpoint_executor,
 )
 from dr_platform.execution._object_store import (
@@ -55,10 +56,6 @@ if TYPE_CHECKING:
 
 
 _WRAPPED_STAGE_MARKER = "_dr_platform_wrapped_stage"
-
-
-def _checkpoint_connection() -> Connection:
-    return DBOS.sql_session.connection()
 
 
 class StageHandoffMismatchError(RuntimeError):
@@ -178,7 +175,7 @@ def _wrap_stage_workflow(
     ) -> None:
         # Read nondeterministic time only in the checkpointed transaction.
         _complete_stage_in_transaction(
-            _checkpoint_connection(),
+            _ledger_checkpoint_connection(),
             workflow_id=workflow_id,
             pipeline_key=pipeline_key,
             pipeline_version=pipeline_version,
@@ -261,11 +258,9 @@ def _wrap_stage_workflow(
                 stage_index=stage_index,
                 succeeded=True,
                 output_reference=output_reference,
-                terminal_summary={
-                    TerminalSummaryField.OUTCOME: (
-                        StageExecutionState.SUCCEEDED.value
-                    ),
-                },
+                terminal_summary=build_terminal_outcome_summary(
+                    outcome=StageExecutionState.SUCCEEDED.value,
+                ),
                 terminal_reference=output_reference,
                 evidence=None,
                 next_stage_key=(

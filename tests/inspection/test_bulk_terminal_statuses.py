@@ -27,6 +27,7 @@ from dr_platform.pipeline.registry import PipelineRegistry
 from dr_platform.recovery.retry import retry_stage
 from dr_platform.submission.stream import WorkInput
 from tests.conftest import NOW, _args_for, _migrate, submit_items
+from tests.core.test_evidence import SAMPLE_EVIDENCE_REFERENCE
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection
@@ -158,7 +159,7 @@ def _seed_terminal_members(engine: Engine, schema: StagingSchema) -> None:
             producer=TerminalSummaryProducer.APPLICATION_FAILURE,
             at=NOW,
             error_type="builtins.RuntimeError",
-            evidence_reference="evidence:partial-1",
+            evidence_reference=SAMPLE_EVIDENCE_REFERENCE,
         )
         _fail_with_terminal_summary(
             connection,
@@ -190,7 +191,7 @@ def test_bulk_terminal_statuses_returns_summary_and_evidence_reference(
     status = result.statuses[WorkKey("work-app-failure")]
 
     assert status.present is True
-    assert status.evidence_reference == "evidence:partial-1"
+    assert status.evidence_reference == SAMPLE_EVIDENCE_REFERENCE
     assert status.terminal_summary is not None
     assert (
         status.terminal_summary["producer"]

@@ -42,6 +42,7 @@ from dr_platform._core.ledger.terminal_summary import (
 )
 from dr_platform._core.validation import validate_non_empty_string
 from dr_platform.execution._checkpoint import (
+    _ledger_checkpoint_connection,
     _require_ledger_checkpoint_executor,
 )
 from dr_platform.execution._recovery_cap import mark_wrapped_recovery_cap
@@ -218,7 +219,7 @@ def wrap_run_completion(
         error_summary: Mapping[str, object] | None,
     ) -> None:
         record_run_completion_outcome(
-            cast("Connection", DBOS.sql_session),
+            _ledger_checkpoint_connection(),
             workflow_id=workflow_id,
             succeeded=succeeded,
             output_reference=output_reference,

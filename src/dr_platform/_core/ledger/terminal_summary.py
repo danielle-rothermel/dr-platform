@@ -56,6 +56,11 @@ def build_terminal_summary(  # noqa: PLR0913 -- explicit terminal facts
     return summary
 
 
+def build_terminal_outcome_summary(*, outcome: str) -> dict[str, object]:
+    """Outcome-only terminal summary without a producer tag."""
+    return {TerminalSummaryField.OUTCOME: outcome}
+
+
 def build_run_completion_error_summary(
     *,
     error_type: str,
@@ -80,7 +85,7 @@ def build_run_completion_attempt_summary(
     error_summary: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     if error_summary is None:
-        return {TerminalSummaryField.OUTCOME: outcome}
+        return build_terminal_outcome_summary(outcome=outcome)
     return {
         **dict(error_summary),
         TerminalSummaryField.OUTCOME: outcome,

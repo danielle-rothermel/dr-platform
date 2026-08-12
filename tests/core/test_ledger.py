@@ -60,6 +60,7 @@ from dr_platform.submission.runs import (
 )
 from dr_platform.submission.work_items import insert_work_item
 from tests.conftest import NOW, engine_dsn
+from tests.core.test_evidence import SAMPLE_EVIDENCE_REFERENCE
 
 STAGING_TABLE_SUFFIXES = (
     "pipeline_runs",
@@ -957,10 +958,10 @@ def test_stage_attempt_evidence_reference_is_persisted(
             terminal_at=NOW + timedelta(seconds=2),
             terminal_summary={"outcome": "failed"},
             terminal_reference=None,
-            evidence_reference="evidence:partial",
+            evidence_reference=SAMPLE_EVIDENCE_REFERENCE,
         )
 
-    assert terminal.evidence_reference == "evidence:partial"
+    assert terminal.evidence_reference == SAMPLE_EVIDENCE_REFERENCE
 
 
 def test_stage_attempt_terminal_summary_is_recursively_immutable(

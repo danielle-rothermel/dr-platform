@@ -3,6 +3,7 @@ from dr_platform._core.ledger.terminal_summary import (
     TerminalSummaryProducer,
     build_run_completion_attempt_summary,
     build_run_completion_error_summary,
+    build_terminal_outcome_summary,
 )
 
 
@@ -61,5 +62,11 @@ def test_run_completion_attempt_summary_uses_pinned_keys() -> None:
         "outcome": "failed",
     }
     assert build_run_completion_attempt_summary(outcome="succeeded") == {
+        "outcome": "succeeded",
+    }
+
+
+def test_terminal_outcome_summary_uses_pinned_keys() -> None:
+    assert build_terminal_outcome_summary(outcome="succeeded") == {
         "outcome": "succeeded",
     }

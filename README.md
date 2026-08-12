@@ -375,14 +375,18 @@ paginated by membership ordinal and reports current stage state without
 returning evidence payloads.
 
 Terminal attempt summaries use pinned wire keys (`TerminalSummaryField`,
-`TerminalSummaryProducer`) with an explicit producer tag and optional
-traceback capture on application failure. Run-completion attempt summaries
-use the same pinned keys without a producer tag. Applications may attach
-partial evidence on failure by raising `StageApplicationFailure` with an
-optional strict-JSON evidence payload; the platform writes it through
-enlisted `dr-store` in the same checkpoint transaction as the failed attempt
-and records the resulting opaque reference separately from success output
-references.
+`TerminalSummaryProducer`) with an explicit producer tag on failed,
+abandoned, and cancelled attempts, plus optional traceback capture on
+application failure. Successful stage attempts record outcome only through
+`build_terminal_outcome_summary`. Run-completion attempt summaries use the
+same pinned keys without a producer tag; extending producer tagging to run
+completions remains deferred until ratified. Applications may attach partial
+evidence on failure by raising `StageApplicationFailure` with an optional
+strict-JSON evidence payload; the platform writes it through enlisted
+`dr-store` in the same checkpoint transaction as the failed attempt and
+records the resulting opaque reference separately from success output
+references. The platform stores and transports evidence references without
+resolving them; out-of-transaction evidence read-back is caller-owned.
 `TerminalSummaryFilter` applies exact-match predicates on those pinned keys
 over the current attempt. `bulk_work_terminal_statuses` reads terminal facts
 for a bounded work-key set in one SELECT per chunk; filtered

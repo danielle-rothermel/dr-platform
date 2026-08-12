@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `dr-store==0.2.2` integration with enlisted failure evidence writes in the
   stage handoff checkpoint; Alembic revision `0002_dr_store_baseline` colocates
-  the `dr_store` schema with the platform ledger.
+  the `dr_store` schema with the platform ledger on the migration bind
+  connection and is irreversible on downgrade.
 - Required `PlatformDbosConfig.max_recovery_attempts` for wrapped stage and run
   completion workflows; recovery-exhausted workflows project to platform failure
   for operator retry.
@@ -40,7 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sweep and recovery contracts now cover identity orphaning, recovery caps,
   run completion retry, and run-completion abandonment projection.
 - Run-completion error and attempt summaries use pinned `TerminalSummaryField`
-  wire keys without a producer tag.
+  wire keys without a producer tag; successful stage attempts use pinned
+  outcome-only summaries via `build_terminal_outcome_summary`.
 - PostgreSQL table-prefix validation now derives its limit from the longest
   generated identifier suffix rather than an unreachable inner guard.
 - `.defs/terms.toml` aligns run completion execution with per-attempt identity
