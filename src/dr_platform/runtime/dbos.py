@@ -13,6 +13,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     StrictBool,
+    StrictInt,
     StrictStr,
     model_validator,
 )
@@ -42,8 +43,15 @@ def normalize_postgresql_driver_url(database_url: str) -> str:
     return database_url
 
 
+DEFAULT_POOL_SIZE = 10_000
+
+
 class PlatformDbosConfig(BaseModel):
-    """Queue registration and concurrency remain application-owned."""
+    """Queue registration and concurrency remain application-owned.
+
+    ``pool_size`` sizes DBOS's application-database pool used by checkpoint
+    transactions, not the caller's separate platform ``engine``.
+    """
 
     model_config = ConfigDict(
         extra="forbid",
@@ -53,6 +61,7 @@ class PlatformDbosConfig(BaseModel):
 
     database_url: StrictStr
     system_database_url: StrictStr
+    pool_size: StrictInt = DEFAULT_POOL_SIZE
     enable_otlp: StrictBool = False
     otlp_traces_endpoints: tuple[StrictStr, ...] = ()
     otel_attribute_format: Literal["semconv"] = "semconv"
@@ -144,6 +153,7 @@ def build_platform_dbos_config(  # noqa: PLR0913 -- explicit bootstrap inputs
     database_url_error_suffix: str = "",
     enable_otlp: bool = False,
     otlp_traces_endpoints: tuple[str, ...] = (),
+    pool_size: int = DEFAULT_POOL_SIZE,
 ) -> PlatformDbosConfig:
     resolved_database_url = resolve_database_url(
         database_url,
@@ -162,6 +172,7 @@ def build_platform_dbos_config(  # noqa: PLR0913 -- explicit bootstrap inputs
         ),
         enable_otlp=enable_otlp,
         otlp_traces_endpoints=otlp_traces_endpoints,
+        pool_size=pool_size,
     )
 
 
@@ -179,6 +190,10 @@ def build_dbos_config(
     }
     if config.otlp_traces_endpoints:
         result["otlp_traces_endpoints"] = list(config.otlp_traces_endpoints)
+    result["db_engine_kwargs"] = {
+        "pool_size": config.pool_size,
+        "max_overflow": 0,
+    }
     return result
 
 

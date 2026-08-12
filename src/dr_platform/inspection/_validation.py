@@ -12,8 +12,7 @@ if TYPE_CHECKING:
 
     from dr_platform._core.ledger.schema import StagingSchema
 
-DEFAULT_INSPECTION_LIMIT = 100
-MAX_INSPECTION_LIMIT = 1_000
+DEFAULT_INSPECTION_LIMIT = 10_000
 
 
 def require_campaign(
@@ -81,10 +80,6 @@ def validate_work_item_cursor(
 
 def validate_limit(limit: int) -> None:
     validate_positive_integer(limit, label="inspection limit")
-    if limit > MAX_INSPECTION_LIMIT:
-        raise ValueError(
-            f"inspection limit must not exceed {MAX_INSPECTION_LIMIT}"
-        )
 
 
 def validate_work_item_id(work_item_id: int) -> None:

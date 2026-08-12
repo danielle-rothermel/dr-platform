@@ -45,8 +45,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DISPATCHER_CRON = "*/5 * * * * *"
-DEFAULT_RUN_BARRIER_CRON = "*/5 * * * * *"
+DEFAULT_DISPATCHER_CRON = "*/1 * * * * *"
+DEFAULT_RUN_BARRIER_CRON = "*/1 * * * * *"
 DISPATCHER_WORKFLOW_NAME = "dr_platform_staging_dispatcher"
 RUN_BARRIER_WORKFLOW_NAME = "dr_platform_run_barrier"
 SWEEP_WORKFLOW_NAME = "dr_platform_staging_sweep"
@@ -205,6 +205,12 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
     if barrier_candidate_budget < barrier_batch_size:
         raise ValueError(
             "run barrier candidate budget must be at least the batch size"
+        )
+    required_checkpoint_workers = max(batch_size, barrier_batch_size)
+    if config.pool_size < required_checkpoint_workers:
+        raise ValueError(
+            "pool size must be at least the larger of admission batch size "
+            "and run barrier batch size"
         )
     if sweep_cron is not None:
         validate_positive_integer(sweep_batch_size, label="sweep batch size")

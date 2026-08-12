@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
 
 
-DEFAULT_SWEEP_BATCH_SIZE = 100
+DEFAULT_SWEEP_BATCH_SIZE = 10_000
 
 
 @verify(UNIQUE)

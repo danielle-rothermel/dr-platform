@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy import Engine, Select
 
-DEFAULT_BULK_STATUS_CHUNK_SIZE = 500
+DEFAULT_BULK_STATUS_CHUNK_SIZE = 10_000
 
 
 class StateCount(BaseModel):
@@ -77,6 +77,10 @@ def run_state_counts(
     engine: Engine,
     schema: StagingSchema | None = None,
 ) -> tuple[StateCount, ...]:
+    """Return state counts for one run.
+
+    Use bulk_run_state_counts for more than one key.
+    """
     return _state_counts(
         engine=engine,
         campaign_key=None,

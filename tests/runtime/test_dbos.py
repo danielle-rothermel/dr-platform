@@ -257,6 +257,10 @@ def test_initialize_dbos_runtime_forwards_bootstrap_config() -> None:
         "postgresql+psycopg://system-user@db.example:5432/platform"
     )
     assert runtime_config["enable_otlp"] is False
+    assert runtime_config["db_engine_kwargs"] == {
+        "pool_size": dbos_config.DEFAULT_POOL_SIZE,
+        "max_overflow": 0,
+    }
     assert runtime_config["otlp_traces_endpoints"] == [
         "https://collector-a.example/v1/traces",
         "https://collector-b.example/v1/traces",
@@ -349,6 +353,15 @@ def test_dbos_runtime_initialization_failure_is_not_treated_as_telemetry() -> (
             runtime_initializer=initialize_runtime,
             telemetry_initializer=lambda _config: None,
         )
+
+
+def test_build_dbos_config_passes_pool_size_through_db_engine_kwargs() -> None:
+    config = dbos_config.build_platform_dbos_config(
+        database_url="postgresql://app-user@db.example/platform",
+        pool_size=512,
+    )
+    dbos = dbos_config.build_dbos_config(config, app_name="stage-worker")
+    assert dbos["db_engine_kwargs"] == {"pool_size": 512, "max_overflow": 0}
 
 
 def test_resolve_database_url_leaves_non_postgresql_urls_unchanged() -> None:

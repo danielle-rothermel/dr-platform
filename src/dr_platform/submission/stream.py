@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
     from dr_platform.pipeline.registry import PipelineRegistry
 
-DEFAULT_CHUNK_SIZE = 500
+DEFAULT_CHUNK_SIZE = 10_000
 MEMBERSHIP_DIGEST_SCHEMA = "dr-platform/run-membership/v1"
 
 

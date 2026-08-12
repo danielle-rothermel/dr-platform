@@ -5,6 +5,34 @@ All notable changes to `dr-platform` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Hard-cut dev-mode defaults: 1 s dispatcher schedules, comically high
+  batch/chunk/inspection ceilings, and `pool_size` on `PlatformDbosConfig`
+  with checkpoint-pool validation against admission and barrier batch sizes.
+- Renamed `AdmissionPayload.run_key` to `origin_run_key` on the DBOS enqueue
+  wire format; removed `MAX_INSPECTION_LIMIT`.
+- README sizing guidance now points at whetstone's sizing table and documents
+  the per-stage-boundary latency model.
+
+### Removed
+
+- Qualification harnesses under `qualification/` and recorded rate artifacts
+  under `docs/qualification/` and `docs/plans/async-stages-and-run-fan-in/`.
+
+### Design notes (from retired async-stages plan)
+
+- Synchronous stage and run-completion checkpoints run through a
+  dispatcher-owned dedicated executor, not the asyncio default pool.
+- Checkpoint transactions use `READ COMMITTED` isolation.
+- Run-barrier reconciliation uses a bounded fair cursor so blocked prefixes
+  do not starve later runs.
+- Loop-affine async application resources remain application-owned; the
+  platform enqueues compact validated payloads without calling application
+  code inside dispatcher transactions.
+
 ## 0.2.0 - 2026-08-09
 
 ### Added

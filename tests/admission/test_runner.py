@@ -546,7 +546,7 @@ def test_admission_enqueues_only_the_serialized_platform_payload(
     assert payload == AdmissionPayload(
         campaign_key=CampaignKey("campaign-1"),
         work_key=WorkKey("work-0"),
-        run_key=RunKey("run-1"),
+        origin_run_key=RunKey("run-1"),
         input_reference="input:0",
         labels={"cohort": "blue"},
         pipeline_key="evaluation",
@@ -554,6 +554,19 @@ def test_admission_enqueues_only_the_serialized_platform_payload(
         stage_key=StageKey("execute"),
         attempt_number=1,
     )
+    wire = payload.model_dump(mode="json")
+    assert set(wire) == {
+        "campaign_key",
+        "work_key",
+        "origin_run_key",
+        "input_reference",
+        "labels",
+        "pipeline_key",
+        "pipeline_version",
+        "stage_key",
+        "attempt_number",
+    }
+    assert "run_key" not in wire
     assert client.enqueued[0][0]["queue_name"] == "execute-queue"
 
 
@@ -946,7 +959,7 @@ def _candidate(
         stage_index=0,
         campaign_key="campaign-1",
         work_key="work-0",
-        run_key="run-1",
+        origin_run_key="run-1",
         input_reference="input:0",
         labels=labels,
         pipeline_key=stage_identity[0],

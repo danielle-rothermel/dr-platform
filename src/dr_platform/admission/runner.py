@@ -56,8 +56,9 @@ if TYPE_CHECKING:
     from dr_platform.pipeline.definitions import StageDefinition
     from dr_platform.pipeline.registry import PipelineRegistry
 
-DEFAULT_ADMISSION_BATCH_SIZE = 100
-MAX_CAPACITY_SKIPS_PER_PASS = 10_000
+DEFAULT_ADMISSION_BATCH_SIZE = 10_000
+# Watchdog against an unbounded capacity-skip scan within one admission pass.
+MAX_CAPACITY_SKIPS_PER_PASS = 1_000_000
 
 _StageIdentity = tuple[str, int, str]
 
@@ -86,7 +87,7 @@ class AdmissionPayload(BaseModel):
 
     campaign_key: CampaignKey
     work_key: WorkKey
-    run_key: RunKey
+    origin_run_key: RunKey
     input_reference: str
     labels: Mapping[str, str]
     pipeline_key: str
@@ -112,13 +113,13 @@ class AdmissionPayload(BaseModel):
             raise TypeError("work key must be a string")
         return WorkKey(value)
 
-    @field_validator("run_key", mode="before")
+    @field_validator("origin_run_key", mode="before")
     @classmethod
-    def _run_key(cls, value: object) -> RunKey:
+    def _origin_run_key(cls, value: object) -> RunKey:
         if isinstance(value, RunKey):
             return value
         if not isinstance(value, str):
-            raise TypeError("run key must be a string")
+            raise TypeError("origin run key must be a string")
         return RunKey(value)
 
     @field_validator("stage_key", mode="before")
@@ -135,7 +136,12 @@ class AdmissionPayload(BaseModel):
     def _labels(cls, value: Mapping[str, str]) -> Mapping[str, str]:
         return MappingProxyType(dict(value))
 
-    @field_serializer("campaign_key", "work_key", "run_key", "stage_key")
+    @field_serializer(
+        "campaign_key",
+        "work_key",
+        "origin_run_key",
+        "stage_key",
+    )
     def _serialize_key(self, value: object) -> str:
         return str(value)
 
@@ -213,7 +219,7 @@ class _Candidate:
     stage_index: int
     campaign_key: str
     work_key: str
-    run_key: str
+    origin_run_key: str
     input_reference: str
     labels: Mapping[str, str]
     pipeline_key: str
@@ -579,7 +585,7 @@ def _admit_candidate(  # noqa: PLR0913 -- explicit admission facts
     payload = AdmissionPayload(
         campaign_key=CampaignKey(candidate.campaign_key),
         work_key=WorkKey(candidate.work_key),
-        run_key=RunKey(candidate.run_key),
+        origin_run_key=RunKey(candidate.origin_run_key),
         input_reference=candidate.input_reference,
         labels=candidate.labels,
         pipeline_key=candidate.pipeline_key,
@@ -670,7 +676,7 @@ def _lock_candidates(  # noqa: PLR0913 -- explicit paging predicates
             executions.c.stage_index,
             work_items.c.campaign_key,
             work_items.c.work_key,
-            work_items.c.origin_run_key.label("run_key"),
+            work_items.c.origin_run_key.label("origin_run_key"),
             work_items.c.input_reference,
             work_items.c.labels,
             runs.c.pipeline_key,
@@ -871,7 +877,7 @@ def _decode_candidate(row: RowMapping) -> _Candidate:
         stage_index=row["stage_index"],
         campaign_key=row["campaign_key"],
         work_key=row["work_key"],
-        run_key=row["run_key"],
+        origin_run_key=row["origin_run_key"],
         input_reference=row["input_reference"],
         labels=MappingProxyType(dict(row["labels"])),
         pipeline_key=row["pipeline_key"],

@@ -24,6 +24,7 @@ from dr_platform.admission.controls import (
     set_stage_capacity,
 )
 from dr_platform.admission.runner import run_admission_pass
+from dr_platform.inspection._validation import validate_limit
 from dr_platform.inspection.campaigns import (
     inspect_campaign,
     list_campaigns,
@@ -560,15 +561,26 @@ def test_inspection_list_readers_reject_a_non_positive_limit(
         _call_list_reader(reader, pg_engine, limit=limit)
 
 
+def test_validate_limit_accepts_large_explicit_values() -> None:
+    validate_limit(10_001)
+
+
 @pytest.mark.parametrize("reader", ["campaigns", "runs", "work-items"])
-def test_inspection_list_readers_reject_a_limit_above_the_maximum(
+def test_inspection_list_readers_accept_a_large_explicit_limit(
     pg_engine: Engine,
     reader: str,
 ) -> None:
     _migrate(pg_engine)
+    if reader != "campaigns":
+        _submit(
+            pg_engine,
+            _registry(),
+            campaign_key="campaign-a",
+            run_key="run-a",
+            work_keys=("work-0",),
+        )
 
-    with pytest.raises(ValueError, match="inspection limit must not exceed"):
-        _call_list_reader(reader, pg_engine, limit=1_001)
+    _call_list_reader(reader, pg_engine, limit=10_001)
 
 
 def test_list_work_items_rejects_a_malformed_state(
