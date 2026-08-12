@@ -5,7 +5,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 
 from dr_platform._core.ledger.completion_attempts import (
     get_run_completion_attempt,
@@ -28,7 +28,12 @@ from tests.completion.test_run_barrier import (
     _set_states,
     _submit_run,
 )
-from tests.conftest import NOW, _as_dbos_client, _migrate
+from tests.conftest import (
+    NOW,
+    _as_dbos_client,
+    _migrate,
+    default_live_dbos_identity,
+)
 
 if TYPE_CHECKING:
     from dr_platform.pipeline.registry import PipelineRegistry
@@ -39,6 +44,8 @@ class _WorkflowStatus:
     workflow_id: str
     status: str
     error: Exception | None = None
+    app_version: str | None = "test"
+    executor_id: str | None = "local"
 
 
 class _StatusClient:
@@ -272,6 +279,7 @@ def test_sweep_projects_exhausted_run_completion_for_operator_retry(
     sweep = sweep_abandoned_run_completions(
         pg_engine,
         client=_as_dbos_client(status_client),
+        live_identity=default_live_dbos_identity(app_version="test"),
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.inspected_count == 1
@@ -303,3 +311,67 @@ def test_sweep_projects_exhausted_run_completion_for_operator_retry(
     assert first.terminal_summary["outcome"] == (
         RunCompletionExecutionState.FAILED.value
     )
+
+
+def test_sweep_projects_pending_completion_with_dead_executor(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(
+        pg_engine,
+        key="sweep-dead-completion",
+    )
+    del registry
+    sweep = sweep_abandoned_run_completions(
+        pg_engine,
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        executor_id="other-executor",
+                    ),
+                )
+            )
+        ),
+        live_identity=default_live_dbos_identity(app_version="test"),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert sweep.projected_count == 1
+    assert sweep.projections[0].state is RunCompletionExecutionState.FAILED
+    assert sweep.projections[0].dbos_status == "PENDING"
+
+
+def test_sweep_skips_pending_completion_with_live_identity(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(
+        pg_engine,
+        key="sweep-live-completion",
+    )
+    del registry
+    sweep = sweep_abandoned_run_completions(
+        pg_engine,
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version="test",
+                        executor_id="local",
+                    ),
+                )
+            )
+        ),
+        live_identity=default_live_dbos_identity(app_version="test"),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert sweep.projected_count == 0
+    with pg_engine.connect() as connection:
+        state = connection.execute(
+            select(schema.run_completion_executions.c.state)
+        ).scalar_one()
+    assert state == RunCompletionExecutionState.ENQUEUED.value

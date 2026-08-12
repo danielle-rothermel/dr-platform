@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passes.
 - `retry_run_completion` with `run_completion_attempts` attempt history and
   per-attempt workflow identity.
-- `sweep_abandoned_run_completions` to project recovery-exhausted and errored
-  run-completion workflows onto platform failure for operator retry.
+- `sweep_abandoned_run_completions` to project recovery-exhausted, errored, and
+  identity-orphaned pending run-completion workflows onto platform failure for
+  operator retry.
 
 ### Changed
 

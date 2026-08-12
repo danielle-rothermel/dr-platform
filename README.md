@@ -363,7 +363,7 @@ cancel_work(work identity, canceller) -> WorkCancellationResult
 retry_stage(stage_execution_id) -> StageRetryResult
 retry_run_completion(run_key, DBOS client, registry) -> RunCompletionRetryResult
 sweep_abandoned_stages(DBOS client, live_identity) -> SweepSummary
-sweep_abandoned_run_completions(DBOS client) -> RunCompletionSweepSummary
+sweep_abandoned_run_completions(DBOS client, live_identity) -> RunCompletionSweepSummary
 ```
 
 ### Inspection

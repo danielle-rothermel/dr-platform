@@ -352,6 +352,7 @@ def register_scheduled_dispatcher(  # noqa: PLR0913, PLR0915
                 completion_summary = sweep_abandoned_run_completions(
                     engine,
                     client=client,
+                    live_identity=live_dbos_identity,
                     batch_size=sweep_batch_size,
                 )
                 logger.info(

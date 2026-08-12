@@ -350,6 +350,31 @@ def _dbos_failure_error_summary(status: object) -> dict[str, object] | None:
     }
 
 
+def _run_completion_abandonment_error_summary(
+    status: object,
+    *,
+    live_identity: LiveDbosIdentity,
+) -> dict[str, object] | None:
+    dbos_status = getattr(status, "status", None)
+    if dbos_status in _FAILED_DBOS_STATUSES:
+        return _dbos_failure_error_summary(status)
+    if dbos_status == DbosWorkflowStatus.PENDING.value:
+        evidence = _pending_abandonment_evidence(
+            app_version=getattr(status, "app_version", None),
+            executor_id=getattr(status, "executor_id", None),
+            live_identity=live_identity,
+        )
+        if evidence is None:
+            return None
+        return {
+            "error_type": "dbos.abandonment",
+            "message": evidence.value,
+            "dbos_status": dbos_status,
+            "reason": evidence.value,
+        }
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class _EnqueuedCompletionAttempt:
     workflow_id: str
@@ -358,18 +383,20 @@ class _EnqueuedCompletionAttempt:
     run_key: RunKey
 
 
-def sweep_abandoned_run_completions(
+def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection boundary
     engine: Engine,
     *,
     client: DBOSClient,
+    live_identity: LiveDbosIdentity,
     batch_size: int = DEFAULT_SWEEP_BATCH_SIZE,
     clock: Callable[[], datetime] = _utc_now,
     schema: StagingSchema | None = None,
 ) -> RunCompletionSweepSummary:
     """Project terminal DBOS abandonment for enqueued run completions.
 
-    Only errored or recovery-exhausted DBOS statuses are projected. Live
-    pending rows are left for startup recovery and the configured recovery cap.
+    Errored, recovery-exhausted, and identity-orphaned pending DBOS statuses
+    are projected. Live-identity pending rows are left for startup recovery
+    and the configured recovery cap.
     """
     validate_positive_integer(batch_size, label="sweep batch size")
     selected_schema = schema or StagingSchema()
@@ -399,7 +426,10 @@ def sweep_abandoned_run_completions(
             status = statuses_by_id.get(attempt.workflow_id)
             if status is None:
                 continue
-            error_summary = _dbos_failure_error_summary(status)
+            error_summary = _run_completion_abandonment_error_summary(
+                status,
+                live_identity=live_identity,
+            )
             if error_summary is None:
                 continue
             terminal_at = clock()

@@ -845,4 +845,5 @@ def test_sweep_cron_registers_a_second_scheduled_workflow(
     assert completion_args[0] is engine
     assert completion_args[1]["client"] is client
     assert completion_args[1]["batch_size"] == 25
+    assert "live_identity" in completion_args[1]
     assert client.destroyed
