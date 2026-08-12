@@ -46,6 +46,10 @@ dev = [
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src"]
+core-metadata-version = "2.4"
+
+[tool.hatch.build.targets.wheel]
+core-metadata-version = "2.4"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
