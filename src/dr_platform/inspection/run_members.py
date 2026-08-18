@@ -14,13 +14,13 @@ from dr_platform._core.identities import (
 )
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.work_item_status import work_item_status_rows
 from dr_platform.inspection._validation import (
     DEFAULT_INSPECTION_LIMIT,
     require_run,
     validate_limit,
     validate_run_member_cursor,
 )
-from dr_platform.inspection.statuses import current_stage_indexes
 from dr_platform.inspection.terminal_filters import (
     TerminalSummaryFilter,
     apply_terminal_summary_filter,
@@ -66,7 +66,7 @@ def list_run_members(  # noqa: PLR0913 -- explicit reader filters
     scoped_item_ids = select(memberships.c.work_item_id).where(
         memberships.c.run_key == normalized_run.value
     )
-    current = current_stage_indexes(selected_schema, scoped_item_ids)
+    status = work_item_status_rows(selected_schema, scoped_item_ids)
     if terminal_filter is None:
         statement = (
             select(
@@ -74,25 +74,17 @@ def list_run_members(  # noqa: PLR0913 -- explicit reader filters
                 items.c.work_key,
                 items.c.work_item_id,
                 items.c.input_reference,
-                executions.c.stage_key,
-                executions.c.stage_index,
-                executions.c.state,
+                status.c.stage_key,
+                status.c.stage_index,
+                status.c.state,
             )
             .select_from(
                 memberships.join(
                     items,
                     memberships.c.work_item_id == items.c.work_item_id,
-                )
-                .outerjoin(
-                    current,
-                    current.c.work_item_id == items.c.work_item_id,
-                )
-                .outerjoin(
-                    executions,
-                    and_(
-                        executions.c.work_item_id == current.c.work_item_id,
-                        executions.c.stage_index == current.c.stage_index,
-                    ),
+                ).outerjoin(
+                    status,
+                    status.c.work_item_id == items.c.work_item_id,
                 )
             )
             .where(memberships.c.run_key == normalized_run.value)
@@ -106,10 +98,10 @@ def list_run_members(  # noqa: PLR0913 -- explicit reader filters
                 items.c.work_key,
                 items.c.work_item_id,
                 items.c.input_reference,
-                executions.c.stage_key,
-                executions.c.stage_index,
-                executions.c.state,
-                executions.c.stage_execution_id,
+                status.c.stage_key,
+                status.c.stage_index,
+                status.c.state,
+                status.c.stage_execution_id,
                 attempts.c.terminal_summary,
                 attempts.c.evidence_reference,
             )
@@ -119,15 +111,13 @@ def list_run_members(  # noqa: PLR0913 -- explicit reader filters
                     memberships.c.work_item_id == items.c.work_item_id,
                 )
                 .join(
-                    current,
-                    current.c.work_item_id == items.c.work_item_id,
+                    status,
+                    status.c.work_item_id == items.c.work_item_id,
                 )
                 .join(
                     executions,
-                    and_(
-                        executions.c.work_item_id == current.c.work_item_id,
-                        executions.c.stage_index == current.c.stage_index,
-                    ),
+                    executions.c.stage_execution_id
+                    == status.c.stage_execution_id,
                 )
                 .outerjoin(
                     attempts,

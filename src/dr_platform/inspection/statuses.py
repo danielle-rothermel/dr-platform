@@ -16,6 +16,10 @@ from dr_platform._core.identities import (
 )
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState, StateCount
+from dr_platform._core.ledger.work_item_status import (
+    work_item_status_rows,
+    work_item_status_rows_by_run,
+)
 from dr_platform._core.validation import validate_positive_integer
 from dr_platform.inspection._validation import (
     require_campaign,
@@ -252,26 +256,19 @@ def bulk_work_terminal_statuses(  # noqa: PLR0913 -- explicit reader filters
 def _current_state_counts_statement(
     schema: LedgerSchema, scoped_item_ids: Select
 ) -> Select:
-    """Count current-stage executions over one scoped set of work items."""
+    """Count derived item states over one scoped set of work items."""
     items = schema.work_items
-    executions = schema.stage_executions
-    current = current_stage_indexes(schema, scoped_item_ids)
+    status = work_item_status_rows(schema, scoped_item_ids)
     return (
-        select(executions.c.state, func.count().label("count"))
+        select(status.c.state, func.count().label("count"))
         .select_from(
             items.join(
-                current,
-                current.c.work_item_id == items.c.work_item_id,
-            ).join(
-                executions,
-                and_(
-                    executions.c.work_item_id == current.c.work_item_id,
-                    executions.c.stage_index == current.c.stage_index,
-                ),
+                status,
+                status.c.work_item_id == items.c.work_item_id,
             )
         )
-        .group_by(executions.c.state)
-        .order_by(executions.c.state)
+        .group_by(status.c.state)
+        .order_by(status.c.state)
     )
 
 
@@ -343,30 +340,23 @@ def _bulk_status_statement(
     schema: LedgerSchema,
 ):
     items = schema.work_items
-    executions = schema.stage_executions
     requested_item_ids = select(items.c.work_item_id).where(
         items.c.campaign_key == campaign_key.value,
         items.c.work_key.in_([key.value for key in work_keys]),
     )
-    current = current_stage_indexes(schema, requested_item_ids)
+    status = work_item_status_rows(schema, requested_item_ids)
     return (
         select(
             items.c.work_key,
             items.c.work_item_id,
-            executions.c.stage_key,
-            executions.c.stage_index,
-            executions.c.state,
+            status.c.stage_key,
+            status.c.stage_index,
+            status.c.state,
         )
         .select_from(
             items.join(
-                current,
-                current.c.work_item_id == items.c.work_item_id,
-            ).join(
-                executions,
-                and_(
-                    executions.c.work_item_id == current.c.work_item_id,
-                    executions.c.stage_index == current.c.stage_index,
-                ),
+                status,
+                status.c.work_item_id == items.c.work_item_id,
             )
         )
         .where(
@@ -392,29 +382,27 @@ def _bulk_terminal_status_statement(
             items.c.campaign_key == campaign_key.value,
             items.c.work_key.in_([key.value for key in work_keys]),
         )
-        current = current_stage_indexes(schema, requested_item_ids)
+        status = work_item_status_rows(schema, requested_item_ids)
         return (
             select(
                 items.c.work_key,
                 items.c.work_item_id,
-                executions.c.stage_execution_id,
-                executions.c.stage_key,
-                executions.c.stage_index,
-                executions.c.state,
+                status.c.stage_execution_id,
+                status.c.stage_key,
+                status.c.stage_index,
+                status.c.state,
                 attempts.c.terminal_summary,
                 attempts.c.evidence_reference,
             )
             .select_from(
                 items.join(
-                    current,
-                    current.c.work_item_id == items.c.work_item_id,
+                    status,
+                    status.c.work_item_id == items.c.work_item_id,
                 )
                 .join(
                     executions,
-                    and_(
-                        executions.c.work_item_id == current.c.work_item_id,
-                        executions.c.stage_index == current.c.stage_index,
-                    ),
+                    executions.c.stage_execution_id
+                    == status.c.stage_execution_id,
                 )
                 .outerjoin(
                     attempts,
@@ -442,15 +430,15 @@ def _bulk_terminal_status_statement(
         items.c.campaign_key == campaign_key.value,
         items.c.work_key.in_([key.value for key in work_keys]),
     )
-    current = current_stage_indexes(schema, requested_item_ids)
+    status = work_item_status_rows(schema, requested_item_ids)
     return (
         select(
             requested.c.work_key,
             items.c.work_item_id,
-            executions.c.stage_execution_id,
-            executions.c.stage_key,
-            executions.c.stage_index,
-            executions.c.state,
+            status.c.stage_execution_id,
+            status.c.stage_key,
+            status.c.stage_index,
+            status.c.state,
             attempts.c.terminal_summary,
             attempts.c.evidence_reference,
         )
@@ -463,15 +451,12 @@ def _bulk_terminal_status_statement(
                 ),
             )
             .outerjoin(
-                current,
-                current.c.work_item_id == items.c.work_item_id,
+                status,
+                status.c.work_item_id == items.c.work_item_id,
             )
             .outerjoin(
                 executions,
-                and_(
-                    executions.c.work_item_id == current.c.work_item_id,
-                    executions.c.stage_index == current.c.stage_index,
-                ),
+                executions.c.stage_execution_id == status.c.stage_execution_id,
             )
             .outerjoin(
                 attempts,
@@ -540,76 +525,21 @@ def _bulk_run_counts_statement(
         .cte("requested_runs")
     )
     runs = schema.pipeline_runs
-    executions = schema.stage_executions
-    current = current_stage_indexes_by_run(
+    status = work_item_status_rows_by_run(
         schema, tuple(key.value for key in run_keys)
-    )
-    current_states = current.join(
-        executions,
-        and_(
-            current.c.work_item_id == executions.c.work_item_id,
-            current.c.stage_index == executions.c.stage_index,
-        ),
     )
     return (
         select(
             requested.c.run_key.label("requested_run_key"),
             runs.c.run_key.is_not(None).label("present"),
-            executions.c.state,
-            func.count(executions.c.stage_execution_id).label("count"),
+            status.c.state,
+            func.count(status.c.stage_execution_id).label("count"),
         )
         .select_from(
             requested.outerjoin(
                 runs, requested.c.run_key == runs.c.run_key
-            ).outerjoin(current_states, runs.c.run_key == current.c.run_key)
+            ).outerjoin(status, runs.c.run_key == status.c.run_key)
         )
-        .group_by(requested.c.run_key, runs.c.run_key, executions.c.state)
-        .order_by(requested.c.run_key, executions.c.state)
-    )
-
-
-def current_stage_indexes(schema: LedgerSchema, work_item_ids: Select):
-    executions = schema.stage_executions
-    scoped_ids = work_item_ids.subquery()
-    return (
-        select(
-            executions.c.work_item_id,
-            func.max(executions.c.stage_index).label("stage_index"),
-        )
-        .select_from(
-            executions.join(
-                scoped_ids,
-                scoped_ids.c.work_item_id == executions.c.work_item_id,
-            )
-        )
-        .group_by(executions.c.work_item_id)
-        .subquery()
-    )
-
-
-def current_stage_indexes_by_run(
-    schema: LedgerSchema, run_keys: tuple[str, ...]
-):
-    """Highest stage index per (run, work item) across the named runs."""
-    memberships = schema.run_memberships
-    executions = schema.stage_executions
-    scoped = (
-        select(memberships.c.run_key, memberships.c.work_item_id)
-        .where(memberships.c.run_key.in_(run_keys))
-        .subquery()
-    )
-    return (
-        select(
-            scoped.c.run_key,
-            scoped.c.work_item_id,
-            func.max(executions.c.stage_index).label("stage_index"),
-        )
-        .select_from(
-            scoped.join(
-                executions,
-                scoped.c.work_item_id == executions.c.work_item_id,
-            )
-        )
-        .group_by(scoped.c.run_key, scoped.c.work_item_id)
-        .subquery()
+        .group_by(requested.c.run_key, runs.c.run_key, status.c.state)
+        .order_by(requested.c.run_key, status.c.state)
     )

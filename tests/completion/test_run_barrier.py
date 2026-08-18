@@ -14,6 +14,10 @@ from dr_platform._core.identities import (
     RunKey,
     StageKey,
 )
+from dr_platform._core.ledger.executions import (
+    insert_stage_execution,
+    transition_stage_execution,
+)
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import (
     RunCompletionExecutionState,
@@ -715,6 +719,103 @@ def test_post_release_member_change_does_not_repeat_completion(
         "state": "failed",
         "count": 1,
     }
+
+
+def test_fan_out_failed_branch_release_counts_as_failed(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry("barrier-fanout-counts")
+    _submit_run(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-fanout",
+        members=_members(0),
+    )
+    with pg_engine.begin() as connection:
+        work_item_id = connection.execute(
+            select(schema.work_items.c.work_item_id).where(
+                schema.work_items.c.work_key == "work-0"
+            )
+        ).scalar_one()
+        root = connection.execute(
+            select(schema.stage_executions.c.stage_execution_id).where(
+                schema.stage_executions.c.work_item_id == work_item_id,
+                schema.stage_executions.c.stage_index == 0,
+            )
+        ).scalar_one()
+        transition_stage_execution(
+            connection,
+            stage_execution_id=root,
+            new_state=StageExecutionState.ADMITTED,
+            updated_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=root,
+            new_state=StageExecutionState.SUCCEEDED,
+            output_reference="output:root",
+            updated_at=NOW,
+        )
+        branch_failed = insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=1,
+            input_reference="branch:failed",
+            created_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=branch_failed.stage_execution_id,
+            new_state=StageExecutionState.ADMITTED,
+            updated_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=branch_failed.stage_execution_id,
+            new_state=StageExecutionState.FAILED,
+            updated_at=NOW,
+        )
+        branch_ok = insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=2,
+            input_reference="branch:ok",
+            created_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=branch_ok.stage_execution_id,
+            new_state=StageExecutionState.ADMITTED,
+            updated_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=branch_ok.stage_execution_id,
+            new_state=StageExecutionState.SUCCEEDED,
+            output_reference="output:ok",
+            updated_at=NOW,
+        )
+
+    client = _RecordingClient()
+    run_barrier_pass(
+        pg_engine,
+        client=cast("DBOSClient", client),
+        registry=registry,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+    with pg_engine.connect() as connection:
+        release = connection.execute(
+            select(schema.pipeline_runs.c.release_terminal_state_counts)
+        ).scalar_one()
+    assert release == [
+        {"state": "succeeded", "count": 0},
+        {"state": "failed", "count": 1},
+        {"state": "cancelled", "count": 0},
+    ]
 
 
 def test_empty_completion_run_is_immediately_eligible(

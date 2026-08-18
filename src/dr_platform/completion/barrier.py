@@ -22,12 +22,14 @@ from dr_platform._core.ledger.states import (
     StageExecutionState,
     StateCount,
 )
+from dr_platform._core.ledger.work_item_status import (
+    work_item_status_rows_by_run,
+)
 from dr_platform._core.validation import validate_positive_integer
 from dr_platform.completion.execution import (
     RunCompletionPayload,
     is_run_completion_wrapped,
 )
-from dr_platform.inspection.statuses import current_stage_indexes_by_run
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -366,6 +368,7 @@ def _terminal_counts(
     schema: LedgerSchema,
     run_keys: tuple[str, ...],
 ) -> dict[str, tuple[StateCount, ...]]:
+    """Per-member terminal outcomes under work-item status precedence."""
     empty = {
         run_key: tuple(
             StateCount(state=state, count=0) for state in _TERMINAL_STATES
@@ -374,22 +377,15 @@ def _terminal_counts(
     }
     if not run_keys:
         return empty
-    executions = schema.stage_executions
-    current = current_stage_indexes_by_run(schema, run_keys)
+    status = work_item_status_rows_by_run(schema, run_keys)
     rows = connection.execute(
         select(
-            current.c.run_key,
-            executions.c.state,
+            status.c.run_key,
+            status.c.state,
             func.count().label("count"),
         )
-        .select_from(
-            current.join(
-                executions,
-                (current.c.work_item_id == executions.c.work_item_id)
-                & (current.c.stage_index == executions.c.stage_index),
-            )
-        )
-        .group_by(current.c.run_key, executions.c.state)
+        .select_from(status)
+        .group_by(status.c.run_key, status.c.state)
     ).mappings()
     grouped: dict[str, dict[StageExecutionState, int]] = {
         run_key: {} for run_key in run_keys

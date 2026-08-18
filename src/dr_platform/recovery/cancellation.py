@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
-from sqlalchemy import func, select
+from sqlalchemy import literal, select
 
 from dr_platform._core.clock import utc_now
 from dr_platform._core.identities import (
@@ -27,6 +27,7 @@ from dr_platform._core.ledger.terminal_summary import (
     TerminalSummaryProducer,
     build_terminal_summary,
 )
+from dr_platform._core.ledger.work_item_status import work_item_status_rows
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,16 +54,32 @@ class CancellationDisposition(StrEnum):
     ALREADY_TERMINAL = "already_terminal"
 
 
-# Watchdog against relock livelock while resolving the current stage.
+_NONTERMINAL_STATES = frozenset(
+    {
+        StageExecutionState.READY,
+        StageExecutionState.ADMITTED,
+        StageExecutionState.FAILED,
+    }
+)
+
+# Watchdog against relock livelock while resolving nonterminal executions.
 _MAX_CURRENT_STAGE_RESELECTS = 4_096
+
+
+@dataclass(frozen=True, slots=True)
+class CancelledStageExecution:
+    stage_execution: StageExecutionRecord
+    disposition: CancellationDisposition
+    delegated_workflow_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class WorkCancellationResult:
     work_item_id: int
-    stage_execution: StageExecutionRecord
+    cancellations: tuple[CancelledStageExecution, ...]
     disposition: CancellationDisposition
     delegated_workflow_id: str | None
+    stage_execution: StageExecutionRecord
 
 
 def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
@@ -75,13 +92,13 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
     clock: Callable[[], datetime] = utc_now,
     schema: LedgerSchema | None = None,
 ) -> WorkCancellationResult:
-    """Commit platform cancellation before delegating to DBOS.
+    """Cancel every nonterminal execution for one work item.
 
-    READY and FAILED stages do not delegate. A repeated CANCELLED call reissues
-    cancellation for an admitted, unsuperseded attempt to repair a lost
-    post-commit delegation; other terminal work is a no-op.
+    Item-level cancellation commits logical intent for all READY, ADMITTED, and
+    FAILED executions before delegating to DBOS for each admitted attempt.
     """
     selected_schema = schema or LedgerSchema()
+    delegated: list[str] = []
     with engine.begin() as connection:
         resolved_work_item_id = _resolve_work_item_id(
             connection,
@@ -90,41 +107,79 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
             work_key=work_key,
             schema=selected_schema,
         )
-        current = _lock_current_stage(
+        locked = _lock_nonterminal_executions(
             connection,
             work_item_id=resolved_work_item_id,
             schema=selected_schema,
         )
-        if current.state in {
-            StageExecutionState.READY,
-            StageExecutionState.ADMITTED,
-            StageExecutionState.FAILED,
-        }:
+        if locked:
             cancelled_at = clock()
-            result = _cancel_current_stage(
+            cancellations = _cancel_locked_executions(
                 connection,
-                current=current,
+                executions=locked,
                 cancelled_at=cancelled_at,
                 schema=selected_schema,
             )
-        else:
+            delegated.extend(
+                item.delegated_workflow_id
+                for item in cancellations
+                if item.delegated_workflow_id is not None
+            )
+            representative = cancellations[0].stage_execution
+            disposition = _aggregate_disposition(cancellations)
             result = WorkCancellationResult(
                 work_item_id=resolved_work_item_id,
-                stage_execution=current,
-                disposition=CancellationDisposition.ALREADY_TERMINAL,
-                delegated_workflow_id=_redelegable_workflow_id(
-                    connection,
-                    current=current,
-                    schema=selected_schema,
+                cancellations=cancellations,
+                disposition=disposition,
+                delegated_workflow_id=(
+                    cancellations[0].delegated_workflow_id
+                    if len(cancellations) == 1
+                    else None
                 ),
+                stage_execution=representative,
             )
+        else:
+            representative = _terminal_representative(
+                connection,
+                work_item_id=resolved_work_item_id,
+                schema=selected_schema,
+            )
+            repair_workflow_id = _redelegable_workflow_id(
+                connection,
+                current=representative,
+                schema=selected_schema,
+            )
+            result = WorkCancellationResult(
+                work_item_id=resolved_work_item_id,
+                cancellations=(),
+                disposition=CancellationDisposition.ALREADY_TERMINAL,
+                delegated_workflow_id=repair_workflow_id,
+                stage_execution=representative,
+            )
+            if repair_workflow_id is not None:
+                delegated.append(repair_workflow_id)
 
-    if result.delegated_workflow_id is not None:
-        client.cancel_workflow(
-            result.delegated_workflow_id,
-            cancel_children=False,
-        )
+    for workflow_id in delegated:
+        client.cancel_workflow(workflow_id, cancel_children=False)
     return result
+
+
+def _aggregate_disposition(
+    cancellations: tuple[CancelledStageExecution, ...],
+) -> CancellationDisposition:
+    if len(cancellations) == 1:
+        return cancellations[0].disposition
+    if any(
+        item.disposition is CancellationDisposition.CANCELLED_ADMITTED
+        for item in cancellations
+    ):
+        return CancellationDisposition.CANCELLED_ADMITTED
+    if any(
+        item.disposition is CancellationDisposition.CANCELLED_FAILED
+        for item in cancellations
+    ):
+        return CancellationDisposition.CANCELLED_FAILED
+    return CancellationDisposition.CANCELLED_READY
 
 
 def _resolve_work_item_id(
@@ -168,57 +223,97 @@ def _resolve_work_item_id(
     return resolved
 
 
-def _lock_current_stage(
+def _lock_nonterminal_executions(
     connection: Connection,
     *,
     work_item_id: int,
     schema: LedgerSchema,
-) -> StageExecutionRecord:
-    # READ COMMITTED may miss a successor inserted while this lock blocks;
-    # reselect until the locked row is still current. The
-    # _MAX_CURRENT_STAGE_RESELECTS cap can fail if the current stage keeps
-    # advancing.
+) -> tuple[StageExecutionRecord, ...]:
+    # A completion transaction needs FOR UPDATE on its ADMITTED row before it
+    # can insert successors; locking every ADMITTED row blocks new successors.
+    # Re-check closes the select/lock window under READ COMMITTED.
     table = schema.stage_executions
+    nonterminal_values = tuple(state.value for state in _NONTERMINAL_STATES)
     for _ in range(_MAX_CURRENT_STAGE_RESELECTS):
-        stage_execution_id = connection.execute(
+        locked_ids = (
+            connection.execute(
+                select(table.c.stage_execution_id)
+                .where(
+                    table.c.work_item_id == work_item_id,
+                    table.c.state.in_(nonterminal_values),
+                )
+                .order_by(table.c.stage_execution_id)
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+        if not locked_ids:
+            still_nonterminal = connection.execute(
+                select(
+                    select(1)
+                    .select_from(table)
+                    .where(
+                        table.c.work_item_id == work_item_id,
+                        table.c.state.in_(nonterminal_values),
+                    )
+                    .exists()
+                )
+            ).scalar_one()
+            if not still_nonterminal:
+                return ()
+            continue
+        missed = connection.execute(
             select(table.c.stage_execution_id)
-            .where(table.c.work_item_id == work_item_id)
-            .order_by(
-                table.c.stage_index.desc(),
-                table.c.stage_execution_id.desc(),
+            .where(
+                table.c.work_item_id == work_item_id,
+                table.c.state.in_(nonterminal_values),
+                table.c.stage_execution_id.not_in(locked_ids),
             )
             .limit(1)
-            .with_for_update()
         ).scalar_one_or_none()
-        if stage_execution_id is None:
-            raise LookupError(
-                f"work item has no stage execution: {work_item_id}"
-            )
-        current = get_stage_execution(
-            connection,
-            stage_execution_id=stage_execution_id,
-            schema=schema,
-        )
-        assert current is not None
-        latest_index = connection.execute(
-            select(func.max(table.c.stage_index)).where(
-                table.c.work_item_id == work_item_id
-            )
-        ).scalar_one()
-        if latest_index == current.stage_index:
-            return current
+        if missed is None:
+            locked = []
+            for stage_execution_id in locked_ids:
+                current = get_stage_execution(
+                    connection,
+                    stage_execution_id=stage_execution_id,
+                    schema=schema,
+                )
+                assert current is not None
+                locked.append(current)
+            return tuple(locked)
     raise RuntimeError(
-        f"stage index kept advancing while locking work item: {work_item_id}"
+        "nonterminal executions kept appearing while locking work item: "
+        f"{work_item_id}"
     )
 
 
-def _cancel_current_stage(
+def _cancel_locked_executions(
+    connection: Connection,
+    *,
+    executions: tuple[StageExecutionRecord, ...],
+    cancelled_at: datetime,
+    schema: LedgerSchema,
+) -> tuple[CancelledStageExecution, ...]:
+    return tuple(
+        _cancel_one_execution(
+            connection,
+            current=current,
+            cancelled_at=cancelled_at,
+            schema=schema,
+        )
+        for current in executions
+    )
+
+
+def _cancel_one_execution(
     connection: Connection,
     *,
     current: StageExecutionRecord,
     cancelled_at: datetime,
     schema: LedgerSchema,
-) -> WorkCancellationResult:
+) -> CancelledStageExecution:
     workflow_id: str | None = None
     if current.state is StageExecutionState.FAILED:
         disposition = CancellationDisposition.CANCELLED_FAILED
@@ -260,12 +355,34 @@ def _cancel_current_stage(
             terminal_reference=workflow_id,
             schema=schema,
         )
-    return WorkCancellationResult(
-        work_item_id=current.work_item_id,
+    return CancelledStageExecution(
         stage_execution=execution,
         disposition=disposition,
         delegated_workflow_id=workflow_id,
     )
+
+
+def _terminal_representative(
+    connection: Connection,
+    *,
+    work_item_id: int,
+    schema: LedgerSchema,
+) -> StageExecutionRecord:
+    status = work_item_status_rows(
+        schema,
+        select(literal(work_item_id).label("work_item_id")),
+    )
+    stage_execution_id = connection.execute(
+        select(status.c.stage_execution_id)
+    ).scalar_one()
+    representative = get_stage_execution(
+        connection,
+        stage_execution_id=stage_execution_id,
+        schema=schema,
+    )
+    if representative is None:
+        raise LookupError(f"work item has no stage execution: {work_item_id}")
+    return representative
 
 
 def _redelegable_workflow_id(

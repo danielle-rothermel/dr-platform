@@ -30,6 +30,7 @@ from dr_platform.admission.controls import (
 )
 from dr_platform.admission.runner import run_admission_pass
 from dr_platform.execution.handoff import _complete_stage_in_transaction
+from dr_platform.execution.stage_completion import StageSuccessor
 from dr_platform.pipeline.definitions import (
     PipelineDefinition,
     PipelineIdentity,
@@ -481,8 +482,7 @@ def test_cancel_terminalizes_retry_prepared_attempt_without_delegation(
             terminal_summary={"outcome": "failed"},
             terminal_reference=None,
             evidence=None,
-            next_stage_key=None,
-            next_stage_index=None,
+            successors=(),
             completed_at=NOW + timedelta(seconds=1),
         )
 
@@ -663,8 +663,13 @@ def test_cancellation_delegates_only_an_admitted_exact_attempt(
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="late-output",
             evidence=None,
-            next_stage_key="score",
-            next_stage_index=1,
+            successors=(
+                StageSuccessor(
+                    stage_key=StageKey("score"),
+                    stage_index=1,
+                    input_reference="late-output",
+                ),
+            ),
             completed_at=NOW + timedelta(seconds=3),
         )
     with pg_engine.connect() as connection:
@@ -1045,8 +1050,13 @@ def test_cancel_after_committed_handoff_cancels_the_successor(
                 terminal_summary={"outcome": "succeeded"},
                 terminal_reference="handoff-output",
                 evidence=None,
-                next_stage_key="score",
-                next_stage_index=1,
+                successors=(
+                    StageSuccessor(
+                        stage_key=StageKey("score"),
+                        stage_index=1,
+                        input_reference="handoff-output",
+                    ),
+                ),
                 completed_at=NOW + timedelta(seconds=1),
             )
             _wait_until_blocked_on_lock(
