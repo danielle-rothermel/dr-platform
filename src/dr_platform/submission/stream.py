@@ -503,6 +503,7 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
                             "state": StageExecutionState.READY.value,
                             "current_attempt": 0,
                             "rank": row["rank"],
+                            "input_reference": row["input_reference"],
                             "output_reference": None,
                             "created_at": created_at,
                             "updated_at": created_at,

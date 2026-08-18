@@ -16,7 +16,10 @@ from dr_platform._core.identities import (
     WorkKey,
 )
 from dr_platform._core.ledger.schema import LedgerSchema
-from dr_platform._core.validation import validate_positive_integer
+from dr_platform._core.validation import (
+    validate_nonnegative_integer,
+    validate_positive_integer,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -38,6 +41,7 @@ class WorkflowIdDigestField(StrEnum):
     PIPELINE_KEY = "pipeline_key"
     PIPELINE_VERSION = "pipeline_version"
     STAGE_KEY = "stage_key"
+    STAGE_INDEX = "stage_index"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,12 +66,13 @@ class StageAttemptTerminalError(RuntimeError):
     pass
 
 
-def stage_workflow_id(
+def stage_workflow_id(  # noqa: PLR0913 -- explicit workflow identity facts
     *,
     work_identity: CampaignWorkIdentity,
     pipeline_key: PipelineKey,
     pipeline_version: int,
     stage_key: StageKey,
+    stage_index: int,
     attempt_number: int,
 ) -> str:
     if not isinstance(pipeline_key, PipelineKey):
@@ -75,6 +80,7 @@ def stage_workflow_id(
     validate_positive_integer(pipeline_version, label="pipeline version")
     if not isinstance(stage_key, StageKey):
         raise TypeError("stage_key must be a StageKey")
+    validate_nonnegative_integer(stage_index, label="stage index")
     validate_positive_integer(attempt_number, label="attempt number")
     digest = json_hash(
         {
@@ -85,6 +91,7 @@ def stage_workflow_id(
             WorkflowIdDigestField.PIPELINE_KEY: pipeline_key.value,
             WorkflowIdDigestField.PIPELINE_VERSION: pipeline_version,
             WorkflowIdDigestField.STAGE_KEY: stage_key.value,
+            WorkflowIdDigestField.STAGE_INDEX: stage_index,
         },
         length=WORKFLOW_ID_DIGEST_LENGTH,
     )
@@ -112,6 +119,7 @@ def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
         select(
             executions.c.current_attempt,
             executions.c.stage_key,
+            executions.c.stage_index,
             executions.c.updated_at,
             work_items.c.campaign_key,
             work_items.c.work_key,
@@ -150,6 +158,7 @@ def append_stage_attempt(  # noqa: PLR0913 -- explicit persistence facts
         pipeline_key=PipelineKey(source["pipeline_key"]),
         pipeline_version=source["pipeline_version"],
         stage_key=StageKey(source["stage_key"]),
+        stage_index=source["stage_index"],
         attempt_number=attempt_number,
     )
     summary = null() if terminal_summary is None else dict(terminal_summary)

@@ -24,6 +24,7 @@ def test_stage_workflow_id_is_stable_and_attempt_scoped() -> None:
             pipeline_key=PipelineKey("evaluation"),
             pipeline_version=1,
             stage_key=StageKey("execute"),
+            stage_index=0,
             attempt_number=attempt_number,
         )
 
@@ -48,13 +49,50 @@ def test_stage_workflow_id_matches_pinned_golden_format() -> None:
         pipeline_key=PipelineKey("evaluation"),
         pipeline_version=1,
         stage_key=StageKey("execute"),
+        stage_index=0,
         attempt_number=1,
     )
 
     assert workflow_id == (
-        "drp-98d03108ccf351d0ddb9fd4b19a8e51d"
-        "9ddd2e5171ed49ce6fddc3b313056bdc-a1"
+        "drp-ec522298fe642c4803ad044e2d76547d"
+        "924a518ecf7a3cdb95d18e5b5602d1f5-a1"
     )
+
+
+def test_stage_workflow_id_scopes_by_stage_index() -> None:
+    identity = CampaignWorkIdentity(
+        CampaignKey("campaign-7"), WorkKey("item/alpha")
+    )
+    pipeline_key = PipelineKey("evaluation")
+    stage_key = StageKey("execute")
+    first_index = stage_workflow_id(
+        work_identity=identity,
+        pipeline_key=pipeline_key,
+        pipeline_version=1,
+        stage_key=stage_key,
+        stage_index=0,
+        attempt_number=1,
+    )
+    loop_index = stage_workflow_id(
+        work_identity=identity,
+        pipeline_key=pipeline_key,
+        pipeline_version=1,
+        stage_key=stage_key,
+        stage_index=3,
+        attempt_number=1,
+    )
+    retry = stage_workflow_id(
+        work_identity=identity,
+        pipeline_key=pipeline_key,
+        pipeline_version=1,
+        stage_key=stage_key,
+        stage_index=0,
+        attempt_number=2,
+    )
+
+    assert first_index != loop_index
+    assert first_index != retry
+    assert loop_index != retry
 
 
 def test_completion_workflow_identity_is_stable_and_pipeline_scoped() -> None:

@@ -7,9 +7,11 @@ from typing import TYPE_CHECKING, cast
 
 from dbos import DBOS
 from dr_store.content_addressing import format_object_reference
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 from sqlalchemy import select
 
 from dr_platform._core.clock import utc_now
+from dr_platform._core.identities import PipelineKey, StageKey
 from dr_platform._core.ledger.attempts import record_stage_attempt_terminal
 from dr_platform._core.ledger.evidence import STAGE_FAILURE_EVIDENCE_SCHEMA
 from dr_platform._core.ledger.executions import (
@@ -39,10 +41,15 @@ from dr_platform.execution._object_store import (
 )
 from dr_platform.execution._recovery_cap import mark_wrapped_recovery_cap
 from dr_platform.execution.failures import StageApplicationFailure
+from dr_platform.execution.stage_completion import (
+    StageSuccessor,
+    parse_stage_workflow_result,
+)
 from dr_platform.pipeline.definitions import (
-    AsyncWorkflowCallable,
     PipelineDefinition,
+    RunCompletionWorkflowCallable,
     StageDefinition,
+    StageWorkflowCallable,
 )
 
 if TYPE_CHECKING:
@@ -53,7 +60,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
     from sqlalchemy.engine import RowMapping
 
-    from dr_platform._core.identities import PipelineKey, StageKey
+    from dr_platform._core.identities import PipelineKey
 
 
 _WRAPPED_STAGE_MARKER = "_dr_platform_wrapped_stage"
@@ -77,7 +84,7 @@ def is_pipeline_wrapped(pipeline: PipelineDefinition) -> bool:
 
 def _pipeline_checkpoint_workflows(
     pipeline: PipelineDefinition,
-) -> tuple[AsyncWorkflowCallable, ...]:
+) -> tuple[StageWorkflowCallable | RunCompletionWorkflowCallable, ...]:
     completion = pipeline.run_completion
     return (
         *(stage.workflow for stage in pipeline.stages),
@@ -87,7 +94,7 @@ def _pipeline_checkpoint_workflows(
 
 def _pipeline_stage_workflows(
     pipeline: PipelineDefinition,
-) -> tuple[AsyncWorkflowCallable, ...]:
+) -> tuple[StageWorkflowCallable, ...]:
     return tuple(stage.workflow for stage in pipeline.stages)
 
 
@@ -116,7 +123,7 @@ def wrap_pipeline_workflows(
             queue_name=stage.queue_name,
             workflow=_wrap_stage_workflow(
                 pipeline=pipeline,
-                stage_index=stage_index,
+                registration_stage_index=stage_index,
                 max_recovery_attempts=max_recovery_attempts,
                 clock=clock,
             ),
@@ -145,14 +152,14 @@ def wrap_pipeline_workflows(
 def _wrap_stage_workflow(
     *,
     pipeline: PipelineDefinition,
-    stage_index: int,
+    registration_stage_index: int,
     max_recovery_attempts: int,
     clock: Callable[[], datetime],
-) -> AsyncWorkflowCallable:
-    stage = pipeline.stages[stage_index]
+) -> StageWorkflowCallable:
+    stage = pipeline.stages[registration_stage_index]
     next_stage = (
-        pipeline.stages[stage_index + 1]
-        if stage_index + 1 < len(pipeline.stages)
+        pipeline.stages[registration_stage_index + 1]
+        if registration_stage_index + 1 < len(pipeline.stages)
         else None
     )
     workflow_name = _stage_workflow_name(
@@ -173,10 +180,10 @@ def _wrap_stage_workflow(
         terminal_summary: Mapping[str, object],
         terminal_reference: str | None,
         evidence: Jsonable | None,
-        next_stage_key: str | None,
-        next_stage_index: int | None,
+        successors_data: tuple[dict[str, object], ...],
     ) -> None:
         # Read nondeterministic time only in the checkpointed transaction.
+        successors = _decode_successors(successors_data)
         _complete_stage_in_transaction(
             _ledger_checkpoint_connection(),
             workflow_id=workflow_id,
@@ -189,8 +196,7 @@ def _wrap_stage_workflow(
             terminal_summary=terminal_summary,
             terminal_reference=terminal_reference,
             evidence=evidence,
-            next_stage_key=next_stage_key,
-            next_stage_index=next_stage_index,
+            successors=successors,
             completed_at=clock(),
         )
 
@@ -207,10 +213,25 @@ def _wrap_stage_workflow(
         checkpoint_executor = _require_ledger_checkpoint_executor(run_stage)
         workflow_id = _current_workflow_id()
         payload = AdmissionPayload.model_validate(payload_data)
+        persisted_stage_index = payload.stage_index
         try:
             workflow_args = _validate_workflow_args(stage.args_for(payload))
-            output_reference = _validate_output_reference(
-                await stage.workflow(*workflow_args)
+            raw_result = await stage.workflow(*workflow_args)
+            if isinstance(raw_result, str) and (
+                persisted_stage_index != registration_stage_index
+            ):
+                raise TypeError(  # noqa: TRY301
+                    "stage running at non-registration index "
+                    f"{persisted_stage_index} must return "
+                    "StageCompletion, not str"
+                )
+            completion = parse_stage_workflow_result(
+                raw_result,
+                pipeline=pipeline,
+                current_stage_index=persisted_stage_index,
+                linear_next_stage_key=(
+                    None if next_stage is None else next_stage.key
+                ),
             )
         except Exception as error:  # noqa: BLE001 -- application boundary
             error_type = f"{type(error).__module__}.{type(error).__qualname__}"
@@ -227,7 +248,7 @@ def _wrap_stage_workflow(
                     pipeline_key=pipeline.key.value,
                     pipeline_version=pipeline.version,
                     stage_key=stage.key.value,
-                    stage_index=stage_index,
+                    stage_index=persisted_stage_index,
                     succeeded=False,
                     output_reference=None,
                     terminal_summary=build_terminal_summary(
@@ -245,8 +266,7 @@ def _wrap_stage_workflow(
                     ),
                     terminal_reference=None,
                     evidence=evidence,
-                    next_stage_key=None,
-                    next_stage_index=None,
+                    successors_data=(),
                 )
             return None
 
@@ -258,30 +278,25 @@ def _wrap_stage_workflow(
                 pipeline_key=pipeline.key.value,
                 pipeline_version=pipeline.version,
                 stage_key=stage.key.value,
-                stage_index=stage_index,
+                stage_index=persisted_stage_index,
                 succeeded=True,
-                output_reference=output_reference,
+                output_reference=completion.output_reference,
                 terminal_summary=build_terminal_outcome_summary(
                     outcome=StageExecutionState.SUCCEEDED.value,
                 ),
-                terminal_reference=output_reference,
+                terminal_reference=completion.output_reference,
                 evidence=None,
-                next_stage_key=(
-                    None if next_stage is None else next_stage.key.value
-                ),
-                next_stage_index=(
-                    None if next_stage is None else stage_index + 1
-                ),
+                successors_data=_encode_successors(completion.successors),
             )
-        return output_reference
+        return completion.output_reference
 
     # Dispatcher rejects declarations lacking this package-owned marker.
     setattr(run_stage, _WRAPPED_STAGE_MARKER, True)
     mark_wrapped_recovery_cap(run_stage, max_recovery_attempts)
-    return cast("AsyncWorkflowCallable", run_stage)
+    return cast("StageWorkflowCallable", run_stage)
 
 
-def _complete_stage_in_transaction(  # noqa: PLR0912, PLR0913
+def _complete_stage_in_transaction(  # noqa: PLR0913
     connection: Connection,
     *,
     workflow_id: str,
@@ -294,8 +309,7 @@ def _complete_stage_in_transaction(  # noqa: PLR0912, PLR0913
     terminal_summary: Mapping[str, object],
     terminal_reference: str | None,
     evidence: Jsonable | None,
-    next_stage_key: str | None,
-    next_stage_index: int | None,
+    successors: tuple[StageSuccessor, ...],
     completed_at: datetime,
     before_next_stage: Callable[[], None] | None = None,
     schema: LedgerSchema | None = None,
@@ -357,8 +371,8 @@ def _complete_stage_in_transaction(  # noqa: PLR0912, PLR0913
                 evidence,
             )
             evidence_reference = format_object_reference(reference)
-        if next_stage_key is not None or next_stage_index is not None:
-            raise ValueError("a failed stage cannot create a successor")
+        if successors:
+            raise ValueError("a failed stage cannot create successors")
         transition_stage_execution(
             connection,
             stage_execution_id=stage_execution_id,
@@ -379,19 +393,57 @@ def _complete_stage_in_transaction(  # noqa: PLR0912, PLR0913
     )
     if not succeeded:
         return
-    if (next_stage_key is None) != (next_stage_index is None):
-        raise ValueError("next stage key and index must be supplied together")
-    if next_stage_key is None:
-        return
     if before_next_stage is not None:
         before_next_stage()
-    insert_stage_execution(
-        connection,
-        work_item_id=source["work_item_id"],
-        stage_key=next_stage_key,
-        stage_index=cast("int", next_stage_index),
-        created_at=completed_at,
-        schema=selected_schema,
+    for successor in successors:
+        insert_stage_execution(
+            connection,
+            work_item_id=source["work_item_id"],
+            stage_key=successor.stage_key.value,
+            stage_index=successor.stage_index,
+            input_reference=successor.input_reference,
+            barrier=successor.barrier,
+            created_at=completed_at,
+            schema=selected_schema,
+        )
+
+
+class _StageSuccessorCheckpoint(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    stage_key: str
+    stage_index: StrictInt
+    input_reference: str
+    barrier: StrictBool = False
+
+
+def _encode_successors(
+    successors: tuple[StageSuccessor, ...],
+) -> tuple[dict[str, object], ...]:
+    return tuple(
+        _StageSuccessorCheckpoint(
+            stage_key=successor.stage_key.value,
+            stage_index=successor.stage_index,
+            input_reference=successor.input_reference,
+            barrier=successor.barrier,
+        ).model_dump(mode="json")
+        for successor in successors
+    )
+
+
+def _decode_successors(
+    data: tuple[dict[str, object], ...],
+) -> tuple[StageSuccessor, ...]:
+    return tuple(
+        StageSuccessor(
+            stage_key=StageKey(item.stage_key),
+            stage_index=item.stage_index,
+            input_reference=item.input_reference,
+            barrier=item.barrier,
+        )
+        for item in (
+            _StageSuccessorCheckpoint.model_validate(raw) for raw in data
+        )
     )
 
 
@@ -454,15 +506,6 @@ def _lock_handoff_source(
         .with_for_update(of=attempts)
     ).one()
     return row
-
-
-def _validate_output_reference(value: object) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(
-            "stage application logic must return a non-empty "
-            "output-reference string"
-        )
-    return value
 
 
 def _validate_workflow_args(value: object) -> tuple[object, ...]:

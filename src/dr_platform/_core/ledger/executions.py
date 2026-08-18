@@ -10,6 +10,7 @@ from dr_platform._core.identities import StageKey, normalize_key
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.validation import (
+    validate_non_empty_string,
     validate_nonnegative_integer,
     validate_positive_integer,
 )
@@ -50,7 +51,9 @@ class StageExecutionRecord:
     state: StageExecutionState
     current_attempt: int
     rank: int
+    input_reference: str | None
     output_reference: str | None
+    barrier: bool
     created_at: datetime
     updated_at: datetime
 
@@ -70,12 +73,18 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
     stage_key: StageKey | str,
     stage_index: int,
     created_at: datetime,
+    input_reference: str | None = None,
+    barrier: bool = False,
     schema: LedgerSchema | None = None,
 ) -> StageExecutionRecord:
     selected_schema = schema or LedgerSchema()
     normalized_stage_key = normalize_key(stage_key, StageKey)
-    validate_positive_integer(work_item_id, label="work item id")
     validate_nonnegative_integer(stage_index, label="stage index")
+    validate_positive_integer(work_item_id, label="work item id")
+    if input_reference is not None:
+        validate_non_empty_string(input_reference, label="input reference")
+    if not isinstance(barrier, bool):
+        raise TypeError("barrier must be a bool")
 
     work_items = selected_schema.work_items
     rank = connection.execute(
@@ -97,12 +106,14 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
                 state=StageExecutionState.READY.value,
                 current_attempt=0,
                 rank=rank,
+                input_reference=input_reference,
                 output_reference=None,
+                barrier=barrier,
                 created_at=created_at,
                 updated_at=created_at,
             )
             .on_conflict_do_nothing(
-                index_elements=["work_item_id", "stage_key"]
+                index_elements=["work_item_id", "stage_index"]
             )
             .returning(*table.c)
         )
@@ -110,10 +121,10 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
         .one_or_none()
     )
     if row is None:
-        existing = _get_stage_execution_for_work(
+        existing = _get_stage_execution_for_work_index(
             connection,
             work_item_id=work_item_id,
-            stage_key=normalized_stage_key,
+            stage_index=stage_index,
             schema=selected_schema,
         )
         if existing is None:
@@ -122,10 +133,18 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
             raise RuntimeError(
                 "stage execution conflicted but no row was found on "
                 f"read-back (work_item_id={work_item_id!r}, "
-                f"stage_key={normalized_stage_key.value!r}); this requires "
+                f"stage_index={stage_index!r}); this requires "
                 "READ COMMITTED isolation"
             )
-        if existing.stage_index != stage_index or existing.rank != rank:
+        if (
+            existing.stage_key != normalized_stage_key
+            or existing.rank != rank
+            or existing.barrier != barrier
+            or (
+                input_reference is not None
+                and existing.input_reference != input_reference
+            )
+        ):
             raise StageExecutionConflictError(
                 "work item stage is already bound to different immutable facts"
             )
@@ -215,21 +234,21 @@ def get_stage_execution(
     return None if row is None else _decode_stage_execution(row)
 
 
-def _get_stage_execution_for_work(
+def _get_stage_execution_for_work_index(
     connection: Connection,
     *,
     work_item_id: int,
-    stage_key: StageKey | str,
+    stage_index: int,
     schema: LedgerSchema | None = None,
 ) -> StageExecutionRecord | None:
     selected_schema = schema or LedgerSchema()
-    normalized_stage_key = normalize_key(stage_key, StageKey)
+    validate_nonnegative_integer(stage_index, label="stage index")
     table = selected_schema.stage_executions
     row = (
         connection.execute(
             select(table).where(
                 table.c.work_item_id == work_item_id,
-                table.c.stage_key == normalized_stage_key.value,
+                table.c.stage_index == stage_index,
             )
         )
         .mappings()
@@ -247,7 +266,9 @@ def _decode_stage_execution(row: RowMapping) -> StageExecutionRecord:
         state=StageExecutionState(row["state"]),
         current_attempt=row["current_attempt"],
         rank=row["rank"],
+        input_reference=row["input_reference"],
         output_reference=row["output_reference"],
+        barrier=row["barrier"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

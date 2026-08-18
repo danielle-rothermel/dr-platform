@@ -37,6 +37,7 @@ from dr_platform.execution.handoff import (
     _complete_stage_in_transaction,
     wrap_pipeline_workflows,
 )
+from dr_platform.execution.stage_completion import StageSuccessor
 from dr_platform.pipeline.definitions import (
     PipelineDefinition,
     StageDefinition,
@@ -481,8 +482,13 @@ def test_completion_and_next_ready_insert_roll_back_together(
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="output:prepare",
             evidence=None,
-            next_stage_key="execute",
-            next_stage_index=1,
+            successors=(
+                StageSuccessor(
+                    stage_key=StageKey("execute"),
+                    stage_index=1,
+                    input_reference="output:prepare",
+                ),
+            ),
             completed_at=_utc_now(),
             before_next_stage=fail_before_successor,
         )
@@ -566,8 +572,13 @@ def test_completion_identity_mismatch_does_not_mutate_state(
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="output:prepare",
             evidence=None,
-            next_stage_key="execute",
-            next_stage_index=1,
+            successors=(
+                StageSuccessor(
+                    stage_key=StageKey("execute"),
+                    stage_index=1,
+                    input_reference="output:prepare",
+                ),
+            ),
             completed_at=_utc_now(),
         )
 
@@ -614,8 +625,7 @@ def test_output_reference_is_transported_opaquely_without_parsing(
             terminal_summary={"outcome": "succeeded"},
             terminal_reference=_TERMINAL_OBJECT_REFERENCE,
             evidence=None,
-            next_stage_key=None,
-            next_stage_index=None,
+            successors=(),
             completed_at=_utc_now(),
         )
 
@@ -858,14 +868,23 @@ def test_invalid_application_output_lands_failed_without_a_successor(
 
     assert execution_rows == [(0, "execute", "failed", None)]
     assert attempt.terminal_at is not None
+    if invalid_output == "":
+        expected_error_type = "builtins.ValueError"
+        expected_message = (
+            "stage application logic must return a non-empty "
+            "output-reference string"
+        )
+    else:
+        expected_error_type = "builtins.TypeError"
+        expected_message = (
+            "stage workflow must return str or StageCompletion, "
+            "not <class 'int'>"
+        )
     assert attempt.terminal_summary == {
         "outcome": "failed",
         "producer": "application_failure",
-        "error_type": "builtins.ValueError",
-        "message": (
-            "stage application logic must return a non-empty "
-            "output-reference string"
-        ),
+        "error_type": expected_error_type,
+        "message": expected_message,
         "traceback": attempt.terminal_summary["traceback"],
     }
     assert isinstance(attempt.terminal_summary["traceback"], str)
@@ -1112,8 +1131,7 @@ def test_failure_evidence_write_aborts_whole_checkpoint(
             terminal_summary={"outcome": "failed"},
             terminal_reference=None,
             evidence={"partial": 1},
-            next_stage_key=None,
-            next_stage_index=None,
+            successors=(),
             completed_at=_utc_now(),
             schema=schema,
         )

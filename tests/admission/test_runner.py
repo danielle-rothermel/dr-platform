@@ -23,7 +23,10 @@ from dr_platform._core.ledger.attempts import (
     append_stage_attempt,
     stage_workflow_id,
 )
-from dr_platform._core.ledger.executions import transition_stage_execution
+from dr_platform._core.ledger.executions import (
+    insert_stage_execution,
+    transition_stage_execution,
+)
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import (
     upsert_stage_control,
@@ -555,27 +558,38 @@ def test_admission_enqueues_only_the_serialized_platform_payload(
     assert observed == []
     assert len(client.enqueued) == 1
     payload = AdmissionPayload.model_validate(client.enqueued_args[0][0])
+    schema = _migrate(pg_engine)
+    with pg_engine.connect() as connection:
+        work_item_id = connection.execute(
+            select(schema.work_items.c.work_item_id).where(
+                schema.work_items.c.work_key == "work-0"
+            )
+        ).scalar_one()
     assert payload == AdmissionPayload(
         campaign_key=CampaignKey("campaign-1"),
         work_key=WorkKey("work-0"),
+        work_item_id=work_item_id,
         origin_run_key=RunKey("run-1"),
         input_reference="input:0",
         labels={"cohort": "blue"},
         pipeline_key="evaluation",
         pipeline_version=1,
         stage_key=StageKey("execute"),
+        stage_index=0,
         attempt_number=1,
     )
     wire = payload.model_dump(mode="json")
     assert set(wire) == {
         "campaign_key",
         "work_key",
+        "work_item_id",
         "origin_run_key",
         "input_reference",
         "labels",
         "pipeline_key",
         "pipeline_version",
         "stage_key",
+        "stage_index",
         "attempt_number",
     }
     assert "run_key" not in wire
@@ -734,6 +748,7 @@ def test_enqueue_failure_rolls_back_platform_and_dbos_rows(
             pipeline_key=PipelineKey("evaluation"),
             pipeline_version=1,
             stage_key=StageKey("execute"),
+            stage_index=0,
             attempt_number=1,
         )
         for work_key in ("work-0", "work-1")
@@ -837,6 +852,7 @@ def test_real_dbos_client_enqueues_exactly_one_deterministic_workflow(
         pipeline_key=PipelineKey("evaluation"),
         pipeline_version=1,
         stage_key=StageKey("execute"),
+        stage_index=0,
         attempt_number=1,
     )
     client.delete_workflow(workflow_id)
@@ -1148,7 +1164,7 @@ def test_pipeline_stage_mismatch_is_reported_and_other_stages_admit(
     mismatch = summary.mismatched_stages[0]
     assert mismatch.pipeline_key == "pipeline-b"
     assert mismatch.stage_key == StageKey("stage-b")
-    assert "disagrees" in mismatch.message
+    assert "not registered" in mismatch.message
 
 
 def test_unconfigured_backlog_cannot_exhaust_considered_budget(
@@ -1276,3 +1292,177 @@ def test_two_passes_cannot_exceed_control_capacity(
         StageExecutionState.ADMITTED.value,
         StageExecutionState.READY.value,
     ]
+
+
+def test_barrier_ready_join_is_skipped_until_lower_stages_succeed(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    _control(pg_engine, selector=None, capacity=4)
+    with pg_engine.begin() as connection:
+        run_key = "run-barrier-admission"
+        connection.execute(
+            schema.pipeline_runs.insert().values(
+                run_key=run_key,
+                campaign_key="campaign-1",
+                pipeline_key="evaluation",
+                pipeline_version=1,
+                execution_config_reference="config:1",
+                expected_member_count=1,
+                created_at=NOW,
+            )
+        )
+        work_item_id = connection.execute(
+            schema.work_items.insert()
+            .values(
+                campaign_key="campaign-1",
+                work_key="work-barrier-admission",
+                origin_run_key=run_key,
+                input_reference="seed",
+                labels={},
+                rank=1,
+            )
+            .returning(schema.work_items.c.work_item_id)
+        ).scalar_one()
+        split = insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=0,
+            input_reference="seed",
+            created_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=split.stage_execution_id,
+            new_state=StageExecutionState.ADMITTED,
+            updated_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=split.stage_execution_id,
+            new_state=StageExecutionState.SUCCEEDED,
+            output_reference="split:out",
+            updated_at=NOW,
+        )
+        insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=1,
+            input_reference="row:a",
+            created_at=NOW,
+        )
+        insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=3,
+            input_reference="join:pending",
+            barrier=True,
+            created_at=NOW,
+        )
+
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(_RecordingClient()),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+
+    assert summary.admitted_total == 1
+    assert summary.skipped_for_barrier == 1
+
+
+def test_barrier_cancelled_sibling_blocks_join(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    _control(pg_engine, selector=None, capacity=4)
+    with pg_engine.begin() as connection:
+        run_key = "run-barrier-cancelled"
+        connection.execute(
+            schema.pipeline_runs.insert().values(
+                run_key=run_key,
+                campaign_key="campaign-1",
+                pipeline_key="evaluation",
+                pipeline_version=1,
+                execution_config_reference="config:1",
+                expected_member_count=1,
+                created_at=NOW,
+            )
+        )
+        work_item_id = connection.execute(
+            schema.work_items.insert()
+            .values(
+                campaign_key="campaign-1",
+                work_key="work-barrier-cancelled",
+                origin_run_key=run_key,
+                input_reference="seed",
+                labels={},
+                rank=1,
+            )
+            .returning(schema.work_items.c.work_item_id)
+        ).scalar_one()
+        split = insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=0,
+            input_reference="seed",
+            created_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=split.stage_execution_id,
+            new_state=StageExecutionState.ADMITTED,
+            updated_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=split.stage_execution_id,
+            new_state=StageExecutionState.SUCCEEDED,
+            output_reference="split:out",
+            updated_at=NOW,
+        )
+        branch = insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=1,
+            input_reference="row:a",
+            created_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=branch.stage_execution_id,
+            new_state=StageExecutionState.ADMITTED,
+            updated_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=branch.stage_execution_id,
+            new_state=StageExecutionState.CANCELLED,
+            updated_at=NOW,
+        )
+        insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=3,
+            input_reference="join:pending",
+            barrier=True,
+            created_at=NOW,
+        )
+
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(_RecordingClient()),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+
+    assert summary.admitted_total == 0
+    assert summary.skipped_for_barrier == 1

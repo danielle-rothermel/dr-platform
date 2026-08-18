@@ -139,6 +139,7 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
             admitted_counts=(),
             skipped_for_capacity=0,
             skipped_for_pause=0,
+            skipped_for_barrier=0,
             unconfigured_stages=(),
             failed_stages=(),
             mismatched_stages=(),
@@ -285,6 +286,7 @@ def test_mismatched_stages_are_logged_as_registry_drift_at_error(
             admitted_counts=(),
             skipped_for_capacity=0,
             skipped_for_pause=0,
+            skipped_for_barrier=0,
             unconfigured_stages=(),
             failed_stages=(),
             mismatched_stages=(

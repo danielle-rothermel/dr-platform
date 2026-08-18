@@ -29,8 +29,10 @@ def _candidate(
 ) -> _Candidate:
     return _Candidate(
         stage_execution_id=stage_execution_id,
+        work_item_id=1,
         rank=rank,
         stage_index=0,
+        barrier=False,
         campaign_key="campaign-1",
         work_key="work-0",
         origin_run_key="run-1",
@@ -142,11 +144,13 @@ def test_pass_tally_to_summary_sorts_and_converts_stage_keys() -> None:
     tally.record_admitted(_StageIdentity("evaluation", 1, "alpha"))
     tally.skipped_for_capacity += 1
     tally.skipped_for_pause += 1
+    tally.skipped_for_barrier += 1
 
     summary = tally.to_summary()
 
     assert summary.skipped_for_capacity == 1
     assert summary.skipped_for_pause == 1
+    assert summary.skipped_for_barrier == 1
     assert summary.admitted_counts == (
         StageAdmissionCount(
             pipeline_key="evaluation",

@@ -142,10 +142,12 @@ def _registry_stage_workflows(
 def _log_admission_summary(summary: AdmissionSummary) -> None:
     logger.info(
         "admission pass admitted=%s skipped_capacity=%s "
-        "skipped_pause=%s unconfigured=%s failed=%s mismatched=%s",
+        "skipped_pause=%s skipped_barrier=%s unconfigured=%s failed=%s "
+        "mismatched=%s",
         summary.admitted_total,
         summary.skipped_for_capacity,
         summary.skipped_for_pause,
+        summary.skipped_for_barrier,
         len(summary.unconfigured_stages),
         len(summary.failed_stages),
         len(summary.mismatched_stages),

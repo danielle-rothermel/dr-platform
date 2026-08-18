@@ -11,8 +11,11 @@ from dr_platform._core.identities import (
     validate_key_value,
 )
 from dr_platform._core.validation import validate_positive_integer
+from dr_platform.execution.stage_completion import StageCompletion
 
-AsyncWorkflowCallable = Callable[..., Awaitable[str | None]]
+StageWorkflowCallable = Callable[..., Awaitable[str | StageCompletion]]
+RunCompletionWorkflowCallable = Callable[..., Awaitable[str | None]]
+AsyncWorkflowCallable = RunCompletionWorkflowCallable
 ArgumentsCallable = Callable[..., tuple[object, ...]]
 
 
@@ -51,7 +54,7 @@ def validate_pipeline_identity(value: object) -> PipelineIdentity:
 class StageDefinition:
     key: StageKey
     queue_name: str
-    workflow: AsyncWorkflowCallable
+    workflow: StageWorkflowCallable
     args_for: ArgumentsCallable
 
     def __post_init__(self) -> None:
@@ -66,7 +69,7 @@ class StageDefinition:
 class RunCompletionDefinition:
     key: RunCompletionKey
     queue_name: str
-    workflow: AsyncWorkflowCallable
+    workflow: RunCompletionWorkflowCallable
     args_for: ArgumentsCallable
 
     def __post_init__(self) -> None:
