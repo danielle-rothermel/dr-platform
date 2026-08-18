@@ -5,6 +5,29 @@ All notable changes to `dr-platform` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Application-directed stage handoff via `StageCompletion` / `StageSuccessor`
+  with fan-out, loops, and admission-gated join barriers.
+- Canonical work-item status derivation in `_core.ledger.work_item_status`
+  (`work_item_status_rows`, `work_item_status_rows_by_run`).
+- `AdmissionPayload.work_item_id` and persisted per-stage `input_reference`.
+- `CancelledStageExecution` on the public cancellation API.
+- Alembic revision `0003_stage_index_identity` (irreversible).
+
+### Changed
+
+- Stage execution identity is `(work_item_id, stage_index)`; stage workflow-id
+  digests include `stage_index` (invalidates in-flight stage workflow ids).
+- `str` stage returns are permitted only at the registration index; otherwise
+  stages must return `StageCompletion`.
+- `cancel_work` is item-level: every nonterminal execution is cancelled.
+- Work-item status and run-barrier release counts derive from precedence over
+  all executions, not `max(stage_index)`.
+- Removed deferred join manifest (`join.py`).
+
 ## 0.2.1 - 2026-08-12
 
 ### Added

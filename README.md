@@ -13,8 +13,9 @@ It is built on PostgreSQL and DBOS and organized into seven functional areas:
 application boundary, but compatibility is not yet promised.
 
 - **[Pipeline definitions](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/pipeline)**
-  describe ordered, versioned stages while applications retain ownership of
-  stage behavior and the meaning of input and output references.
+  describe versioned registered stages and application-directed handoff while
+  applications retain ownership of stage behavior and the meaning of input and
+  output references.
 - **[Submission](https://github.com/danielle-rothermel/dr-platform/tree/main/src/dr_platform/submission)**
   records streamed work in bounded chunks and organizes it into campaigns and
   runs with stable identities and replay-safe conflict detection.
@@ -70,9 +71,42 @@ they do not clarify the boundary.
 
 ### Pipeline definitions
 
-Pipeline declarations are immutable, versioned, linear stage chains. A startup
-registry binds each identity to exactly one declaration for submission and
-runtime wiring.
+Pipeline declarations are immutable, versioned sets of uniquely keyed stages
+with optional run completion. Registration order defines the default linear
+successor for `str` returns; application-directed handoff may fan out, loop
+on a `stage_key` at a higher `stage_index`, or join behind an admission
+barrier. A startup registry binds each identity to exactly one declaration for
+submission and runtime wiring.
+
+#### Handoff semantics
+
+Stage workflows return a non-empty output-reference `str` or a
+`StageCompletion` with explicit `successors`. A `str` return is valid only
+when the persisted `stage_index` equals the stage's registration position;
+otherwise the workflow must return `StageCompletion`. On the linear path, a
+`str` return enqueues the next registered stage with that string as the
+successor `input_reference` (not the work item's original submission input).
+The admission payload carries the persisted `stage_index` and `work_item_id`
+so completion identity matches the ledger row and join bodies can read
+sibling outputs. Join example:
+
+```python
+def join(payload: AdmissionPayload) -> str:
+    outputs = list_predecessor_stage_outputs(
+        payload.work_item_id, payload.stage_index, engine=engine
+    )
+    return f"join:{payload.input_reference}"
+```
+Fan-out inserts every successor in one handoff transaction. Loops reuse a
+`stage_key` at a higher `stage_index`; identity is `(work_item_id,
+stage_index)`. Join successors set `barrier=True` on `StageSuccessor`;
+admission holds them ready until every lower `stage_index` for the same work
+item is `SUCCEEDED`. Join bodies call `list_predecessor_stage_outputs` to read
+sibling outputs once admitted.
+
+Failed or cancelled lower siblings block the join until an operator
+`retry_stage`s the sibling, not the join. This is ~80% best-effort behavior:
+prefer loud failures and operator recovery over silent corruption.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -85,7 +119,7 @@ class PipelineIdentity:
 class StageDefinition:
     key: StageKey
     queue_name: str
-    workflow: Callable[..., Awaitable[str | None]]
+    workflow: Callable[..., Awaitable[str | StageCompletion]]
     args_for: Callable[[AdmissionPayload], tuple[object, ...]]
 
 
@@ -188,18 +222,23 @@ zero-based member order and pins the digest wire format used again at closure.
 
 Admission supplies each selected stage with immutable work context and respects
 every matching capacity control. Operators can change capacity or pause future
-admissions without preempting work that is already running.
+admissions without preempting work that is already running. Join successors
+with `barrier=True` remain `READY` until every lower `stage_index` for the
+same work item is `SUCCEEDED`; admission reports skips in
+`AdmissionSummary.skipped_for_barrier`.
 
 ```python
 class AdmissionPayload(BaseModel):
     campaign_key: CampaignKey
     work_key: WorkKey
+    work_item_id: int
     origin_run_key: RunKey
     input_reference: str
     labels: Mapping[str, str]
     pipeline_key: str
     pipeline_version: int
     stage_key: StageKey
+    stage_index: int
     attempt_number: int
 
 
@@ -333,13 +372,26 @@ class CancellationDisposition(StrEnum):
 
 ```python
 @dataclass(frozen=True, slots=True)
-class WorkCancellationResult:
-    work_item_id: int
+class CancelledStageExecution:
     stage_execution: StageExecutionRecord
     disposition: CancellationDisposition
     delegated_workflow_id: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class WorkCancellationResult:
+    work_item_id: int
+    cancellations: tuple[CancelledStageExecution, ...]
+    disposition: CancellationDisposition
+    delegated_workflow_id: str | None
+    stage_execution: StageExecutionRecord
+```
+
+`cancel_work` cancels every nonterminal execution (`READY`, `ADMITTED`,
+`FAILED`) for the item. Retry the FAILED sibling stage, not a READY barrier
+join.
+
+```python
 @dataclass(frozen=True, slots=True)
 class StageRetryResult:
     stage_execution: StageExecutionRecord
@@ -372,7 +424,10 @@ Inspection provides read-only projections over stable logical identities rather
 than exposing database rows. Collection readers are bounded; direct work-item
 inspection returns its complete stage-attempt history. Run member listing is
 paginated by membership ordinal and reports current stage state without
-returning evidence payloads.
+returning evidence payloads. Work-item `current_stage_*` fields name the
+representative execution under precedence
+(`FAILED > CANCELLED > ADMITTED > READY > SUCCEEDED`), not simply the highest
+`stage_index`.
 
 Terminal attempt summaries use pinned wire keys (`TerminalSummaryField`,
 `TerminalSummaryProducer`) with an explicit producer tag on failed,
@@ -469,10 +524,10 @@ database. Runtime initialization and dispatcher registration validate that
 colocation and fail when their URLs identify different databases.
 
 `0001_staging_baseline` is the fresh-schema root of the supported Alembic
-chain, and `0002_dr_store_baseline` is its head — the revision
+chain, and `0003_stage_index_identity` is its head — the revision
 `upgrade_platform_schema` installs by default. This development hard cut has
 no compatibility or historical backfill path. Archive any database worth
-retaining before explicitly resetting it. Both revisions refuse downgrade
+retaining before explicitly resetting it. All three revisions refuse downgrade
 outright rather than delete the recorded ledger.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher

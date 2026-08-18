@@ -448,7 +448,7 @@ def test_baseline_downgrade_is_irreversible(pg_engine: Engine) -> None:
 
     with pytest.raises(
         NotImplementedError,
-        match="baseline migration is irreversible",
+        match="migration is irreversible",
     ):
         command.downgrade(
             _alembic_config(engine_dsn(pg_engine), "platform"),
@@ -550,6 +550,74 @@ def test_migration_and_runtime_schema_inventories_match(
         }
     )
     assert _trigger_inventory(pg_engine, prefix=runtime_prefix) == frozenset()
+
+
+def test_migration_0003_backfills_input_reference_from_work_items(
+    pg_engine: Engine,
+) -> None:
+    prefix = "legacy0003"
+    dsn = engine_dsn(pg_engine)
+    upgrade_platform_schema(
+        dsn, prefix=prefix, revision="0002_dr_store_baseline"
+    )
+    schema = LedgerSchema(prefix)
+    with pg_engine.begin() as connection:
+        connection.execute(
+            schema.pipeline_runs.insert().values(
+                run_key="run-legacy",
+                campaign_key="campaign-legacy",
+                pipeline_key="pipeline",
+                pipeline_version=1,
+                execution_config_reference="config:1",
+                expected_member_count=1,
+                created_at=NOW,
+            )
+        )
+        work_item_id = connection.execute(
+            schema.work_items.insert()
+            .values(
+                campaign_key="campaign-legacy",
+                work_key="work-legacy",
+                origin_run_key="run-legacy",
+                input_reference="submission:input",
+                labels={},
+                rank=1,
+            )
+            .returning(schema.work_items.c.work_item_id)
+        ).scalar_one()
+        connection.execute(
+            schema.stage_executions.insert().values(
+                work_item_id=work_item_id,
+                stage_key="execute",
+                stage_index=0,
+                state=StageExecutionState.READY.value,
+                current_attempt=0,
+                rank=1,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+    upgrade_platform_schema(
+        dsn, prefix=prefix, revision=PLATFORM_HEAD_REVISION
+    )
+    with pg_engine.connect() as connection:
+        input_reference = connection.execute(
+            select(schema.stage_executions.c.input_reference).where(
+                schema.stage_executions.c.work_item_id == work_item_id
+            )
+        ).scalar_one()
+        barrier = connection.execute(
+            select(schema.stage_executions.c.barrier).where(
+                schema.stage_executions.c.work_item_id == work_item_id
+            )
+        ).scalar_one()
+    assert input_reference == "submission:input"
+    assert barrier is False
+    with pg_engine.connect() as connection:
+        revision = connection.execute(
+            text(f"SELECT version_num FROM {prefix}_platform_alembic_version")  # noqa: S608
+        ).scalar_one()
+    assert revision == PLATFORM_HEAD_REVISION
 
 
 def test_upgrade_rejects_conflicting_table_without_destroying_data(
