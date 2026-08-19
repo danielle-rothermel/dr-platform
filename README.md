@@ -102,12 +102,55 @@ async def join(payload: AdmissionPayload) -> StageCompletion:
         output_reference=f"join:{payload.input_reference}:{refs}"
     )
 ```
+
+This example is valid for a single fan-out episode. Multi-deferral or loop
+pipelines must scope reads with ``stage_key`` and ``min_stage_index``; see
+**Deferral episodes and barrier fan-in** below.
 Fan-out inserts every successor in one handoff transaction. Loops reuse a
 `stage_key` at a higher `stage_index`; identity is `(work_item_id,
 stage_index)`. Join successors set `barrier=True` on `StageSuccessor`;
 admission holds them ready until every lower `stage_index` for the same work
 item is `SUCCEEDED`. Join bodies call `list_predecessor_stage_outputs` to read
 sibling outputs once admitted.
+
+#### Deferral episodes and barrier fan-in
+
+When a stage defers work it typically fans out branch successors plus one
+``barrier=True`` join successor in a single handoff transaction. Indices are
+application-chosen and sparse; within one episode they are usually contiguous:
+
+```text
+optim_step @ O  →  eval_row @ O+1 .. O+N  →  eval_fanin @ F (= O+N+1)
+```
+
+Admission holds the barrier join ready until every lower ``stage_index`` for
+the work item is ``SUCCEEDED``. That admission gate is work-item-wide; join
+bodies must scope reads to one episode. After multiple deferrals on one work
+item, unfiltered predecessor reads include every lower succeeded stage; scope
+one episode with exclusive index bounds (``stage_index > O``, ``stage_index < F``):
+
+```python
+async def eval_fanin(payload: AdmissionPayload) -> StageCompletion:
+    predecessors = list_predecessor_stage_outputs(
+        payload.work_item_id,
+        below_stage_index=payload.stage_index,
+        stage_key=STAGE_EVAL_ROW,
+        min_stage_index=optim_step_index,  # deferring step at O
+        engine=engine,
+    )
+    # input_reference: per-row admitted payload; output_reference: completion
+    ...
+```
+
+``list_stage_executions`` lists executions with the same exclusive bounds for
+episode discovery. Its bounds are independently optional and min-only queries
+have no implicit upper cap. ``list_predecessor_stage_outputs`` instead defaults
+the exclusive upper bound to ``below_stage_index`` when ``max_stage_index`` is
+omitted. ``resolve_barrier_join_cluster`` requires distinct optim and eval
+stage keys and validates that the open interval ``(O, F)`` contains only
+eval-row stages, returning the deferring optim step, eval rows, and fan-in
+record. The platform stores and transports references only; payload meaning
+stays in the application layer.
 
 Failed or cancelled lower siblings block the join until an operator
 `retry_stage`s the sibling, not the join. This is ~80% best-effort behavior:
@@ -598,6 +641,9 @@ list_runs(campaign_key, cursor=None, limit=...) -> tuple[RunSummary, ...]
 list_run_members(run_key, cursor=None, limit=..., terminal_filter=None) -> tuple[RunMemberSummary, ...]
 list_work_items(campaign_key, state=None, cursor=None, limit=...) -> tuple[WorkItemSummary, ...]
 get_work_item_stages(work_item_id) -> tuple[StageExecutionSummary, ...]
+list_stage_executions(work_item_id, stage_key=None, min_stage_index=None, max_stage_index=None, state=None) -> tuple[StageExecutionRecord, ...]
+list_predecessor_stage_outputs(work_item_id, below_stage_index, stage_key=None, min_stage_index=None, max_stage_index=None) -> tuple[PredecessorStageOutput, ...]
+resolve_barrier_join_cluster(work_item_id, fanin_stage_index, optim_step_stage_key, eval_row_stage_key) -> BarrierJoinCluster
 campaign_state_counts(campaign_key) -> tuple[StateCount, ...]
 run_state_counts(run_key) -> tuple[StateCount, ...]
 bulk_run_state_counts(run_keys) -> Mapping[RunKey, tuple[StateCount, ...] | None]

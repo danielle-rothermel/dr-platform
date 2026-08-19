@@ -41,6 +41,10 @@ from dr_platform.execution.stage_completion import (
     StageCompletion,
     StageSuccessor,
 )
+from dr_platform.inspection.barrier_join import (
+    BarrierJoinCluster,
+    resolve_barrier_join_cluster,
+)
 from dr_platform.inspection.campaigns import (
     CampaignSummary,
     RunSummary,
@@ -70,6 +74,7 @@ from dr_platform.inspection.work_items import (
     WorkItemSummary,
     get_work_item_stages,
     list_predecessor_stage_outputs,
+    list_stage_executions,
     list_work_items,
 )
 from dr_platform.pipeline.definitions import (
@@ -136,6 +141,7 @@ from dr_platform.submission.stream import (
 
 __all__ = [
     "AdmissionPayload",
+    "BarrierJoinCluster",
     "BulkStatusResult",
     "BulkTerminalStatusResult",
     "BulkWorkStatus",
@@ -214,10 +220,12 @@ __all__ = [
     "list_predecessor_stage_outputs",
     "list_run_members",
     "list_runs",
+    "list_stage_executions",
     "list_work_items",
     "pause",
     "read_controls",
     "register_scheduled_dispatcher",
+    "resolve_barrier_join_cluster",
     "resolve_stage_queue_name",
     "resume",
     "retry_run_completion",

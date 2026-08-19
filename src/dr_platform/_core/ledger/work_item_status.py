@@ -13,12 +13,17 @@ the max-index row and behavior matches the former ``max(stage_index)`` query.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Select, case, exists, select
 from sqlalchemy.sql import ColumnElement  # noqa: TC002
 from sqlalchemy.sql.selectable import Subquery  # noqa: TC002
 
 from dr_platform._core.ledger.schema import LedgerSchema  # noqa: TC001
 from dr_platform._core.ledger.states import StageExecutionState
+
+if TYPE_CHECKING:
+    from sqlalchemy.sql.schema import Table
 
 
 def _state_precedence(
@@ -140,32 +145,93 @@ def lower_stage_not_succeeded_exists(
     )
 
 
-def list_predecessor_stage_outputs_statement(
+def _apply_stage_execution_filters(  # noqa: PLR0913 -- explicit SQL filters
+    statement: Select,
+    executions_table: Table,
+    *,
+    work_item_id: int,
+    stage_key: str | None = None,
+    min_stage_index: int | None = None,
+    max_stage_index: int | None = None,
+    state: StageExecutionState | None = None,
+) -> Select:
+    columns = executions_table.c
+    filtered = statement.where(columns.work_item_id == work_item_id)
+    if stage_key is not None:
+        filtered = filtered.where(columns.stage_key == stage_key)
+    if min_stage_index is not None:
+        filtered = filtered.where(columns.stage_index > min_stage_index)
+    if max_stage_index is not None:
+        filtered = filtered.where(columns.stage_index < max_stage_index)
+    if state is not None:
+        filtered = filtered.where(columns.state == state.value)
+    return filtered
+
+
+def list_predecessor_stage_outputs_statement(  # noqa: PLR0913 -- explicit SQL filters
     schema: LedgerSchema,
     *,
     work_item_id: int,
     below_stage_index: int,
+    stage_key: str | None = None,
+    min_stage_index: int | None = None,
+    max_stage_index: int | None = None,
 ) -> Select:
     """Succeeded lower-index executions with output references."""
     executions = schema.stage_executions
-    return (
-        select(
-            executions.c.stage_key,
-            executions.c.stage_index,
-            executions.c.output_reference,
-        )
-        .where(
-            executions.c.work_item_id == work_item_id,
-            executions.c.stage_index < below_stage_index,
-            executions.c.state == StageExecutionState.SUCCEEDED.value,
-            executions.c.output_reference.is_not(None),
-        )
-        .order_by(executions.c.stage_index)
+    effective_max = (
+        max_stage_index if max_stage_index is not None else below_stage_index
+    )
+    statement = select(
+        executions.c.stage_key,
+        executions.c.stage_index,
+        executions.c.input_reference,
+        executions.c.output_reference,
+    )
+    statement = _apply_stage_execution_filters(
+        statement,
+        executions,
+        work_item_id=work_item_id,
+        stage_key=stage_key,
+        min_stage_index=min_stage_index,
+        max_stage_index=effective_max,
+        state=StageExecutionState.SUCCEEDED,
+    )
+    return statement.where(
+        executions.c.output_reference.is_not(None)
+    ).order_by(executions.c.stage_index)
+
+
+def list_stage_executions_statement(  # noqa: PLR0913 -- explicit SQL filters
+    schema: LedgerSchema,
+    *,
+    work_item_id: int,
+    stage_key: str | None = None,
+    min_stage_index: int | None = None,
+    max_stage_index: int | None = None,
+    state: StageExecutionState | None = None,
+) -> Select:
+    """Stage execution rows for one work item with optional filters."""
+    executions = schema.stage_executions
+    statement = select(executions)
+    statement = _apply_stage_execution_filters(
+        statement,
+        executions,
+        work_item_id=work_item_id,
+        stage_key=stage_key,
+        min_stage_index=min_stage_index,
+        max_stage_index=max_stage_index,
+        state=state,
+    )
+    return statement.order_by(
+        executions.c.stage_index,
+        executions.c.stage_execution_id,
     )
 
 
 __all__ = [
     "list_predecessor_stage_outputs_statement",
+    "list_stage_executions_statement",
     "lower_stage_not_succeeded_exists",
     "work_item_status_rows",
     "work_item_status_rows_by_run",

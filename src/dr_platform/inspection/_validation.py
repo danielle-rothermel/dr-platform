@@ -4,7 +4,10 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
-from dr_platform._core.validation import validate_positive_integer
+from dr_platform._core.validation import (
+    validate_nonnegative_integer,
+    validate_positive_integer,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection
@@ -80,6 +83,54 @@ def validate_work_item_cursor(
 
 def validate_limit(limit: int) -> None:
     validate_positive_integer(limit, label="inspection limit")
+
+
+def validate_exclusive_stage_index_range(
+    *,
+    min_stage_index: int | None,
+    max_stage_index: int,
+) -> None:
+    """Validate an exclusive index window on ``stage_index``."""
+    validate_nonnegative_integer(max_stage_index, label="max stage index")
+    if min_stage_index is not None:
+        validate_nonnegative_integer(
+            min_stage_index,
+            label="min stage index",
+        )
+        if min_stage_index >= max_stage_index:
+            raise ValueError(
+                "min stage index must be less than max stage index "
+                "(exclusive range)"
+            )
+
+
+def validate_optional_exclusive_stage_index_bounds(
+    *,
+    min_stage_index: int | None,
+    max_stage_index: int | None,
+    default_max_stage_index: int | None = None,
+) -> int | None:
+    """Validate optional exclusive bounds; return the effective upper bound."""
+    effective_max = (
+        max_stage_index
+        if max_stage_index is not None
+        else default_max_stage_index
+    )
+    if (
+        min_stage_index is not None
+        and max_stage_index is None
+        and effective_max is None
+    ):
+        validate_nonnegative_integer(
+            min_stage_index,
+            label="min stage index",
+        )
+    elif effective_max is not None:
+        validate_exclusive_stage_index_range(
+            min_stage_index=min_stage_index,
+            max_stage_index=effective_max,
+        )
+    return effective_max
 
 
 def validate_work_item_id(work_item_id: int) -> None:

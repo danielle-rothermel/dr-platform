@@ -17,6 +17,7 @@ from dr_platform.admission import controls, runner
 from dr_platform.completion import execution as completion_execution
 from dr_platform.execution import failures, handoff, stage_completion
 from dr_platform.inspection import (
+    barrier_join,
     campaigns,
     run_members,
     statuses,
@@ -37,6 +38,7 @@ from dr_platform.submission import runs, stream
 
 _ROOT_BINDINGS = {
     "AdmissionPayload": runner.AdmissionPayload,
+    "BarrierJoinCluster": barrier_join.BarrierJoinCluster,
     "BulkStatusResult": statuses.BulkStatusResult,
     "BulkTerminalStatusResult": statuses.BulkTerminalStatusResult,
     "BulkWorkStatus": statuses.BulkWorkStatus,
@@ -119,6 +121,7 @@ _ROOT_BINDINGS = {
     "list_predecessor_stage_outputs": (
         inspection_work_items.list_predecessor_stage_outputs
     ),
+    "list_stage_executions": inspection_work_items.list_stage_executions,
     "list_run_members": run_members.list_run_members,
     "list_runs": campaigns.list_runs,
     "list_work_items": inspection_work_items.list_work_items,
@@ -129,6 +132,7 @@ _ROOT_BINDINGS = {
     "retry_run_completion": retry_run_completion,
     "retry_stage": retry.retry_stage,
     "run_state_counts": statuses.run_state_counts,
+    "resolve_barrier_join_cluster": barrier_join.resolve_barrier_join_cluster,
     "resolve_stage_queue_name": definitions.resolve_stage_queue_name,
     "selector_matches": definitions.selector_matches,
     "set_selector_capacity": controls.set_selector_capacity,

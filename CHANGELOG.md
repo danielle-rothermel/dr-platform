@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## 0.2.3 - 2026-08-19
+
+### Added
+
+- Filtered `list_predecessor_stage_outputs` with optional `stage_key`,
+  `min_stage_index`, and `max_stage_index` (exclusive bounds) for scoped
+  barrier join reads across multiple deferral episodes.
+- `input_reference` on `PredecessorStageOutput`.
+- `list_stage_executions` for scoped stage execution listing.
+- `BarrierJoinCluster` and `resolve_barrier_join_cluster` for deferral
+  episode discovery and topology validation.
+- README documentation for the ledger-native barrier fan-out / fan-in pattern.
+
+### Fixed
+
+- `list_stage_executions` accepts a min-only exclusive lower bound.
+- `resolve_barrier_join_cluster` rejects equal optim and eval stage keys.
+
 ## 0.2.2 - 2026-08-19
 
 ### Added
