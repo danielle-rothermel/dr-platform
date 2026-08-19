@@ -79,13 +79,13 @@ def _pending_abandonment_evidence(
     *,
     app_version: str | None,
     executor_id: str | None,
-    live_identity: LiveDbosIdentity,
+    live_app_version: str,
     live_executor_ids: frozenset[str],
     suppress_dead_executor: bool,
 ) -> AbandonmentEvidence | None:
     if app_version is None or executor_id is None:
         return None
-    if app_version != live_identity.app_version:
+    if app_version != live_app_version:
         return AbandonmentEvidence.STALE_APP_VERSION
     if suppress_dead_executor:
         return None
@@ -204,7 +204,7 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
                 evidence = _pending_abandonment_evidence(
                     app_version=status.app_version,
                     executor_id=status.executor_id,
-                    live_identity=live_identity,
+                    live_app_version=executor_context.live_app_version,
                     live_executor_ids=executor_context.live_executor_ids,
                     suppress_dead_executor=(
                         executor_context.suppress_pending_dead_executor
@@ -367,7 +367,7 @@ def _dbos_failure_error_summary(status: WorkflowStatus) -> dict[str, object]:
 def _run_completion_abandonment_error_summary(
     status: WorkflowStatus,
     *,
-    live_identity: LiveDbosIdentity,
+    live_app_version: str,
     live_executor_ids: frozenset[str],
     suppress_dead_executor: bool,
 ) -> dict[str, object] | None:
@@ -377,7 +377,7 @@ def _run_completion_abandonment_error_summary(
         evidence = _pending_abandonment_evidence(
             app_version=status.app_version,
             executor_id=status.executor_id,
-            live_identity=live_identity,
+            live_app_version=live_app_version,
             live_executor_ids=live_executor_ids,
             suppress_dead_executor=suppress_dead_executor,
         )
@@ -451,7 +451,7 @@ def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection bou
                 continue
             error_summary = _run_completion_abandonment_error_summary(
                 status,
-                live_identity=live_identity,
+                live_app_version=executor_context.live_app_version,
                 live_executor_ids=executor_context.live_executor_ids,
                 suppress_dead_executor=(
                     executor_context.suppress_pending_dead_executor

@@ -165,9 +165,7 @@ def _launch_dbos(
         )
     )
     registration = register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(
-            app_version=f"handoff-{suffix}"
-        ),
+        live_dbos_identity=default_live_dbos_identity(),
         config=PlatformDbosConfig(
             database_url=database_url,
             system_database_url=database_url,

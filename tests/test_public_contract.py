@@ -164,7 +164,6 @@ def test_root_contract_defines_submits_executes_and_inspects(
         )
         registration = register_scheduled_dispatcher(
             live_dbos_identity=LiveDbosIdentity(
-                app_version=DBOS.application_version,
                 executor_ids=frozenset({DBOS.executor_id}),
             ),
             config=platform_config,

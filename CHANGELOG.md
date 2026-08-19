@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## 0.2.4 - 2026-08-19
+
+### Added
+
+- Optional `application_version` and `executor_id` on `PlatformDbosConfig` /
+  `build_dbos_config` for explicit deployment identity without
+  `runtime_initializer`.
+
+### Changed
+
+- Sweep reads `DBOS.application_version` and unions `DBOS.executor_id` into
+  live executor ids once per pass instead of requiring registration-time
+  `LiveDbosIdentity.app_version`.
+
+### Fixed
+
+- Default-path sweep no longer projects every healthy pending attempt as
+  `stale_app_version` when dispatcher registration precedes `DBOS.launch()`.
+
+### Removed
+
+- `LiveDbosIdentity.app_version` (breaking).
+
 ## 0.2.3 - 2026-08-19
 
 ### Added

@@ -386,6 +386,19 @@ def test_build_dbos_config_passes_pool_size_through_db_engine_kwargs() -> None:
     assert dbos["db_engine_kwargs"] == {"pool_size": 512, "max_overflow": 0}
 
 
+def test_build_dbos_config_passes_identity_fields_when_set() -> None:
+    config = dbos_config.PlatformDbosConfig(
+        database_url="postgresql://app-user@db.example/platform",
+        system_database_url="postgresql://app-user@db.example/platform",
+        max_recovery_attempts=1,
+        application_version="pinned-version",
+        executor_id="worker-17",
+    )
+    built = dbos_config.build_dbos_config(config, app_name="stage-worker")
+    assert built["application_version"] == "pinned-version"
+    assert built["executor_id"] == "worker-17"
+
+
 def test_resolve_database_url_leaves_non_postgresql_urls_unchanged() -> None:
     assert (
         dbos_config.resolve_database_url("sqlite:///tmp.db")

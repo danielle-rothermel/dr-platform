@@ -34,10 +34,16 @@ from tests.conftest import (
     _migrate,
     _WorkflowStatus,
     default_live_dbos_identity,
+    set_live_dbos_identity,
 )
 
 if TYPE_CHECKING:
     from dr_platform.pipeline.registry import PipelineRegistry
+
+
+@pytest.fixture(autouse=True)
+def _live_sweep_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_live_dbos_identity(monkeypatch, app_version="test")
 
 
 class _StatusClient:
@@ -269,7 +275,7 @@ def test_sweep_projects_exhausted_run_completion_for_operator_retry(
     sweep = sweep_abandoned_run_completions(
         pg_engine,
         client=_as_dbos_client(status_client),
-        live_identity=default_live_dbos_identity(app_version="test"),
+        live_identity=default_live_dbos_identity(),
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.inspected_count == 1
@@ -325,7 +331,7 @@ def test_sweep_projects_pending_completion_with_dead_executor(
                 )
             )
         ),
-        live_identity=default_live_dbos_identity(app_version="test"),
+        live_identity=default_live_dbos_identity(),
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.projected_count == 1
@@ -357,7 +363,6 @@ def test_sweep_suppresses_pending_completion_when_resolver_returns_empty(
             )
         ),
         live_identity=LiveDbosIdentity(
-            app_version="test",
             executor_ids=frozenset({"reconciler-local"}),
             resolve_executor_ids=lambda: (),
         ),
@@ -396,7 +401,6 @@ def test_sweep_still_projects_stale_completion_when_resolver_unavailable(
             )
         ),
         live_identity=LiveDbosIdentity(
-            app_version="test",
             executor_ids=frozenset({"reconciler-local"}),
             resolve_executor_ids=lambda: (),
         ),
@@ -430,7 +434,7 @@ def test_sweep_skips_pending_completion_with_live_identity(
                 )
             )
         ),
-        live_identity=default_live_dbos_identity(app_version="test"),
+        live_identity=default_live_dbos_identity(),
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.projected_count == 0

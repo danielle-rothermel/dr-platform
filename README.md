@@ -669,9 +669,12 @@ before `DBOS.launch()`. Declare every queue name used by a stage default or
 label route, and enable `priority_enabled=True` on queues that should honor
 work priority. Admission, run-barrier reconciliation, and
 abandoned-stage and run-completion sweep have separate schedule and batch
-settings; both register by default unless `sweep_cron=None`. Pass `LiveDbosIdentity` from `DBOS.application_version` and either a static
-executor set or a `resolve_executor_ids` callable at dispatcher registration.
-When multiple worker processes run, either disable sweep on all but one
+settings; both register by default unless `sweep_cron=None`. Pass
+`LiveDbosIdentity` with either a static executor set or a
+`resolve_executor_ids` callable at dispatcher registration; sweep reads
+application version and the local process executor id from the live DBOS
+runtime once per pass. Optionally pin both on `PlatformDbosConfig` when
+explicit deployment identity is required. When multiple worker processes run, either disable sweep on all but one
 reconciler or supply every live executor ID to the process that owns sweep so
 peer work is not projected as `dead_executor`. If the resolver raises or returns
 an empty collection, sweep suppresses pending `dead_executor` projection and

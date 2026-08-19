@@ -45,11 +45,20 @@ NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 1
 
 
-def default_live_dbos_identity(*, app_version: str) -> LiveDbosIdentity:
-    return LiveDbosIdentity(
-        app_version=app_version,
-        executor_ids=frozenset({"local"}),
-    )
+def default_live_dbos_identity() -> LiveDbosIdentity:
+    return LiveDbosIdentity(executor_ids=frozenset({"local"}))
+
+
+def set_live_dbos_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    app_version: str,
+    executor_id: str = "local",
+) -> None:
+    from dbos._utils import GlobalParams
+
+    monkeypatch.setattr(GlobalParams, "app_version", app_version)
+    monkeypatch.setattr(GlobalParams, "executor_id", executor_id)
 
 
 def default_platform_dbos_config(
@@ -366,9 +375,7 @@ def launch_handoff_dbos(
         )
     )
     registration = register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(
-            app_version=f"{app_version_prefix}-{suffix}"
-        ),
+        live_dbos_identity=default_live_dbos_identity(),
         config=PlatformDbosConfig(
             database_url=database_url,
             system_database_url=database_url,
