@@ -18,6 +18,7 @@ from dr_platform.completion.execution import (
     RunCompletionOutcomeError,
     record_run_completion_outcome,
 )
+from dr_platform.recovery.live_identity import LiveDbosIdentity
 from dr_platform.recovery.run_completion_retry import retry_run_completion
 from dr_platform.recovery.sweep import sweep_abandoned_run_completions
 from tests.completion.test_run_barrier import (
@@ -330,6 +331,80 @@ def test_sweep_projects_pending_completion_with_dead_executor(
     assert sweep.projected_count == 1
     assert sweep.projections[0].state is RunCompletionExecutionState.FAILED
     assert sweep.projections[0].dbos_status == "PENDING"
+
+
+def test_sweep_suppresses_pending_completion_when_resolver_returns_empty(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(
+        pg_engine,
+        key="sweep-empty-resolver-completion",
+    )
+    del registry
+    sweep = sweep_abandoned_run_completions(
+        pg_engine,
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version="test",
+                        executor_id="slurm-node-17",
+                    ),
+                )
+            )
+        ),
+        live_identity=LiveDbosIdentity(
+            app_version="test",
+            executor_ids=frozenset({"reconciler-local"}),
+            resolve_executor_ids=lambda: (),
+        ),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert sweep.projected_count == 0
+    assert sweep.executor_resolver_unavailable is True
+    with pg_engine.connect() as connection:
+        state = connection.execute(
+            select(schema.run_completion_executions.c.state)
+        ).scalar_one()
+    assert state == RunCompletionExecutionState.ENQUEUED.value
+
+
+def test_sweep_still_projects_stale_completion_when_resolver_unavailable(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(
+        pg_engine,
+        key="sweep-stale-resolver-completion",
+    )
+    del registry
+    sweep = sweep_abandoned_run_completions(
+        pg_engine,
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version="old-version",
+                        executor_id="slurm-node-17",
+                    ),
+                )
+            )
+        ),
+        live_identity=LiveDbosIdentity(
+            app_version="test",
+            executor_ids=frozenset({"reconciler-local"}),
+            resolve_executor_ids=lambda: (),
+        ),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert sweep.projected_count == 1
+    assert sweep.executor_resolver_unavailable is True
+    assert sweep.projections[0].state is RunCompletionExecutionState.FAILED
 
 
 def test_sweep_skips_pending_completion_with_live_identity(

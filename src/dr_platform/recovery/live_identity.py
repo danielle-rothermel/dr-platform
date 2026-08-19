@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class LiveExecutorSweepContext:
+    """Internal sweep resolution product; not part of the public API."""
+
     live_executor_ids: frozenset[str]
     suppress_pending_dead_executor: bool
     resolver_unavailable: bool
@@ -47,7 +49,7 @@ class LiveDbosIdentity:
         try:
             resolved = frozenset(self.resolve_executor_ids())
         except Exception as error:  # noqa: BLE001 -- resolver must not fail sweep
-            logger.debug(
+            logger.warning(
                 "executor resolver failed during sweep",
                 exc_info=error,
             )

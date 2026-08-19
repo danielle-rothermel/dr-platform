@@ -816,6 +816,49 @@ def test_sweep_suppresses_dead_executor_when_resolver_raises_squeue_case(
     assert state == StageExecutionState.ADMITTED.value
 
 
+def test_sweep_suppresses_dead_executor_when_resolver_returns_empty(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-resolver-empty",
+        campaign_key="campaign-resolver-empty",
+        run_key="run-resolver-empty",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=LiveDbosIdentity(
+            app_version="test",
+            executor_ids=frozenset({"reconciler-local"}),
+            resolve_executor_ids=lambda: (),
+        ),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version="test",
+                        executor_id="slurm-node-17",
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 0
+    assert summary.executor_resolver_unavailable is True
+    with pg_engine.connect() as connection:
+        state = connection.execute(
+            select(schema.stage_executions.c.state)
+        ).scalar_one()
+    assert state == StageExecutionState.ADMITTED.value
+
+
 def test_sweep_still_projects_stale_app_version_when_resolver_unavailable(
     pg_engine: Engine,
 ) -> None:

@@ -49,7 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Repeated `cancel_work` on already-cancelled fan-out work reissues every stored
   admitted workflow identity, not just one representative row.
-- Sweep resolver failures and empty results fall back to static `executor_ids`
+- Sweep resolver failures and empty results suppress pending `dead_executor`
+  projection and set `executor_resolver_unavailable` on sweep summaries
   instead of projecting every pending workflow as `dead_executor`.
 - Successor stage execution insert replays sync priority after an operator boost.
 - Alembic revision `0003_stage_index_identity` validates the schema prefix via

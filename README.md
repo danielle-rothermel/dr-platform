@@ -459,8 +459,9 @@ When sweep is enabled, pass `LiveDbosIdentity` with either a non-empty static
 current live worker ids (for example from SLURM). Sweep resolves the executor
 set once per pass. When the resolver raises or returns an empty collection,
 sweep suppresses pending `dead_executor` projection and sets
-`executor_resolver_unavailable` on the sweep summary so startup recovery can
-handle those rows. Stale app-version and terminal DBOS statuses are still
+`executor_resolver_unavailable` on the sweep summary for operator visibility;
+those rows remain eligible for startup recovery and the configured recovery
+cap. Stale app-version and terminal DBOS statuses are still
 projected. When the resolver succeeds, sweep uses the union of resolved ids
 and static `executor_ids`. The resolver must be fast and side-effect-free.
 

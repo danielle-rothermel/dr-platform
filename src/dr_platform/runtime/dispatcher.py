@@ -415,11 +415,14 @@ def register_scheduled_dispatcher(  # noqa: PLR0913
                 )
                 logger.info(
                     "abandoned-stage sweep inspected=%s projected=%s; "
-                    "run-completion sweep inspected=%s projected=%s",
+                    "run-completion sweep inspected=%s projected=%s; "
+                    "executor_resolver_unavailable=%s",
                     stage_summary.inspected_count,
                     stage_summary.projected_count,
                     completion_summary.inspected_count,
                     completion_summary.projected_count,
+                    stage_summary.executor_resolver_unavailable
+                    or completion_summary.executor_resolver_unavailable,
                 )
 
             sweep_workflow = cast("ScheduledWorkflow", sweep)

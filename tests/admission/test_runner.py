@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier
 from typing import TYPE_CHECKING, cast
+from unittest import mock
 from uuid import uuid4
 
 import pytest
@@ -12,6 +13,7 @@ from dbos import DBOSClient, EnqueueOptions
 from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import IntegrityError
 
+import dr_platform.admission.runner as admission_runner
 from dr_platform._core.identities import (
     CampaignKey,
     CampaignWorkIdentity,
@@ -39,6 +41,7 @@ from dr_platform.admission.runner import (
     AdmissionSummary,
     StageIdentityRecord,
     _Control,
+    _lock_candidates,
     _lock_controls,
     _StageIdentity,
     run_admission_pass,
@@ -1759,6 +1762,96 @@ def test_label_queue_routes_select_enqueue_queue_name(
     del schema
 
 
+def test_lock_candidates_keyset_continues_within_priority(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    pipeline = PipelineDefinition(
+        key=PipelineKey(f"priority-rank-page-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name="execute-queue",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    set_stage_capacity(
+        pipeline=pipeline.identity,
+        stage_key=StageKey("execute"),
+        capacity=5,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    submit_items(
+        campaign_key=f"campaign-{suffix}",
+        run_key=f"run-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:priority",
+        items=(
+            WorkInput(
+                work_key="work-rank-a",
+                input_reference="input:a",
+                labels={},
+                priority=1,
+            ),
+            WorkInput(
+                work_key="work-rank-b",
+                input_reference="input:b",
+                labels={},
+                priority=1,
+            ),
+            WorkInput(
+                work_key="work-rank-c",
+                input_reference="input:c",
+                labels={},
+                priority=1,
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        expected_member_count=3,
+        clock=lambda: NOW,
+    )
+    with pg_engine.begin() as connection:
+        first_page = _lock_candidates(
+            connection,
+            schema=schema,
+            limit=2,
+            after=None,
+            full_control_ids=set(),
+            excluded=set(),
+            excluded_candidates=set(),
+        )
+        assert len(first_page) == 2
+        assert all(candidate.priority == 1 for candidate in first_page)
+        last = first_page[-1]
+        second_page = _lock_candidates(
+            connection,
+            schema=schema,
+            limit=1,
+            after=(last.priority, last.rank, last.stage_execution_id),
+            full_control_ids=set(),
+            excluded=set(),
+            excluded_candidates=set(),
+        )
+    assert len(second_page) == 1
+    assert second_page[0].priority == 1
+    assert second_page[0].rank > last.rank or (
+        second_page[0].rank == last.rank
+        and second_page[0].stage_execution_id > last.stage_execution_id
+    )
+    assert second_page[0].work_key not in {
+        candidate.work_key for candidate in first_page
+    }
+    del schema
+
+
 def test_admission_pagination_respects_priority_boundary(
     pg_engine: Engine,
 ) -> None:
@@ -1781,7 +1874,7 @@ def test_admission_pagination_respects_priority_boundary(
     set_stage_capacity(
         pipeline=pipeline.identity,
         stage_key=StageKey("execute"),
-        capacity=4,
+        capacity=2,
         engine=pg_engine,
         clock=lambda: NOW,
     )
@@ -1792,16 +1885,22 @@ def test_admission_pagination_respects_priority_boundary(
         execution_config_reference="config:priority",
         items=(
             WorkInput(
-                work_key="work-mid",
-                input_reference="input:mid",
+                work_key="work-top",
+                input_reference="input:top",
+                labels={},
+                priority=0,
+            ),
+            WorkInput(
+                work_key="work-mid-a",
+                input_reference="input:mid-a",
                 labels={},
                 priority=1,
             ),
             WorkInput(
-                work_key="work-high",
-                input_reference="input:high",
+                work_key="work-mid-b",
+                input_reference="input:mid-b",
                 labels={},
-                priority=5,
+                priority=1,
             ),
             WorkInput(
                 work_key="work-next",
@@ -1810,26 +1909,70 @@ def test_admission_pagination_respects_priority_boundary(
                 priority=2,
             ),
             WorkInput(
-                work_key="work-top",
-                input_reference="input:top",
+                work_key="work-high",
+                input_reference="input:high",
                 labels={},
-                priority=0,
+                priority=5,
             ),
         ),
         registry=registry,
         engine=pg_engine,
-        expected_member_count=4,
+        expected_member_count=5,
         clock=lambda: NOW,
     )
+    with pg_engine.connect() as connection:
+        priority_one_keys = (
+            connection.execute(
+                select(schema.work_items.c.work_key)
+                .select_from(schema.stage_executions.join(schema.work_items))
+                .where(schema.stage_executions.c.priority == 1)
+                .order_by(schema.stage_executions.c.rank)
+            )
+            .scalars()
+            .all()
+        )
+    assert len(priority_one_keys) == 2
+    first_mid_key, second_mid_key = priority_one_keys
     client = _RecordingClient()
-    summary = run_admission_pass(
-        pg_engine,
-        client=_as_dbos_client(client),
-        registry=registry,
-        clock=lambda: NOW,
-        batch_size=3,
-    )
-    assert summary.admitted_total == 3
+    lock_page_after: list[tuple[int, int, int] | None] = []
+    real_lock_page = admission_runner._lock_page
+
+    def _spy_lock_page(  # noqa: PLR0913 -- mirrors _lock_page
+        connection: Connection,
+        *,
+        schema: LedgerSchema,
+        limit: int,
+        after: tuple[int, int, int] | None,
+        full_control_ids: set[int],
+        excluded: set[_StageIdentity],
+        excluded_candidates: set[int],
+    ):
+        lock_page_after.append(after)
+        return real_lock_page(
+            connection,
+            schema=schema,
+            limit=limit,
+            after=after,
+            full_control_ids=full_control_ids,
+            excluded=excluded,
+            excluded_candidates=excluded_candidates,
+        )
+
+    with mock.patch.object(
+        admission_runner,
+        "_lock_page",
+        side_effect=_spy_lock_page,
+    ):
+        summary = run_admission_pass(
+            pg_engine,
+            client=_as_dbos_client(client),
+            registry=registry,
+            clock=lambda: NOW,
+            batch_size=3,
+        )
+    assert len(lock_page_after) >= 2
+    assert lock_page_after[1] is not None
+    assert summary.admitted_total == 2
     with pg_engine.connect() as connection:
         admitted_work_keys = (
             connection.execute(
@@ -1839,7 +1982,10 @@ def test_admission_pagination_respects_priority_boundary(
                     schema.stage_executions.c.state
                     == StageExecutionState.ADMITTED.value
                 )
-                .order_by(schema.stage_executions.c.priority)
+                .order_by(
+                    schema.stage_executions.c.priority,
+                    schema.stage_executions.c.rank,
+                )
             )
             .scalars()
             .all()
@@ -1849,10 +1995,14 @@ def test_admission_pagination_respects_priority_boundary(
                 select(schema.work_items.c.work_key)
                 .select_from(schema.stage_executions.join(schema.work_items))
                 .where(schema.stage_executions.c.state == "ready")
+                .order_by(
+                    schema.stage_executions.c.priority,
+                    schema.stage_executions.c.rank,
+                )
             )
             .scalars()
             .all()
         )
-    assert admitted_work_keys == ["work-top", "work-mid", "work-next"]
-    assert remaining_ready == ["work-high"]
+    assert admitted_work_keys == ["work-top", first_mid_key]
+    assert remaining_ready == [second_mid_key, "work-next", "work-high"]
     del schema
