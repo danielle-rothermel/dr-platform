@@ -71,7 +71,18 @@ def set_work_priority(  # noqa: PLR0913 -- explicit operator dependencies
     updated_at = clock()
 
     with engine.begin() as connection:
-        work_item_id = _lock_work_item(
+        work_item_id = _resolve_work_item_id(
+            connection,
+            campaign_key=normalized_campaign,
+            work_key=normalized_work,
+            schema=selected_schema,
+        )
+        stage_execution_ids = _lock_nonterminal_executions(
+            connection,
+            work_item_id=work_item_id,
+            schema=selected_schema,
+        )
+        _lock_work_item(
             connection,
             campaign_key=normalized_campaign,
             work_key=normalized_work,
@@ -83,16 +94,6 @@ def set_work_priority(  # noqa: PLR0913 -- explicit operator dependencies
             .values(priority=priority)
         )
         executions = selected_schema.stage_executions
-        stage_execution_ids = tuple(
-            connection.execute(
-                select(executions.c.stage_execution_id).where(
-                    executions.c.work_item_id == work_item_id,
-                    executions.c.state.in_(
-                        tuple(state.value for state in _NONTERMINAL_STATES)
-                    ),
-                )
-            ).scalars()
-        )
         if stage_execution_ids:
             connection.execute(
                 update(executions)
@@ -113,6 +114,52 @@ def set_work_priority(  # noqa: PLR0913 -- explicit operator dependencies
         priority=priority,
         updated_stage_execution_ids=stage_execution_ids,
         updated_workflow_ids=workflow_ids,
+    )
+
+
+def _resolve_work_item_id(
+    connection: Connection,
+    *,
+    campaign_key: CampaignKey,
+    work_key: WorkKey,
+    schema: LedgerSchema,
+) -> int:
+    work_items = schema.work_items
+    work_item_id = connection.execute(
+        select(work_items.c.work_item_id).where(
+            work_items.c.campaign_key == campaign_key.value,
+            work_items.c.work_key == work_key.value,
+        )
+    ).scalar_one_or_none()
+    if work_item_id is None:
+        raise LookupError(
+            "work item does not exist: "
+            f"{CampaignWorkIdentity(campaign_key, work_key)!r}"
+        )
+    return work_item_id
+
+
+def _lock_nonterminal_executions(
+    connection: Connection,
+    *,
+    work_item_id: int,
+    schema: LedgerSchema,
+) -> tuple[int, ...]:
+    executions = schema.stage_executions
+    return tuple(
+        connection.execute(
+            select(executions.c.stage_execution_id)
+            .where(
+                executions.c.work_item_id == work_item_id,
+                executions.c.state.in_(
+                    tuple(state.value for state in _NONTERMINAL_STATES)
+                ),
+            )
+            .order_by(executions.c.stage_execution_id)
+            .with_for_update(of=executions)
+        )
+        .scalars()
+        .all()
     )
 
 

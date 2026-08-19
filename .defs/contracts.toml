@@ -271,7 +271,9 @@ statement = """
 Replaying a submission run with identical campaign, pipeline, version, and \
 configuration provenance resumes it, while conflicting provenance raises; \
 the first accepted campaign-and-work identity fixes its input reference, \
-labels, stable rank, and origin provenance."""
+labels, stable rank, and origin provenance. Priority is mutable via \
+``set_work_priority`` and is resynchronized from ``WorkInput`` on reuse when \
+it differs from the persisted ledger value."""
 rationale = """
 Streaming submission commits bounded chunks and may be interrupted, so exact \
 replay must fill absent work without mutating facts already accepted. Treating \

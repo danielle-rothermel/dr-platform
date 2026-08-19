@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Barrier
 from uuid import uuid4
 
 from dbos import DBOS, Queue
-from sqlalchemy import select, text
+from sqlalchemy import Engine, select, text
 
 from dr_platform._core.identities import (
     CampaignKey,
@@ -15,7 +17,11 @@ from dr_platform._core.identities import (
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import set_stage_capacity
 from dr_platform.admission.runner import run_admission_pass
-from dr_platform.execution.handoff import wrap_pipeline_workflows
+from dr_platform.execution.handoff import (
+    StageSuccessor,
+    _complete_stage_in_transaction,
+    wrap_pipeline_workflows,
+)
 from dr_platform.pipeline.definitions import (
     PipelineDefinition,
     StageDefinition,
@@ -32,6 +38,7 @@ from tests.admission.test_runner import (
     _submit_two_stage_backlog,
 )
 from tests.conftest import NOW, _migrate, submit_items
+from tests.conftest import recorded_workflow_id as _recorded_workflow_id
 from tests.execution.test_handoff import _launch_dbos
 
 
@@ -266,3 +273,125 @@ def test_set_work_priority_updates_dbos_workflow_status(
     finally:
         registration.close()
         DBOS.destroy()
+
+
+def test_set_work_priority_does_not_deadlock_concurrent_handoff(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    pipeline = PipelineDefinition(
+        key=PipelineKey(f"priority-handoff-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("prepare"),
+                queue_name=f"prepare-{suffix}",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name=f"execute-{suffix}",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    campaign_key = f"campaign-{suffix}"
+    set_stage_capacity(
+        pipeline=pipeline.identity,
+        stage_key=StageKey("prepare"),
+        capacity=1,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    submit_items(
+        campaign_key=campaign_key,
+        run_key=f"run-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:priority-handoff",
+        items=(
+            WorkInput(
+                work_key="work",
+                input_reference="input",
+                labels={},
+                priority=3,
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    admission_client = _RecordingClient()
+    run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(admission_client),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+    workflow_id = _recorded_workflow_id(admission_client.enqueued[0])
+
+    def complete_handoff() -> None:
+        with pg_engine.begin() as connection:
+            _complete_stage_in_transaction(
+                connection,
+                workflow_id=workflow_id,
+                pipeline_key=pipeline.key.value,
+                pipeline_version=pipeline.version,
+                stage_key="prepare",
+                stage_index=0,
+                succeeded=True,
+                output_reference="output:prepare",
+                terminal_summary={"outcome": "succeeded"},
+                terminal_reference="output:prepare",
+                evidence=None,
+                successors=(
+                    StageSuccessor(
+                        stage_key=StageKey("execute"),
+                        stage_index=1,
+                        input_reference="output:prepare",
+                    ),
+                ),
+                completed_at=NOW + timedelta(seconds=10),
+            )
+
+    def boost_priority() -> None:
+        set_work_priority(
+            campaign_key=campaign_key,
+            work_key="work",
+            priority=0,
+            engine=pg_engine,
+            clock=lambda: NOW + timedelta(seconds=2),
+        )
+
+    start = Barrier(2)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        handoff_future = executor.submit(
+            lambda: (start.wait(timeout=10), complete_handoff())[1]
+        )
+        priority_future = executor.submit(
+            lambda: (start.wait(timeout=10), boost_priority())[1]
+        )
+        handoff_future.result(timeout=10)
+        priority_future.result(timeout=10)
+
+    with pg_engine.connect() as connection:
+        work_priority = connection.execute(
+            select(schema.work_items.c.priority).where(
+                schema.work_items.c.work_key == "work"
+            )
+        ).scalar_one()
+        execute_priority = connection.execute(
+            select(schema.stage_executions.c.priority)
+            .where(
+                schema.stage_executions.c.stage_key == "execute",
+                schema.stage_executions.c.state
+                == StageExecutionState.READY.value,
+            )
+            .limit(1)
+        ).scalar_one()
+    assert work_priority == 0
+    assert execute_priority == 0
