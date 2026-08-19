@@ -544,7 +544,7 @@ database. Runtime initialization and dispatcher registration validate that
 colocation and fail when their URLs identify different databases.
 
 `0001_staging_baseline` is the fresh-schema root of the supported Alembic
-chain, and `0003_stage_index_identity` is its head — the revision
+chain, and `0004_work_priority` is its head — the revision
 `upgrade_platform_schema` installs by default. This development hard cut has
 no compatibility or historical backfill path. Archive any database worth
 retaining before explicitly resetting it. All three revisions refuse downgrade
@@ -553,12 +553,11 @@ outright rather than delete the recorded ledger.
 Register wrapped workflows, application queues, and the scheduled dispatcher
 before `DBOS.launch()`. Admission, run-barrier reconciliation, and
 abandoned-stage and run-completion sweep have separate schedule and batch
-settings; both register by default unless `sweep_cron=None`. Pass
-`LiveDbosIdentity` from `DBOS.application_version` and the deployment-wide
-set of live executor IDs at dispatcher registration. When multiple worker
-processes run, either disable sweep on all but one reconciler or supply every
-live executor ID to the process that owns sweep so peer work is not projected
-as `dead_executor`.
+settings; both register by default unless `sweep_cron=None`. Pass `LiveDbosIdentity` from `DBOS.application_version` and either a static
+executor set or a `resolve_executor_ids` callable at dispatcher registration.
+When multiple worker processes run, either disable sweep on all but one
+reconciler or supply every live executor ID to the process that owns sweep so
+peer work is not projected as `dead_executor`.
 The barrier also has a candidate budget, which
 must be at least its release batch size and bounds all evaluated runs, including
 ineligible and lock-skipped candidates. A persisted cursor rotates blocked or

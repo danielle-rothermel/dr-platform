@@ -1196,7 +1196,7 @@ def test_partial_ready_admission_index_exists(pg_engine: Engine) -> None:
             text(
                 """
                 SELECT indexdef LIKE
-                    '% USING btree (stage_key, rank) '
+                    '% USING btree (stage_key, priority, rank) '
                     || 'WHERE (state = ''ready''::text)%'
                 FROM pg_indexes
                 WHERE schemaname = current_schema()

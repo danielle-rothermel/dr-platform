@@ -28,6 +28,55 @@ date = "2026-08-09"
 check = "uv run pytest -q tests/pipeline/test_definitions.py tests/execution/test_async_workflow.py"
 
 [[contracts]]
+title = "Stage bodies are preemptible on cancellation"
+statement = """
+Wrapped stage application bodies run inside a preemptible DBOS step so \
+operator cancellation can interrupt in-flight work without recording an \
+application failure."""
+rationale = """
+A bare workflow await only observes DBOS cancellation after the body returns, \
+which can hold scarce resources for hours while the ledger is already \
+cancelled."""
+date = "2026-08-18"
+check = "uv run pytest -q tests/execution/test_preemptible_cancellation.py tests/recovery/test_actions.py -k 'cancel or cancellation'"
+
+[[contracts]]
+title = "Admission selects queue routes from labels"
+statement = """
+When a stage declares label queue routes, admission enqueues to the first \
+matching route queue name and otherwise uses the stage default queue name."""
+rationale = """
+Distinct worker classes listen on distinct DBOS queue names; routing at \
+enqueue time keeps CUDA and CPU work on the correct processes without \
+changing label-based capacity controls."""
+date = "2026-08-18"
+check = "uv run pytest -q tests/admission/test_runner.py -k label_queue_routes tests/pipeline/test_definitions.py -k label_queue"
+
+[[contracts]]
+title = "Work priority orders admission and enqueue"
+statement = """
+Each work item carries a persisted priority that orders admission before \
+stable rank and is passed to DBOS enqueue when non-zero; operators may raise \
+priority for ready or admitted work."""
+rationale = """
+Campaign partitioning alone cannot express urgent work within a label slice; \
+priority aligns platform admission with DBOS queue dequeue semantics."""
+date = "2026-08-18"
+check = "uv run pytest -q tests/recovery/test_priority.py tests/admission/test_runner.py -k priority"
+
+[[contracts]]
+title = "Sweep resolves live executor identity dynamically"
+statement = """
+When sweep is enabled, dispatcher registration requires either a non-empty \
+static executor set or a resolver, and sweep compares pending workflow \
+executor ids against the resolver's current view."""
+rationale = """
+A static frozenset captured at registration projects legitimately running \
+cluster work as dead when a reconciler on another host owns sweep."""
+date = "2026-08-18"
+check = "uv run pytest -q tests/recovery/test_sweep.py -k resolver tests/runtime/test_dispatcher.py -k executor_identity"
+
+[[contracts]]
 title = "Applications own workflow resources"
 statement = """
 Applications create and close workflow resources; the platform does not \

@@ -26,7 +26,7 @@ from dr_platform.inspection import (
     work_items as inspection_work_items,
 )
 from dr_platform.pipeline import definitions, registry
-from dr_platform.recovery import cancellation, retry, sweep
+from dr_platform.recovery import cancellation, priority, retry, sweep
 from dr_platform.recovery.live_identity import LiveDbosIdentity
 from dr_platform.recovery.run_completion_retry import (
     RunCompletionRetryResult,
@@ -45,6 +45,7 @@ _ROOT_BINDINGS = {
     "CampaignSummary": campaigns.CampaignSummary,
     "CancellationDisposition": cancellation.CancellationDisposition,
     "DispatcherRegistration": dispatcher.DispatcherRegistration,
+    "LabelQueueRoute": definitions.LabelQueueRoute,
     "LedgerSchema": schema.LedgerSchema,
     "LiveDbosIdentity": LiveDbosIdentity,
     "PipelineConflictError": registry.PipelineConflictError,
@@ -98,6 +99,7 @@ _ROOT_BINDINGS = {
     "CancelledStageExecution": cancellation.CancelledStageExecution,
     "WorkCancellationResult": cancellation.WorkCancellationResult,
     "WorkInput": stream.WorkInput,
+    "WorkPriorityResult": priority.WorkPriorityResult,
     "WorkItemSummary": inspection_work_items.WorkItemSummary,
     "WorkKey": identities.WorkKey,
     "WorkflowCanceller": cancellation.WorkflowCanceller,
@@ -127,8 +129,11 @@ _ROOT_BINDINGS = {
     "retry_run_completion": retry_run_completion,
     "retry_stage": retry.retry_stage,
     "run_state_counts": statuses.run_state_counts,
+    "resolve_stage_queue_name": definitions.resolve_stage_queue_name,
+    "selector_matches": definitions.selector_matches,
     "set_selector_capacity": controls.set_selector_capacity,
     "set_stage_capacity": controls.set_stage_capacity,
+    "set_work_priority": priority.set_work_priority,
     "submit": stream.submit,
     "sweep_abandoned_run_completions": sweep.sweep_abandoned_run_completions,
     "sweep_abandoned_stages": sweep.sweep_abandoned_stages,

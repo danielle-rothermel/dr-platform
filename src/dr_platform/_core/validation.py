@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+WORK_PRIORITY_MAX = 2_147_483_647
+
 
 def validate_positive_integer(value: int, *, label: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int):
@@ -30,3 +32,11 @@ def validate_labels(value: Mapping[str, str], *, label: str) -> dict[str, str]:
     ):
         raise ValueError(f"{label} must map strings to strings")
     return dict(value)
+
+
+def validate_work_priority(value: int, *, label: str = "priority") -> None:
+    validate_nonnegative_integer(value, label=label)
+    if value > WORK_PRIORITY_MAX:
+        raise ValueError(
+            f"{label} must be at most {WORK_PRIORITY_MAX}, got {value}"
+        )

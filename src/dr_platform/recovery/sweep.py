@@ -77,12 +77,13 @@ def _pending_abandonment_evidence(
     app_version: str | None,
     executor_id: str | None,
     live_identity: LiveDbosIdentity,
+    live_executor_ids: frozenset[str],
 ) -> AbandonmentEvidence | None:
     if app_version is None or executor_id is None:
         return None
     if app_version != live_identity.app_version:
         return AbandonmentEvidence.STALE_APP_VERSION
-    if executor_id not in live_identity.executor_ids:
+    if executor_id not in live_executor_ids:
         return AbandonmentEvidence.DEAD_EXECUTOR
     return None
 
@@ -153,6 +154,7 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
     """
     validate_positive_integer(batch_size, label="sweep batch size")
     selected_schema = schema or LedgerSchema()
+    live_executor_ids = live_identity.live_executor_ids()
     projections: list[SweepProjection] = []
     inspected_count = 0
     cursor: int | None = None
@@ -190,6 +192,7 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
                     app_version=status.app_version,
                     executor_id=status.executor_id,
                     live_identity=live_identity,
+                    live_executor_ids=live_executor_ids,
                 )
                 if evidence is None:
                     continue
@@ -348,6 +351,7 @@ def _run_completion_abandonment_error_summary(
     status: WorkflowStatus,
     *,
     live_identity: LiveDbosIdentity,
+    live_executor_ids: frozenset[str],
 ) -> dict[str, object] | None:
     if status.status in _FAILED_DBOS_STATUSES:
         return _dbos_failure_error_summary(status)
@@ -356,6 +360,7 @@ def _run_completion_abandonment_error_summary(
             app_version=status.app_version,
             executor_id=status.executor_id,
             live_identity=live_identity,
+            live_executor_ids=live_executor_ids,
         )
         if evidence is None:
             return None
@@ -393,6 +398,7 @@ def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection bou
     """
     validate_positive_integer(batch_size, label="sweep batch size")
     selected_schema = schema or LedgerSchema()
+    live_executor_ids = live_identity.live_executor_ids()
     projections: list[RunCompletionSweepProjection] = []
     inspected_count = 0
     cursor: int | None = None
@@ -422,6 +428,7 @@ def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection bou
             error_summary = _run_completion_abandonment_error_summary(
                 status,
                 live_identity=live_identity,
+                live_executor_ids=live_executor_ids,
             )
             if error_summary is None:
                 continue

@@ -51,6 +51,10 @@ from dr_platform._core.validation import (
     validate_nonnegative_integer,
     validate_positive_integer,
 )
+from dr_platform.pipeline.definitions import (
+    resolve_stage_queue_name,
+    selector_matches,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -214,6 +218,7 @@ class _Candidate:
     stage_execution_id: int
     work_item_id: int
     rank: int
+    priority: int
     stage_index: int
     barrier: bool
     campaign_key: str
@@ -394,7 +399,7 @@ def _admit_in_transaction(  # noqa: PLR0912, PLR0913 -- pass evaluation loop
     admitted_at = clock()
     considered = 0
     considered_limit = batch_size + MAX_CAPACITY_SKIPS_PER_PASS
-    after: tuple[int, int] | None = None
+    after: tuple[int, int, int] | None = None
     full_control_ids: set[int] = set()
 
     while tally.admitted_total < batch_size and considered < considered_limit:
@@ -414,7 +419,11 @@ def _admit_in_transaction(  # noqa: PLR0912, PLR0913 -- pass evaluation loop
             break
         considered += len(page.candidates)
         last_candidate = page.candidates[-1]
-        after = last_candidate.rank, last_candidate.stage_execution_id
+        after = (
+            last_candidate.priority,
+            last_candidate.rank,
+            last_candidate.stage_execution_id,
+        )
         tally.unconfigured.update(page.unconfigured)
 
         for candidate in page.candidates:
@@ -479,7 +488,7 @@ def _lock_page(  # noqa: PLR0913 -- explicit paging predicates
     *,
     schema: LedgerSchema,
     limit: int,
-    after: tuple[int, int] | None,
+    after: tuple[int, int, int] | None,
     full_control_ids: set[int],
     excluded: set[_StageIdentity],
     excluded_candidates: set[int],
@@ -533,7 +542,7 @@ def _evaluate_candidate(
     matching = tuple(
         control
         for control in controls
-        if _selector_matches(control.selector, candidate.labels)
+        if selector_matches(control.selector, candidate.labels)
     )
     if any(control.paused for control in matching):
         return _SkipPaused()
@@ -587,9 +596,11 @@ def _admit_candidate(  # noqa: PLR0913 -- explicit admission facts
     )
     options: EnqueueOptions = {
         "workflow_name": _workflow_name(stage),
-        "queue_name": stage.queue_name,
+        "queue_name": resolve_stage_queue_name(stage, labels=candidate.labels),
         "workflow_id": attempt.workflow_id,
     }
+    if candidate.priority != 0:
+        options["priority"] = candidate.priority
     client.enqueue_in_transaction(
         connection,
         options,
@@ -640,7 +651,7 @@ def _lock_candidates(  # noqa: PLR0913 -- explicit paging predicates
     *,
     schema: LedgerSchema,
     limit: int,
-    after: tuple[int, int] | None,
+    after: tuple[int, int, int] | None,
     full_control_ids: set[int],
     excluded: set[_StageIdentity],
     excluded_candidates: set[int],
@@ -666,6 +677,7 @@ def _lock_candidates(  # noqa: PLR0913 -- explicit paging predicates
             executions.c.stage_execution_id,
             executions.c.work_item_id,
             executions.c.rank,
+            executions.c.priority,
             executions.c.stage_index,
             executions.c.barrier,
             work_items.c.campaign_key,
@@ -693,15 +705,24 @@ def _lock_candidates(  # noqa: PLR0913 -- explicit paging predicates
             executions.c.state == StageExecutionState.READY.value,
             ~paused,
         )
-        .order_by(executions.c.rank, executions.c.stage_execution_id)
+        .order_by(
+            executions.c.priority,
+            executions.c.rank,
+            executions.c.stage_execution_id,
+        )
     )
     if after is not None:
         statement = statement.where(
             or_(
-                executions.c.rank > after[0],
+                executions.c.priority > after[0],
                 and_(
-                    executions.c.rank == after[0],
-                    executions.c.stage_execution_id > after[1],
+                    executions.c.priority == after[0],
+                    executions.c.rank > after[1],
+                ),
+                and_(
+                    executions.c.priority == after[0],
+                    executions.c.rank == after[1],
+                    executions.c.stage_execution_id > after[2],
                 ),
             )
         )
@@ -842,12 +863,6 @@ def _load_occupancy(
     return dict(rows)
 
 
-def _selector_matches(
-    selector: Mapping[str, str], labels: Mapping[str, str]
-) -> bool:
-    return all(labels.get(key) == value for key, value in selector.items())
-
-
 def _registered_stage(
     candidate: _Candidate,
     *,
@@ -881,6 +896,7 @@ def _decode_candidate(row: RowMapping) -> _Candidate:
         stage_execution_id=row["stage_execution_id"],
         work_item_id=row["work_item_id"],
         rank=row["rank"],
+        priority=row["priority"],
         stage_index=row["stage_index"],
         barrier=row["barrier"],
         campaign_key=row["campaign_key"],

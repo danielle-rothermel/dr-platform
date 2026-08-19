@@ -51,6 +51,7 @@ class StageExecutionRecord:
     state: StageExecutionState
     current_attempt: int
     rank: int
+    priority: int
     input_reference: str | None
     output_reference: str | None
     barrier: bool
@@ -87,13 +88,15 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
         raise TypeError("barrier must be a bool")
 
     work_items = selected_schema.work_items
-    rank = connection.execute(
-        select(work_items.c.rank).where(
+    row = connection.execute(
+        select(work_items.c.rank, work_items.c.priority).where(
             work_items.c.work_item_id == work_item_id
         )
-    ).scalar_one_or_none()
-    if rank is None:
+    ).one_or_none()
+    if row is None:
         raise LookupError(f"work item does not exist: {work_item_id}")
+    rank = row.rank
+    priority = row.priority
 
     table = selected_schema.stage_executions
     row = (
@@ -106,6 +109,7 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
                 state=StageExecutionState.READY.value,
                 current_attempt=0,
                 rank=rank,
+                priority=priority,
                 input_reference=input_reference,
                 output_reference=None,
                 barrier=barrier,
@@ -139,6 +143,7 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
         if (
             existing.stage_key != normalized_stage_key
             or existing.rank != rank
+            or existing.priority != priority
             or existing.barrier != barrier
             or (
                 input_reference is not None
@@ -266,6 +271,7 @@ def _decode_stage_execution(row: RowMapping) -> StageExecutionRecord:
         state=StageExecutionState(row["state"]),
         current_attempt=row["current_attempt"],
         rank=row["rank"],
+        priority=row["priority"],
         input_reference=row["input_reference"],
         output_reference=row["output_reference"],
         barrier=row["barrier"],

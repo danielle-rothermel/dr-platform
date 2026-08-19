@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
 import pytest
 from dbos import DBOSClient, EnqueueOptions
@@ -44,6 +45,7 @@ from dr_platform.admission.runner import (
 from dr_platform.execution.handoff import _complete_stage_in_transaction
 from dr_platform.execution.stage_completion import StageSuccessor
 from dr_platform.pipeline.definitions import (
+    LabelQueueRoute,
     PipelineDefinition,
     PipelineIdentity,
     StageDefinition,
@@ -1677,3 +1679,76 @@ def test_barrier_cancelled_sibling_blocks_join(
 
     assert summary.admitted_total == 0
     assert summary.skipped_for_barrier == 1
+
+
+def test_label_queue_routes_select_enqueue_queue_name(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    pipeline = PipelineDefinition(
+        key=PipelineKey(f"label-queue-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name="default-queue",
+                label_queue_routes=(
+                    LabelQueueRoute(
+                        selector={"device": "cuda"},
+                        queue_name="cuda-queue",
+                    ),
+                ),
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    with pg_engine.begin() as connection:
+        upsert_stage_control(
+            connection,
+            pipeline_key=pipeline.key.value,
+            pipeline_version=pipeline.version,
+            stage_key="execute",
+            selector={},
+            capacity=2,
+            paused=False,
+            updated_at=NOW,
+        )
+    submit_items(
+        campaign_key=f"campaign-{suffix}",
+        run_key=f"run-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:labels",
+        items=(
+            WorkInput(
+                work_key="cpu-work",
+                input_reference="input:cpu",
+                labels={"device": "cpu"},
+            ),
+            WorkInput(
+                work_key="cuda-work",
+                input_reference="input:cuda",
+                labels={"device": "cuda"},
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        expected_member_count=2,
+        clock=lambda: NOW,
+    )
+    client = _RecordingClient()
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+    assert summary.admitted_total == 2
+    assert {options["queue_name"] for options in client.enqueued} == {
+        "default-queue",
+        "cuda-queue",
+    }
+    del schema

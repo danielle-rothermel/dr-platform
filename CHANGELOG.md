@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Preemptible wrapped stage bodies so operator cancellation interrupts in-flight
+  work without recording application failure.
+- Optional `LabelQueueRoute` selectors on `StageDefinition` for enqueue-time
+  queue selection from work-item labels.
+- Work-item `priority` persisted at submission, used ahead of stable rank in
+  admission, passed to DBOS enqueue when non-zero, and adjustable via
+  `set_work_priority`.
+- `LiveDbosIdentity.resolve_executor_ids` for dynamic sweep executor identity.
+- Alembic revision `0004_work_priority` (irreversible).
+
+### Changed
+
 - Application-directed stage handoff via `StageCompletion` / `StageSuccessor`
   with fan-out, loops, and admission-gated join barriers.
 - `list_predecessor_stage_outputs` and `PredecessorStageOutput` for join

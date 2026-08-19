@@ -14,10 +14,12 @@ from dr_platform._core.identities import (
 if TYPE_CHECKING:
     from dr_platform.execution.stage_completion import StageCompletion
 from dr_platform.pipeline.definitions import (
+    LabelQueueRoute,
     PipelineDefinition,
     PipelineIdentity,
     RunCompletionDefinition,
     StageDefinition,
+    resolve_stage_queue_name,
 )
 from dr_platform.pipeline.registry import PipelineRegistry
 
@@ -195,3 +197,64 @@ def test_run_completion_key_cannot_collide_with_a_stage_key() -> None:
             stages=(_stage("execute"),),
             run_completion=completion,
         )
+
+
+def test_label_queue_routes_reject_empty_selector() -> None:
+    with pytest.raises(ValueError, match="selector must be non-empty"):
+        StageDefinition(
+            key=StageKey("execute"),
+            queue_name="default-queue",
+            label_queue_routes=(
+                LabelQueueRoute(selector={}, queue_name="cuda-queue"),
+            ),
+            workflow=_workflow,
+            args_for=_args_for,
+        )
+
+
+def test_label_queue_routes_reject_overlapping_selectors() -> None:
+    with pytest.raises(ValueError, match="must not overlap"):
+        StageDefinition(
+            key=StageKey("execute"),
+            queue_name="default-queue",
+            label_queue_routes=(
+                LabelQueueRoute(
+                    selector={"device": "cuda"},
+                    queue_name="cuda-queue",
+                ),
+                LabelQueueRoute(
+                    selector={"device": "cuda", "pool": "a"},
+                    queue_name="cuda-a-queue",
+                ),
+            ),
+            workflow=_workflow,
+            args_for=_args_for,
+        )
+
+
+def test_resolve_stage_queue_name_uses_first_matching_route() -> None:
+    stage = StageDefinition(
+        key=StageKey("execute"),
+        queue_name="default-queue",
+        label_queue_routes=(
+            LabelQueueRoute(
+                selector={"device": "cuda"},
+                queue_name="cuda-queue",
+            ),
+            LabelQueueRoute(
+                selector={"device": "cpu"},
+                queue_name="cpu-queue",
+            ),
+        ),
+        workflow=_workflow,
+        args_for=_args_for,
+    )
+
+    assert (
+        resolve_stage_queue_name(stage, labels={"device": "cuda", "tier": "1"})
+        == "cuda-queue"
+    )
+    assert (
+        resolve_stage_queue_name(stage, labels={"tier": "1"})
+        == "default-queue"
+    )

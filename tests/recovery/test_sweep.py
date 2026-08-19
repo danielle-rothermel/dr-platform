@@ -23,6 +23,7 @@ from dr_platform.recovery.cancellation import (
     WorkCancellationResult,
     cancel_work,
 )
+from dr_platform.recovery.live_identity import LiveDbosIdentity
 from dr_platform.recovery.sweep import sweep_abandoned_stages
 from dr_platform.submission.stream import WorkInput
 from tests.conftest import (
@@ -727,6 +728,39 @@ def test_sweep_skips_pending_with_missing_identity_fields(
                         "PENDING",
                         app_version=None,
                         executor_id=None,
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 0
+
+
+def test_sweep_resolver_includes_peer_executor_ids(pg_engine: Engine) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-resolver",
+        campaign_key="campaign-resolver",
+        run_key="run-resolver",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=LiveDbosIdentity(
+            app_version="test",
+            resolve_executor_ids=lambda: ("local", "other-executor"),
+        ),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        executor_id="other-executor",
                     ),
                 )
             )

@@ -73,10 +73,13 @@ from dr_platform.inspection.work_items import (
     list_work_items,
 )
 from dr_platform.pipeline.definitions import (
+    LabelQueueRoute,
     PipelineDefinition,
     PipelineIdentity,
     RunCompletionDefinition,
     StageDefinition,
+    resolve_stage_queue_name,
+    selector_matches,
 )
 from dr_platform.pipeline.registry import (
     PipelineConflictError,
@@ -90,6 +93,7 @@ from dr_platform.recovery.cancellation import (
     cancel_work,
 )
 from dr_platform.recovery.live_identity import LiveDbosIdentity
+from dr_platform.recovery.priority import WorkPriorityResult, set_work_priority
 from dr_platform.recovery.retry import StageRetryResult, retry_stage
 from dr_platform.recovery.run_completion_retry import (
     RunCompletionRetryResult,
@@ -141,6 +145,7 @@ __all__ = [
     "CancellationDisposition",
     "CancelledStageExecution",
     "DispatcherRegistration",
+    "LabelQueueRoute",
     "LedgerSchema",
     "LiveDbosIdentity",
     "PipelineConflictError",
@@ -191,6 +196,7 @@ __all__ = [
     "WorkInput",
     "WorkItemSummary",
     "WorkKey",
+    "WorkPriorityResult",
     "WorkflowCanceller",
     "build_platform_dbos_config",
     "bulk_run_state_counts",
@@ -212,12 +218,15 @@ __all__ = [
     "pause",
     "read_controls",
     "register_scheduled_dispatcher",
+    "resolve_stage_queue_name",
     "resume",
     "retry_run_completion",
     "retry_stage",
     "run_state_counts",
+    "selector_matches",
     "set_selector_capacity",
     "set_stage_capacity",
+    "set_work_priority",
     "submit",
     "sweep_abandoned_run_completions",
     "sweep_abandoned_stages",

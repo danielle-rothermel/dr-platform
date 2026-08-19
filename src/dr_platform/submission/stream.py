@@ -26,6 +26,7 @@ from dr_platform._core.validation import (
     validate_non_empty_string,
     validate_nonnegative_integer,
     validate_positive_integer,
+    validate_work_priority,
 )
 from dr_platform.pipeline.definitions import (
     PipelineIdentity,
@@ -83,6 +84,7 @@ class WorkInput:
     work_key: WorkKey
     input_reference: str
     labels: Mapping[str, str]
+    priority: int
 
     def __init__(
         self,
@@ -90,6 +92,7 @@ class WorkInput:
         work_key: WorkKey | str,
         input_reference: str,
         labels: Mapping[str, str],
+        priority: int = 0,
     ) -> None:
         normalized_work_key = normalize_key(work_key, WorkKey)
         normalized_input_reference = validate_non_empty_string(
@@ -97,6 +100,7 @@ class WorkInput:
             label="input reference",
         )
         normalized_labels = validate_labels(labels, label="work input labels")
+        validate_work_priority(priority)
         object.__setattr__(self, "work_key", normalized_work_key)
         object.__setattr__(self, "input_reference", normalized_input_reference)
         object.__setattr__(
@@ -104,6 +108,7 @@ class WorkInput:
             "labels",
             immutable_mapping(normalized_labels),
         )
+        object.__setattr__(self, "priority", priority)
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,6 +366,9 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
         )
         for member in chunk
     }
+    priorities_by_work_key = {
+        member.work.work_key.value: member.work.priority for member in chunk
+    }
 
     with engine.begin() as connection:
         run = get_pipeline_run(
@@ -388,6 +396,9 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
                         "input_reference": member.work.input_reference,
                         "labels": dict(member.work.labels),
                         "rank": ranks_by_work_key[member.work.work_key.value],
+                        "priority": priorities_by_work_key[
+                            member.work.work_key.value
+                        ],
                     }
                     for member in chunk
                 ]
@@ -434,6 +445,7 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
                 row["input_reference"] != member.work.input_reference
                 or dict(row["labels"]) != dict(member.work.labels)
                 or row["rank"] != expected_rank
+                or row["priority"] != member.work.priority
             ):
                 raise RunMembershipConflictError(
                     "campaign/work identity is bound to different immutable "
@@ -503,6 +515,7 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
                             "state": StageExecutionState.READY.value,
                             "current_attempt": 0,
                             "rank": row["rank"],
+                            "priority": row["priority"],
                             "input_reference": row["input_reference"],
                             "output_reference": None,
                             "created_at": created_at,

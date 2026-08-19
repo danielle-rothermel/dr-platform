@@ -31,6 +31,7 @@ def _candidate(
         stage_execution_id=stage_execution_id,
         work_item_id=1,
         rank=rank,
+        priority=0,
         stage_index=0,
         barrier=False,
         campaign_key="campaign-1",
