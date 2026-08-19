@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, literal, select, text, update
 
 from dr_platform._core.clock import utc_now
 from dr_platform._core.identities import (
@@ -75,7 +75,6 @@ def set_work_priority(  # noqa: PLR0913 -- explicit operator dependencies
     normalized_work = normalize_key(work_key, WorkKey)
     validate_work_priority(priority)
     selected_schema = schema or LedgerSchema()
-    updated_at = clock()
 
     with engine.begin() as connection:
         work_item_id = _resolve_work_item_id(
@@ -88,7 +87,7 @@ def set_work_priority(  # noqa: PLR0913 -- explicit operator dependencies
             connection,
             work_item_id=work_item_id,
             priority=priority,
-            updated_at=updated_at,
+            clock=clock,
             schema=selected_schema,
         )
 
@@ -105,7 +104,7 @@ def sync_work_priority_in_transaction(
     *,
     work_item_id: int,
     priority: int,
-    updated_at: datetime,
+    clock: Callable[[], datetime] = utc_now,
     schema: LedgerSchema,
 ) -> WorkPrioritySyncResult:
     """Apply a priority change under execution-first lock order.
@@ -130,6 +129,7 @@ def sync_work_priority_in_transaction(
         work_item_id=work_item_id,
         schema=schema,
     )
+    updated_at = clock()
     connection.execute(
         update(schema.work_items)
         .where(schema.work_items.c.work_item_id == work_item_id)
@@ -140,7 +140,13 @@ def sync_work_priority_in_transaction(
         connection.execute(
             update(executions)
             .where(executions.c.stage_execution_id.in_(stage_execution_ids))
-            .values(priority=priority, updated_at=updated_at)
+            .values(
+                priority=priority,
+                updated_at=func.greatest(
+                    literal(updated_at),
+                    executions.c.created_at,
+                ),
+            )
         )
     workflow_ids = _update_admitted_workflow_priorities(
         connection,

@@ -466,7 +466,7 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
                     connection,
                     work_item_id=row["work_item_id"],
                     priority=submitted_priority,
-                    updated_at=clock(),
+                    clock=clock,
                     schema=schema,
                 )
 

@@ -397,6 +397,110 @@ def test_set_work_priority_does_not_deadlock_concurrent_handoff(
     assert execute_priority == 0
 
 
+def test_set_work_priority_clamps_updated_at_after_handoff_successor(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    pipeline = PipelineDefinition(
+        key=PipelineKey(f"priority-clamp-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("prepare"),
+                queue_name=f"prepare-{suffix}",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name=f"execute-{suffix}",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    campaign_key = f"campaign-{suffix}"
+    set_stage_capacity(
+        pipeline=pipeline.identity,
+        stage_key=StageKey("prepare"),
+        capacity=1,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    submit_items(
+        campaign_key=campaign_key,
+        run_key=f"run-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:priority-clamp",
+        items=(
+            WorkInput(
+                work_key="work",
+                input_reference="input",
+                labels={},
+                priority=9,
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    admission_client = _RecordingClient()
+    run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(admission_client),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+    workflow_id = _recorded_workflow_id(admission_client.enqueued[0])
+    with pg_engine.begin() as connection:
+        _complete_stage_in_transaction(
+            connection,
+            workflow_id=workflow_id,
+            pipeline_key=pipeline.key.value,
+            pipeline_version=pipeline.version,
+            stage_key="prepare",
+            stage_index=0,
+            succeeded=True,
+            output_reference="output:prepare",
+            terminal_summary={"outcome": "succeeded"},
+            terminal_reference="output:prepare",
+            evidence=None,
+            successors=(
+                StageSuccessor(
+                    stage_key=StageKey("execute"),
+                    stage_index=1,
+                    input_reference="output:prepare",
+                ),
+            ),
+            completed_at=NOW + timedelta(seconds=10),
+        )
+    set_work_priority(
+        campaign_key=campaign_key,
+        work_key="work",
+        priority=0,
+        engine=pg_engine,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    with pg_engine.connect() as connection:
+        created_at, updated_at, priority = connection.execute(
+            select(
+                schema.stage_executions.c.created_at,
+                schema.stage_executions.c.updated_at,
+                schema.stage_executions.c.priority,
+            ).where(
+                schema.stage_executions.c.stage_key == "execute",
+                schema.stage_executions.c.state
+                == StageExecutionState.READY.value,
+            )
+        ).one()
+    assert priority == 0
+    assert updated_at >= created_at
+    assert updated_at == NOW + timedelta(seconds=10)
+
+
 def test_reuse_syncs_dbos_priority_for_admitted_work(
     clean_pg: str,
     pg_engine: Engine,
