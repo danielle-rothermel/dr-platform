@@ -1781,7 +1781,7 @@ def test_admission_pagination_respects_priority_boundary(
     set_stage_capacity(
         pipeline=pipeline.identity,
         stage_key=StageKey("execute"),
-        capacity=2,
+        capacity=4,
         engine=pg_engine,
         clock=lambda: NOW,
     )
@@ -1804,6 +1804,12 @@ def test_admission_pagination_respects_priority_boundary(
                 priority=5,
             ),
             WorkInput(
+                work_key="work-next",
+                input_reference="input:next",
+                labels={},
+                priority=2,
+            ),
+            WorkInput(
                 work_key="work-top",
                 input_reference="input:top",
                 labels={},
@@ -1812,26 +1818,18 @@ def test_admission_pagination_respects_priority_boundary(
         ),
         registry=registry,
         engine=pg_engine,
-        expected_member_count=3,
+        expected_member_count=4,
         clock=lambda: NOW,
     )
     client = _RecordingClient()
-    first = run_admission_pass(
+    summary = run_admission_pass(
         pg_engine,
         client=_as_dbos_client(client),
         registry=registry,
         clock=lambda: NOW,
-        batch_size=1,
+        batch_size=3,
     )
-    assert first.admitted_total == 1
-    second = run_admission_pass(
-        pg_engine,
-        client=_as_dbos_client(client),
-        registry=registry,
-        clock=lambda: NOW + timedelta(seconds=1),
-        batch_size=1,
-    )
-    assert second.admitted_total == 1
+    assert summary.admitted_total == 3
     with pg_engine.connect() as connection:
         admitted_work_keys = (
             connection.execute(
@@ -1855,6 +1853,6 @@ def test_admission_pagination_respects_priority_boundary(
             .scalars()
             .all()
         )
-    assert admitted_work_keys == ["work-top", "work-mid"]
+    assert admitted_work_keys == ["work-top", "work-mid", "work-next"]
     assert remaining_ready == ["work-high"]
     del schema

@@ -771,51 +771,15 @@ def test_sweep_resolver_includes_peer_executor_ids(pg_engine: Engine) -> None:
     assert summary.projected_count == 0
 
 
-def test_sweep_empty_resolver_falls_back_to_static_executor_ids(
+def test_sweep_suppresses_dead_executor_when_resolver_raises_squeue_case(
     pg_engine: Engine,
 ) -> None:
-    _migrate(pg_engine)
+    schema = _migrate(pg_engine)
     registry, workflow_id = _admit_one_for_sweep(
         pg_engine,
-        pipeline_key="sweep-resolver-empty",
-        campaign_key="campaign-resolver-empty",
-        run_key="run-resolver-empty",
-    )
-    del registry
-
-    summary = sweep_abandoned_stages(
-        pg_engine,
-        live_identity=LiveDbosIdentity(
-            app_version="test",
-            executor_ids=frozenset({"local"}),
-            resolve_executor_ids=lambda: (),
-        ),
-        client=_as_dbos_client(
-            _StatusClient(
-                (
-                    _WorkflowStatus(
-                        workflow_id,
-                        "PENDING",
-                        executor_id="local",
-                    ),
-                )
-            )
-        ),
-        clock=_utc_now,
-    )
-
-    assert summary.projected_count == 0
-
-
-def test_sweep_raising_resolver_falls_back_to_static_executor_ids(
-    pg_engine: Engine,
-) -> None:
-    _migrate(pg_engine)
-    registry, workflow_id = _admit_one_for_sweep(
-        pg_engine,
-        pipeline_key="sweep-resolver-error",
-        campaign_key="campaign-resolver-error",
-        run_key="run-resolver-error",
+        pipeline_key="sweep-resolver-squeue",
+        campaign_key="campaign-resolver-squeue",
+        run_key="run-resolver-squeue",
     )
     del registry
 
@@ -826,7 +790,7 @@ def test_sweep_raising_resolver_falls_back_to_static_executor_ids(
         pg_engine,
         live_identity=LiveDbosIdentity(
             app_version="test",
-            executor_ids=frozenset({"local"}),
+            executor_ids=frozenset({"reconciler-local"}),
             resolve_executor_ids=_raise_resolver,
         ),
         client=_as_dbos_client(
@@ -835,7 +799,7 @@ def test_sweep_raising_resolver_falls_back_to_static_executor_ids(
                     _WorkflowStatus(
                         workflow_id,
                         "PENDING",
-                        executor_id="local",
+                        executor_id="slurm-node-17",
                     ),
                 )
             )
@@ -844,6 +808,51 @@ def test_sweep_raising_resolver_falls_back_to_static_executor_ids(
     )
 
     assert summary.projected_count == 0
+    assert summary.executor_resolver_unavailable is True
+    with pg_engine.connect() as connection:
+        state = connection.execute(
+            select(schema.stage_executions.c.state)
+        ).scalar_one()
+    assert state == StageExecutionState.ADMITTED.value
+
+
+def test_sweep_still_projects_stale_app_version_when_resolver_unavailable(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-resolver-stale",
+        campaign_key="campaign-resolver-stale",
+        run_key="run-resolver-stale",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=LiveDbosIdentity(
+            app_version="test",
+            executor_ids=frozenset({"reconciler-local"}),
+            resolve_executor_ids=lambda: (),
+        ),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version="old-version",
+                        executor_id="slurm-node-17",
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 1
+    assert summary.executor_resolver_unavailable is True
+    assert summary.projections[0].state == StageExecutionState.FAILED
 
 
 def test_sweep_skips_pending_with_live_identity(

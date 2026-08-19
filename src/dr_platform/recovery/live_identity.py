@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class LiveExecutorSweepContext:
+    live_executor_ids: frozenset[str]
+    suppress_pending_dead_executor: bool
+    resolver_unavailable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,13 +37,33 @@ class LiveDbosIdentity:
                 "resolve_executor_ids must be callable when provided"
             )
 
-    def live_executor_ids(self) -> frozenset[str]:
-        if self.resolve_executor_ids is not None:
-            try:
-                resolved = frozenset(self.resolve_executor_ids())
-            except Exception:  # noqa: BLE001 -- resolver must not fail sweep
-                return self.executor_ids
-            if not resolved:
-                return self.executor_ids
-            return resolved | self.executor_ids
-        return self.executor_ids
+    def resolve_for_sweep(self) -> LiveExecutorSweepContext:
+        if self.resolve_executor_ids is None:
+            return LiveExecutorSweepContext(
+                live_executor_ids=self.executor_ids,
+                suppress_pending_dead_executor=False,
+                resolver_unavailable=False,
+            )
+        try:
+            resolved = frozenset(self.resolve_executor_ids())
+        except Exception as error:  # noqa: BLE001 -- resolver must not fail sweep
+            logger.debug(
+                "executor resolver failed during sweep",
+                exc_info=error,
+            )
+            return LiveExecutorSweepContext(
+                live_executor_ids=self.executor_ids,
+                suppress_pending_dead_executor=True,
+                resolver_unavailable=True,
+            )
+        if not resolved:
+            return LiveExecutorSweepContext(
+                live_executor_ids=self.executor_ids,
+                suppress_pending_dead_executor=True,
+                resolver_unavailable=True,
+            )
+        return LiveExecutorSweepContext(
+            live_executor_ids=resolved | self.executor_ids,
+            suppress_pending_dead_executor=False,
+            resolver_unavailable=False,
+        )

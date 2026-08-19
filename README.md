@@ -457,10 +457,12 @@ work, the colocated DBOS `workflow_status.priority` row on the current attempt.
 When sweep is enabled, pass `LiveDbosIdentity` with either a non-empty static
 `executor_ids` set or a `resolve_executor_ids` callable that returns the
 current live worker ids (for example from SLURM). Sweep resolves the executor
-set once per pass. On resolver error or an empty result, the platform falls
-back to static `executor_ids` so a transient resolver failure does not project
-the entire fleet as `dead_executor`. The resolver must be fast and
-side-effect-free.
+set once per pass. When the resolver raises or returns an empty collection,
+sweep suppresses pending `dead_executor` projection and sets
+`executor_resolver_unavailable` on the sweep summary so startup recovery can
+handle those rows. Stale app-version and terminal DBOS statuses are still
+projected. When the resolver succeeds, sweep uses the union of resolved ids
+and static `executor_ids`. The resolver must be fast and side-effect-free.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -488,6 +490,7 @@ class RunCompletionRetryResult:
 class SweepSummary:
     projections: tuple[SweepProjection, ...]
     inspected_count: int
+    executor_resolver_unavailable: bool = False
 ```
 
 ```text
@@ -611,7 +614,7 @@ colocation and fail when their URLs identify different databases.
 chain, and `0004_work_priority` is its head — the revision
 `upgrade_platform_schema` installs by default. This development hard cut has
 no compatibility or historical backfill path. Archive any database worth
-retaining before explicitly resetting it. All three revisions refuse downgrade
+retaining before explicitly resetting it. All four revisions refuse downgrade
 outright rather than delete the recorded ledger.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher
@@ -624,7 +627,8 @@ executor set or a `resolve_executor_ids` callable at dispatcher registration.
 When multiple worker processes run, either disable sweep on all but one
 reconciler or supply every live executor ID to the process that owns sweep so
 peer work is not projected as `dead_executor`. If the resolver raises or returns
-an empty collection, sweep falls back to static `executor_ids`.
+an empty collection, sweep suppresses pending `dead_executor` projection and
+sets `executor_resolver_unavailable` on the sweep summary.
 The barrier also has a candidate budget, which
 must be at least its release batch size and bounds all evaluated runs, including
 ineligible and lock-skipped candidates. A persisted cursor rotates blocked or

@@ -69,7 +69,9 @@ title = "Sweep resolves live executor identity dynamically"
 statement = """
 When sweep is enabled, dispatcher registration requires either a non-empty \
 static executor set or a resolver, and sweep compares pending workflow \
-executor ids against the resolver's current view."""
+executor ids against the resolver's current view. When the resolver raises or \
+returns an empty collection, sweep suppresses pending dead_executor projection \
+and sets executor_resolver_unavailable on the sweep summary."""
 rationale = """
 A static frozenset captured at registration projects legitimately running \
 cluster work as dead when a reconciler on another host owns sweep."""

@@ -26,11 +26,11 @@ if TYPE_CHECKING:
 
 
 _UPDATE_ADMITTED_WORKFLOW_PRIORITY = (
-    "UPDATE dbos.workflow_status "
-    "SET priority = :priority "
-    "WHERE workflow_uuid = :workflow_id"
+    "UPDATE "
+    + DBOS_WORKFLOW_STATUS_TABLE
+    + " SET priority = :priority "
+    + "WHERE workflow_uuid = :workflow_id"
 )
-assert DBOS_WORKFLOW_STATUS_TABLE == "dbos.workflow_status"
 
 _NONTERMINAL_STATES = frozenset(
     {

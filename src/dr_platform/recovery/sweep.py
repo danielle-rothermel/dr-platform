@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import UNIQUE, StrEnum, verify
 from typing import TYPE_CHECKING
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
 
 
 DEFAULT_SWEEP_BATCH_SIZE = 10_000
+
+logger = logging.getLogger(__name__)
 
 
 @verify(UNIQUE)
@@ -78,11 +81,14 @@ def _pending_abandonment_evidence(
     executor_id: str | None,
     live_identity: LiveDbosIdentity,
     live_executor_ids: frozenset[str],
+    suppress_dead_executor: bool,
 ) -> AbandonmentEvidence | None:
     if app_version is None or executor_id is None:
         return None
     if app_version != live_identity.app_version:
         return AbandonmentEvidence.STALE_APP_VERSION
+    if suppress_dead_executor:
+        return None
     if executor_id not in live_executor_ids:
         return AbandonmentEvidence.DEAD_EXECUTOR
     return None
@@ -101,6 +107,7 @@ class SweepProjection:
 class SweepSummary:
     projections: tuple[SweepProjection, ...]
     inspected_count: int
+    executor_resolver_unavailable: bool = False
 
     @property
     def projected_count(self) -> int:
@@ -120,6 +127,7 @@ class RunCompletionSweepProjection:
 class RunCompletionSweepSummary:
     projections: tuple[RunCompletionSweepProjection, ...]
     inspected_count: int
+    executor_resolver_unavailable: bool = False
 
     @property
     def projected_count(self) -> int:
@@ -154,7 +162,12 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
     """
     validate_positive_integer(batch_size, label="sweep batch size")
     selected_schema = schema or LedgerSchema()
-    live_executor_ids = live_identity.live_executor_ids()
+    executor_context = live_identity.resolve_for_sweep()
+    if executor_context.resolver_unavailable:
+        logger.info(
+            "sweep executor resolver unavailable; "
+            "suppressing pending dead_executor projection"
+        )
     projections: list[SweepProjection] = []
     inspected_count = 0
     cursor: int | None = None
@@ -192,7 +205,10 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
                     app_version=status.app_version,
                     executor_id=status.executor_id,
                     live_identity=live_identity,
-                    live_executor_ids=live_executor_ids,
+                    live_executor_ids=executor_context.live_executor_ids,
+                    suppress_dead_executor=(
+                        executor_context.suppress_pending_dead_executor
+                    ),
                 )
                 if evidence is None:
                     continue
@@ -237,6 +253,7 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
     return SweepSummary(
         projections=tuple(projections),
         inspected_count=inspected_count,
+        executor_resolver_unavailable=executor_context.resolver_unavailable,
     )
 
 
@@ -352,6 +369,7 @@ def _run_completion_abandonment_error_summary(
     *,
     live_identity: LiveDbosIdentity,
     live_executor_ids: frozenset[str],
+    suppress_dead_executor: bool,
 ) -> dict[str, object] | None:
     if status.status in _FAILED_DBOS_STATUSES:
         return _dbos_failure_error_summary(status)
@@ -361,6 +379,7 @@ def _run_completion_abandonment_error_summary(
             executor_id=status.executor_id,
             live_identity=live_identity,
             live_executor_ids=live_executor_ids,
+            suppress_dead_executor=suppress_dead_executor,
         )
         if evidence is None:
             return None
@@ -398,7 +417,12 @@ def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection bou
     """
     validate_positive_integer(batch_size, label="sweep batch size")
     selected_schema = schema or LedgerSchema()
-    live_executor_ids = live_identity.live_executor_ids()
+    executor_context = live_identity.resolve_for_sweep()
+    if executor_context.resolver_unavailable:
+        logger.info(
+            "sweep executor resolver unavailable; "
+            "suppressing pending dead_executor projection"
+        )
     projections: list[RunCompletionSweepProjection] = []
     inspected_count = 0
     cursor: int | None = None
@@ -428,7 +452,10 @@ def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection bou
             error_summary = _run_completion_abandonment_error_summary(
                 status,
                 live_identity=live_identity,
-                live_executor_ids=live_executor_ids,
+                live_executor_ids=executor_context.live_executor_ids,
+                suppress_dead_executor=(
+                    executor_context.suppress_pending_dead_executor
+                ),
             )
             if error_summary is None:
                 continue
@@ -462,6 +489,7 @@ def sweep_abandoned_run_completions(  # noqa: PLR0913 -- explicit projection bou
     return RunCompletionSweepSummary(
         projections=tuple(projections),
         inspected_count=inspected_count,
+        executor_resolver_unavailable=executor_context.resolver_unavailable,
     )
 
 

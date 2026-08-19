@@ -103,6 +103,7 @@ select = [
 ignore = ["PLR1711", "S101", "TRY003"]
 
 [tool.ruff.lint.per-file-ignores]
+"src/dr_platform/recovery/priority.py" = ["S608"]
 "tests/**/*.py" = ["PLR2004", "PLC0415", "ARG001", "ARG005", "S603", "TC002", "TC003"]
 
 [tool.ty.src]

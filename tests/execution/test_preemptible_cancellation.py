@@ -141,9 +141,9 @@ def _run_cancelled_preemptible_test(
             ).scalar_one()
         assert state == StageExecutionState.CANCELLED.value
         assert attempt_count == 1
-        assert terminal_summary is None or terminal_summary.get("outcome") != (
-            "failed"
-        )
+        assert terminal_summary is not None
+        assert terminal_summary["producer"] == "cancellation"
+        assert terminal_summary["outcome"] == "cancelled"
     finally:
         registration.close()
         DBOS.destroy()
