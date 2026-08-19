@@ -364,17 +364,119 @@ def test_list_stage_executions_filters_by_key_state_and_range(
     assert rows[0].input_reference == "row:in:5"
 
 
-def test_list_stage_executions_requires_max_when_min_is_set(
+def test_list_stage_executions_filters_min_only(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        work_item_id, optim_index, _fanin_index = (
+            _seed_double_deferral_episode(
+                connection,
+                schema,
+            )
+        )
+
+    rows = list_stage_executions(
+        work_item_id,
+        min_stage_index=optim_index,
+        engine=pg_engine,
+    )
+
+    assert [row.stage_index for row in rows] == [5, 6, 7]
+
+
+def test_list_stage_executions_filters_max_only(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        work_item_id, _optim_index, fanin_index = (
+            _seed_double_deferral_episode(
+                connection,
+                schema,
+            )
+        )
+
+    rows = list_stage_executions(
+        work_item_id,
+        max_stage_index=fanin_index,
+        engine=pg_engine,
+    )
+
+    assert [row.stage_index for row in rows] == [0, 1, 2, 3, 4, 5, 6]
+
+
+def test_resolve_barrier_join_cluster_rejects_equal_stage_keys(
     pg_engine: Engine,
 ) -> None:
     schema = _migrate(pg_engine)
     with pg_engine.begin() as connection:
         work_item_id = _seed_single_deferral_episode(connection, schema)
 
-    with pytest.raises(ValueError, match="max stage index is required"):
-        list_stage_executions(
+    with pytest.raises(ValueError, match="must differ"):
+        resolve_barrier_join_cluster(
             work_item_id,
-            min_stage_index=0,
+            3,
+            optim_step_stage_key=StageKey("eval_row"),
+            eval_row_stage_key=StageKey("eval_row"),
+            engine=pg_engine,
+        )
+
+
+def _seed_same_key_fan_out_episode(
+    connection: Connection,
+    schema: LedgerSchema,
+) -> int:
+    work_item_id = _seed_work_item(connection, schema)
+    _succeed_stage(
+        connection,
+        work_item_id=work_item_id,
+        stage_key="split",
+        stage_index=0,
+        input_reference="split:in",
+        output_reference="split:out",
+    )
+    _succeed_stage(
+        connection,
+        work_item_id=work_item_id,
+        stage_key="branch",
+        stage_index=1,
+        input_reference="row:1",
+        output_reference="row:out:1",
+    )
+    _succeed_stage(
+        connection,
+        work_item_id=work_item_id,
+        stage_key="branch",
+        stage_index=2,
+        input_reference="row:2",
+        output_reference="row:out:2",
+    )
+    _succeed_stage(
+        connection,
+        work_item_id=work_item_id,
+        stage_key="join",
+        stage_index=3,
+        input_reference="join:in",
+        output_reference="join:out",
+        barrier=True,
+    )
+    return work_item_id
+
+
+def test_resolve_barrier_join_cluster_rejects_same_key_fan_out_topology(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        work_item_id = _seed_same_key_fan_out_episode(connection, schema)
+
+    with pytest.raises(ValueError, match="must differ"):
+        resolve_barrier_join_cluster(
+            work_item_id,
+            3,
+            optim_step_stage_key=StageKey("branch"),
+            eval_row_stage_key=StageKey("branch"),
             engine=pg_engine,
         )
 

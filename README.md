@@ -102,6 +102,10 @@ async def join(payload: AdmissionPayload) -> StageCompletion:
         output_reference=f"join:{payload.input_reference}:{refs}"
     )
 ```
+
+This example is valid for a single fan-out episode. Multi-deferral or loop
+pipelines must scope reads with ``stage_key`` and ``min_stage_index``; see
+**Deferral episodes and barrier fan-in** below.
 Fan-out inserts every successor in one handoff transaction. Loops reuse a
 `stage_key` at a higher `stage_index`; identity is `(work_item_id,
 stage_index)`. Join successors set `barrier=True` on `StageSuccessor`;
@@ -120,9 +124,10 @@ optim_step @ O  →  eval_row @ O+1 .. O+N  →  eval_fanin @ F (= O+N+1)
 ```
 
 Admission holds the barrier join ready until every lower ``stage_index`` for
-the work item is ``SUCCEEDED``. After multiple deferrals on one work item,
-unfiltered predecessor reads include every lower succeeded stage; scope one
-episode with exclusive index bounds (``stage_index > O``, ``stage_index < F``):
+the work item is ``SUCCEEDED``. That admission gate is work-item-wide; join
+bodies must scope reads to one episode. After multiple deferrals on one work
+item, unfiltered predecessor reads include every lower succeeded stage; scope
+one episode with exclusive index bounds (``stage_index > O``, ``stage_index < F``):
 
 ```python
 async def eval_fanin(payload: AdmissionPayload) -> StageCompletion:
@@ -138,10 +143,14 @@ async def eval_fanin(payload: AdmissionPayload) -> StageCompletion:
 ```
 
 ``list_stage_executions`` lists executions with the same exclusive bounds for
-episode discovery. ``resolve_barrier_join_cluster`` validates that the open
-interval ``(O, F)`` contains only eval-row stages and returns the deferring
-optim step, eval rows, and fan-in record. The platform stores and transports
-references only; payload meaning stays in the application layer.
+episode discovery. Its bounds are independently optional and min-only queries
+have no implicit upper cap. ``list_predecessor_stage_outputs`` instead defaults
+the exclusive upper bound to ``below_stage_index`` when ``max_stage_index`` is
+omitted. ``resolve_barrier_join_cluster`` requires distinct optim and eval
+stage keys and validates that the open interval ``(O, F)`` contains only
+eval-row stages, returning the deferring optim step, eval rows, and fan-in
+record. The platform stores and transports references only; payload meaning
+stays in the application layer.
 
 Failed or cancelled lower siblings block the join until an operator
 `retry_stage`s the sibling, not the join. This is ~80% best-effort behavior:

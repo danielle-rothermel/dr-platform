@@ -6,6 +6,11 @@ open interval ``(O, F)`` between the deferring step at ``O`` and the barrier
 join at ``F`` is expected to contain only eval-row stages at contiguous
 indices ``O+1 .. F-1``. The platform validates topology and references only;
 payload meaning stays in the application layer.
+
+``resolve_barrier_join_cluster`` requires distinct ``optim_step_stage_key`` and
+``eval_row_stage_key`` values. The platform allows reusing a ``stage_key`` at
+distinct indices elsewhere, but this helper cannot infer which same-key row is
+the deferring step versus an eval row.
 """
 
 from __future__ import annotations
@@ -46,6 +51,11 @@ def resolve_barrier_join_cluster(  # noqa: PLR0913 -- explicit reader inputs
     validate_nonnegative_integer(fanin_stage_index, label="fanin stage index")
     normalized_optim_key = normalize_key(optim_step_stage_key, StageKey)
     normalized_eval_key = normalize_key(eval_row_stage_key, StageKey)
+    if normalized_optim_key == normalized_eval_key:
+        raise ValueError(
+            "optim_step_stage_key and eval_row_stage_key must differ for "
+            "barrier cluster resolution"
+        )
 
     fanin_rows = list_stage_executions(
         work_item_id,

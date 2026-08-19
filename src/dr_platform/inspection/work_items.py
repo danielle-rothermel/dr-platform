@@ -29,8 +29,8 @@ from dr_platform._core.validation import validate_nonnegative_integer
 from dr_platform.inspection._validation import (
     DEFAULT_INSPECTION_LIMIT,
     require_campaign,
-    validate_exclusive_stage_index_range,
     validate_limit,
+    validate_optional_exclusive_stage_index_bounds,
     validate_work_item_cursor,
     validate_work_item_id,
 )
@@ -183,8 +183,8 @@ def list_predecessor_stage_outputs(  # noqa: PLR0913 -- explicit reader filters
     ``min_stage_index`` and ``max_stage_index`` are **exclusive** bounds on
     ``stage_index`` (``stage_index > min``, ``stage_index < max``). When
     ``max_stage_index`` is omitted, the exclusive upper bound is
-    ``below_stage_index``. Filters are ANDed; unset filters apply no
-    constraint.
+    ``below_stage_index`` (unlike ``list_stage_executions``, which has no
+    implicit cap). Filters are ANDed; unset filters apply no constraint.
 
     Typical fan-in for one deferral episode at index ``F`` after deferring
     ``optim_step`` at ``O``::
@@ -199,14 +199,12 @@ def list_predecessor_stage_outputs(  # noqa: PLR0913 -- explicit reader filters
     """
     validate_work_item_id(work_item_id)
     validate_nonnegative_integer(below_stage_index, label="below stage index")
-    effective_max = (
-        max_stage_index if max_stage_index is not None else below_stage_index
-    )
     if max_stage_index is not None and max_stage_index > below_stage_index:
         raise ValueError("max stage index must not exceed below stage index")
-    validate_exclusive_stage_index_range(
+    validate_optional_exclusive_stage_index_bounds(
         min_stage_index=min_stage_index,
-        max_stage_index=effective_max,
+        max_stage_index=max_stage_index,
+        default_max_stage_index=below_stage_index,
     )
     normalized_stage_key = (
         normalize_key(stage_key, StageKey).value
@@ -249,21 +247,19 @@ def list_stage_executions(  # noqa: PLR0913 -- explicit reader filters
     """Return stage executions for one work item with optional filters.
 
     ``min_stage_index`` and ``max_stage_index`` are **exclusive** bounds on
-    ``stage_index``. Rows are ordered by ``stage_index``, then
-    ``stage_execution_id``. An empty tuple is valid.
+    ``stage_index``. Unlike ``list_predecessor_stage_outputs``, there is no
+    implicit upper bound: a min-only query is open-ended above. Rows are
+    ordered by ``stage_index``, then ``stage_execution_id``. An empty tuple
+    is valid.
     """
     validate_work_item_id(work_item_id)
     if state is not None and not isinstance(state, StageExecutionState):
         raise TypeError("state must be a StageExecutionState")
-    if min_stage_index is not None or max_stage_index is not None:
-        if max_stage_index is None:
-            raise ValueError(
-                "max stage index is required when min stage index is set"
-            )
-        validate_exclusive_stage_index_range(
-            min_stage_index=min_stage_index,
-            max_stage_index=max_stage_index,
-        )
+    validate_optional_exclusive_stage_index_bounds(
+        min_stage_index=min_stage_index,
+        max_stage_index=max_stage_index,
+        default_max_stage_index=None,
+    )
     normalized_stage_key = (
         normalize_key(stage_key, StageKey).value
         if stage_key is not None

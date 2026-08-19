@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   episode discovery and topology validation.
 - README documentation for the ledger-native barrier fan-out / fan-in pattern.
 
+### Fixed
+
+- `list_stage_executions` accepts a min-only exclusive lower bound.
+- `resolve_barrier_join_cluster` rejects equal optim and eval stage keys.
+
 ## 0.2.2 - 2026-08-19
 
 ### Added

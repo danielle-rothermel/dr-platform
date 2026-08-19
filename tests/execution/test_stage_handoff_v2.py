@@ -1172,6 +1172,7 @@ def test_fan_out_barrier_join_streams_end_to_end_through_wrapped_workflows(
         outputs = list_predecessor_stage_outputs(
             payload.work_item_id,
             payload.stage_index,
+            min_stage_index=0,
             engine=pg_engine,
         )
         refs = "|".join(item.output_reference for item in outputs)
@@ -1324,9 +1325,9 @@ def test_fan_out_barrier_join_streams_end_to_end_through_wrapped_workflows(
                     schema.stage_executions.c.stage_index == 3
                 )
             ).scalar_one()
-        assert output_reference == (
-            "join:join:pending:split:output|branch:row:a|branch:row:b"
-        )
+            assert output_reference == (
+                "join:join:pending:branch:row:a|branch:row:b"
+            )
     finally:
         if registration is not None:
             registration.close()
@@ -1378,6 +1379,7 @@ def test_failed_sibling_blocks_barrier_join_until_retry_e2e(
         outputs = list_predecessor_stage_outputs(
             payload.work_item_id,
             payload.stage_index,
+            min_stage_index=0,
             engine=pg_engine,
         )
         refs = "|".join(item.output_reference for item in outputs)
