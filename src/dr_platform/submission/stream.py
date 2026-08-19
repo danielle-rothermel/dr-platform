@@ -7,7 +7,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from dr_serialize import canonical_json_bytes
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from dr_platform._core.clock import utc_now
@@ -32,6 +32,7 @@ from dr_platform.pipeline.definitions import (
     PipelineIdentity,
     validate_pipeline_identity,
 )
+from dr_platform.recovery.priority import sync_work_priority_in_transaction
 from dr_platform.submission.runs import (
     PipelineRunRecord,
     close_registration,
@@ -164,15 +165,6 @@ class RegistrationClosureError(RuntimeError):
 
 class RunMembershipConflictError(RuntimeError):
     pass
-
-
-_REUSE_PRIORITY_SYNC_STATES = frozenset(
-    {
-        StageExecutionState.READY.value,
-        StageExecutionState.ADMITTED.value,
-        StageExecutionState.FAILED.value,
-    }
-)
 
 
 class _MembershipDigester:
@@ -470,26 +462,12 @@ def _commit_chunk(  # noqa: PLR0913 -- explicit chunk dependencies
                 )
             submitted_priority = member.work.priority
             if row["priority"] != submitted_priority:
-                work_item_id = row["work_item_id"]
-                updated_at = clock()
-                connection.execute(
-                    update(work_items)
-                    .where(work_items.c.work_item_id == work_item_id)
-                    .values(priority=submitted_priority)
-                )
-                executions = schema.stage_executions
-                connection.execute(
-                    update(executions)
-                    .where(
-                        executions.c.work_item_id == work_item_id,
-                        executions.c.state.in_(
-                            tuple(sorted(_REUSE_PRIORITY_SYNC_STATES))
-                        ),
-                    )
-                    .values(
-                        priority=submitted_priority,
-                        updated_at=updated_at,
-                    )
+                sync_work_priority_in_transaction(
+                    connection,
+                    work_item_id=row["work_item_id"],
+                    priority=submitted_priority,
+                    updated_at=clock(),
+                    schema=schema,
                 )
 
         memberships = schema.run_memberships

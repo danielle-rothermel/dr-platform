@@ -395,3 +395,204 @@ def test_set_work_priority_does_not_deadlock_concurrent_handoff(
         ).scalar_one()
     assert work_priority == 0
     assert execute_priority == 0
+
+
+def test_reuse_syncs_dbos_priority_for_admitted_work(
+    clean_pg: str,
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    pipeline = wrap_pipeline_workflows(
+        PipelineDefinition(
+            key=PipelineKey(f"priority-reuse-{suffix}"),
+            version=1,
+            stages=(
+                StageDefinition(
+                    key=StageKey("execute"),
+                    queue_name=f"reuse-{suffix}",
+                    workflow=_workflow,
+                    args_for=_args_for,
+                ),
+            ),
+        ),
+        max_recovery_attempts=1,
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    campaign_key = f"campaign-{suffix}"
+    set_stage_capacity(
+        pipeline=pipeline.identity,
+        stage_key=StageKey("execute"),
+        capacity=1,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    submit_items(
+        campaign_key=campaign_key,
+        run_key=f"run-a-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:priority",
+        items=(
+            WorkInput(
+                work_key="work",
+                input_reference="input",
+                labels={},
+                priority=9,
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    Queue(pipeline.stages[0].queue_name, priority_enabled=True)
+    registration = _launch_dbos(
+        clean_pg,
+        suffix=suffix,
+        engine=pg_engine,
+        registry=registry,
+    )
+    try:
+        summary = run_admission_pass(
+            pg_engine,
+            client=registration.client,
+            registry=registry,
+            clock=lambda: NOW,
+        )
+        assert summary.admitted_total == 1
+        with pg_engine.connect() as connection:
+            workflow_id = connection.execute(
+                select(schema.stage_attempts.c.workflow_id)
+                .select_from(
+                    schema.stage_attempts.join(schema.stage_executions).join(
+                        schema.work_items
+                    )
+                )
+                .where(
+                    schema.work_items.c.work_key == "work",
+                    schema.stage_executions.c.state
+                    == StageExecutionState.ADMITTED.value,
+                )
+            ).scalar_one()
+        submit_items(
+            campaign_key=campaign_key,
+            run_key=f"run-b-{suffix}",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:priority",
+            items=(
+                WorkInput(
+                    work_key="work",
+                    input_reference="input",
+                    labels={},
+                    priority=1,
+                ),
+            ),
+            registry=registry,
+            engine=pg_engine,
+            clock=lambda: NOW + timedelta(seconds=1),
+        )
+        with pg_engine.connect() as connection:
+            dbos_priority = connection.execute(
+                text(
+                    """
+                    SELECT priority FROM dbos.workflow_status
+                    WHERE workflow_uuid = :workflow_id
+                    """
+                ),
+                {"workflow_id": workflow_id},
+            ).scalar_one()
+        assert dbos_priority == 1
+    finally:
+        registration.close()
+        DBOS.destroy()
+
+
+def test_reuse_priority_sync_does_not_deadlock_set_work_priority(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    pipeline = PipelineDefinition(
+        key=PipelineKey(f"priority-reuse-race-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name=f"reuse-race-{suffix}",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    campaign_key = f"campaign-{suffix}"
+    set_stage_capacity(
+        pipeline=pipeline.identity,
+        stage_key=StageKey("execute"),
+        capacity=1,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    submit_items(
+        campaign_key=campaign_key,
+        run_key=f"run-a-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:priority",
+        items=(
+            WorkInput(
+                work_key="work",
+                input_reference="input",
+                labels={},
+                priority=9,
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(_RecordingClient()),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+
+    def reuse_work() -> None:
+        submit_items(
+            campaign_key=campaign_key,
+            run_key=f"run-b-{suffix}",
+            pipeline=pipeline.identity,
+            execution_config_reference="config:priority",
+            items=(
+                WorkInput(
+                    work_key="work",
+                    input_reference="input",
+                    labels={},
+                    priority=0,
+                ),
+            ),
+            registry=registry,
+            engine=pg_engine,
+            clock=lambda: NOW + timedelta(seconds=2),
+        )
+
+    def boost_priority() -> None:
+        set_work_priority(
+            campaign_key=campaign_key,
+            work_key="work",
+            priority=1,
+            engine=pg_engine,
+            clock=lambda: NOW + timedelta(seconds=2),
+        )
+
+    start = Barrier(2)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reuse_future = executor.submit(
+            lambda: (start.wait(timeout=10), reuse_work())[1]
+        )
+        priority_future = executor.submit(
+            lambda: (start.wait(timeout=10), boost_priority())[1]
+        )
+        reuse_future.result(timeout=10)
+        priority_future.result(timeout=10)
