@@ -8,7 +8,7 @@ from alembic.config import Config
 from dr_platform._core.ledger.schema import DEFAULT_PREFIX
 
 PLATFORM_BASELINE_REVISION = "0001_staging_baseline"
-PLATFORM_HEAD_REVISION = "0003_stage_index_identity"
+PLATFORM_HEAD_REVISION = "0004_work_priority"
 
 _ALEMBIC_DIR = Path(__file__).resolve().parent / "alembic"
 

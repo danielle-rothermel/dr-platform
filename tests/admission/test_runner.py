@@ -5,12 +5,15 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier
 from typing import TYPE_CHECKING, cast
+from unittest import mock
+from uuid import uuid4
 
 import pytest
 from dbos import DBOSClient, EnqueueOptions
 from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import IntegrityError
 
+import dr_platform.admission.runner as admission_runner
 from dr_platform._core.identities import (
     CampaignKey,
     CampaignWorkIdentity,
@@ -30,6 +33,7 @@ from dr_platform._core.ledger.executions import (
 )
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import (
+    set_stage_capacity,
     upsert_stage_control,
 )
 from dr_platform.admission.runner import (
@@ -37,13 +41,19 @@ from dr_platform.admission.runner import (
     AdmissionSummary,
     StageIdentityRecord,
     _Control,
+    _lock_candidates,
     _lock_controls,
+    _Page,
     _StageIdentity,
     run_admission_pass,
 )
-from dr_platform.execution.handoff import _complete_stage_in_transaction
+from dr_platform.execution.handoff import (
+    _complete_stage_in_transaction,
+    wrap_pipeline_workflows,
+)
 from dr_platform.execution.stage_completion import StageSuccessor
 from dr_platform.pipeline.definitions import (
+    LabelQueueRoute,
     PipelineDefinition,
     PipelineIdentity,
     StageDefinition,
@@ -1677,3 +1687,550 @@ def test_barrier_cancelled_sibling_blocks_join(
 
     assert summary.admitted_total == 0
     assert summary.skipped_for_barrier == 1
+
+
+def test_label_queue_routes_select_enqueue_queue_name(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    declared = PipelineDefinition(
+        key=PipelineKey(f"label-queue-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name="default-queue",
+                label_queue_routes=(
+                    LabelQueueRoute(
+                        selector={"device": "cuda"},
+                        queue_name="cuda-queue",
+                    ),
+                ),
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    pipeline = wrap_pipeline_workflows(declared, max_recovery_attempts=1)
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    with pg_engine.begin() as connection:
+        upsert_stage_control(
+            connection,
+            pipeline_key=pipeline.key.value,
+            pipeline_version=pipeline.version,
+            stage_key="execute",
+            selector={},
+            capacity=2,
+            paused=False,
+            updated_at=NOW,
+        )
+    submit_items(
+        campaign_key=f"campaign-{suffix}",
+        run_key=f"run-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:labels",
+        items=(
+            WorkInput(
+                work_key="cpu-work",
+                input_reference="input:cpu",
+                labels={"device": "cpu"},
+            ),
+            WorkInput(
+                work_key="cuda-work",
+                input_reference="input:cuda",
+                labels={"device": "cuda"},
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        expected_member_count=2,
+        clock=lambda: NOW,
+    )
+    client = _RecordingClient()
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+    assert summary.admitted_total == 2
+    assert {options["queue_name"] for options in client.enqueued} == {
+        "default-queue",
+        "cuda-queue",
+    }
+    del schema
+
+
+def test_lock_candidates_keyset_continues_within_priority(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    pipeline = PipelineDefinition(
+        key=PipelineKey(f"priority-rank-page-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name="execute-queue",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    set_stage_capacity(
+        pipeline=pipeline.identity,
+        stage_key=StageKey("execute"),
+        capacity=5,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    submit_items(
+        campaign_key=f"campaign-{suffix}",
+        run_key=f"run-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:priority",
+        items=(
+            WorkInput(
+                work_key="work-rank-a",
+                input_reference="input:a",
+                labels={},
+                priority=1,
+            ),
+            WorkInput(
+                work_key="work-rank-b",
+                input_reference="input:b",
+                labels={},
+                priority=1,
+            ),
+            WorkInput(
+                work_key="work-rank-c",
+                input_reference="input:c",
+                labels={},
+                priority=1,
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        expected_member_count=3,
+        clock=lambda: NOW,
+    )
+    with pg_engine.begin() as connection:
+        first_page = _lock_candidates(
+            connection,
+            schema=schema,
+            limit=2,
+            after=None,
+            full_control_ids=set(),
+            excluded=set(),
+            excluded_candidates=set(),
+        )
+        assert len(first_page) == 2
+        assert all(candidate.priority == 1 for candidate in first_page)
+        last = first_page[-1]
+        second_page = _lock_candidates(
+            connection,
+            schema=schema,
+            limit=1,
+            after=(last.priority, last.rank, last.stage_execution_id),
+            full_control_ids=set(),
+            excluded=set(),
+            excluded_candidates=set(),
+        )
+    assert len(second_page) == 1
+    assert second_page[0].priority == 1
+    assert second_page[0].rank > last.rank or (
+        second_page[0].rank == last.rank
+        and second_page[0].stage_execution_id > last.stage_execution_id
+    )
+    assert second_page[0].work_key not in {
+        candidate.work_key for candidate in first_page
+    }
+    del schema
+
+
+def test_lock_candidates_keyset_continues_across_priority_boundary(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    pipeline = PipelineDefinition(
+        key=PipelineKey(f"priority-cross-page-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name="execute-queue",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    set_stage_capacity(
+        pipeline=pipeline.identity,
+        stage_key=StageKey("execute"),
+        capacity=5,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    submit_items(
+        campaign_key=f"campaign-{suffix}",
+        run_key=f"run-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:priority",
+        items=(
+            WorkInput(
+                work_key="work-p0",
+                input_reference="input:0",
+                labels={},
+                priority=0,
+            ),
+            WorkInput(
+                work_key="work-p1",
+                input_reference="input:1",
+                labels={},
+                priority=1,
+            ),
+            WorkInput(
+                work_key="work-p2",
+                input_reference="input:2",
+                labels={},
+                priority=2,
+            ),
+            WorkInput(
+                work_key="work-p5",
+                input_reference="input:5",
+                labels={},
+                priority=5,
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        expected_member_count=4,
+        clock=lambda: NOW,
+    )
+    with pg_engine.begin() as connection:
+        first_page = _lock_candidates(
+            connection,
+            schema=schema,
+            limit=2,
+            after=None,
+            full_control_ids=set(),
+            excluded=set(),
+            excluded_candidates=set(),
+        )
+        assert [candidate.priority for candidate in first_page] == [0, 1]
+        last = first_page[-1]
+        second_page = _lock_candidates(
+            connection,
+            schema=schema,
+            limit=1,
+            after=(last.priority, last.rank, last.stage_execution_id),
+            full_control_ids=set(),
+            excluded=set(),
+            excluded_candidates=set(),
+        )
+    assert len(second_page) == 1
+    assert second_page[0].priority == 2
+    assert second_page[0].work_key == "work-p2"
+    del schema
+
+
+class _FailWorkKeysClient(_RecordingClient):
+    def __init__(self, *, fail_work_keys: frozenset[str]) -> None:
+        super().__init__()
+        self.fail_work_keys = fail_work_keys
+
+    def enqueue_in_transaction(
+        self,
+        _connection: Connection,
+        options: EnqueueOptions,
+        *args: object,
+        **_kwargs: object,
+    ) -> object:
+        payload = args[0]
+        assert isinstance(payload, dict)
+        work_key = payload.get("work_key")
+        if work_key in self.fail_work_keys:
+            raise RuntimeError(f"cannot enqueue {work_key}")
+        return super().enqueue_in_transaction(
+            _connection,
+            options,
+            *args,
+            **_kwargs,
+        )
+
+
+def test_admission_pagination_admits_across_priority_boundary(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    pipeline = PipelineDefinition(
+        key=PipelineKey(f"priority-cross-admit-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name="execute-queue",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    set_stage_capacity(
+        pipeline=pipeline.identity,
+        stage_key=StageKey("execute"),
+        capacity=5,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    submit_items(
+        campaign_key=f"campaign-{suffix}",
+        run_key=f"run-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:priority",
+        items=(
+            WorkInput(
+                work_key="work-p0",
+                input_reference="input:0",
+                labels={},
+                priority=0,
+            ),
+            WorkInput(
+                work_key="work-p1",
+                input_reference="input:1",
+                labels={},
+                priority=1,
+            ),
+            WorkInput(
+                work_key="work-p2",
+                input_reference="input:2",
+                labels={},
+                priority=2,
+            ),
+            WorkInput(
+                work_key="work-p3",
+                input_reference="input:3",
+                labels={},
+                priority=3,
+            ),
+            WorkInput(
+                work_key="work-p5",
+                input_reference="input:5",
+                labels={},
+                priority=5,
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        expected_member_count=5,
+        clock=lambda: NOW,
+    )
+    client = _FailWorkKeysClient(fail_work_keys=frozenset({"work-p3"}))
+    summary = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW,
+        batch_size=4,
+    )
+    assert summary.admitted_total == 4
+    with pg_engine.connect() as connection:
+        admitted_work_keys = (
+            connection.execute(
+                select(schema.work_items.c.work_key)
+                .select_from(schema.stage_executions.join(schema.work_items))
+                .where(
+                    schema.stage_executions.c.state
+                    == StageExecutionState.ADMITTED.value
+                )
+                .order_by(
+                    schema.stage_executions.c.priority,
+                    schema.stage_executions.c.rank,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        remaining_ready = (
+            connection.execute(
+                select(schema.work_items.c.work_key)
+                .select_from(schema.stage_executions.join(schema.work_items))
+                .where(schema.stage_executions.c.state == "ready")
+            )
+            .scalars()
+            .all()
+        )
+    assert admitted_work_keys == [
+        "work-p0",
+        "work-p1",
+        "work-p2",
+        "work-p5",
+    ]
+    assert remaining_ready == ["work-p3"]
+    del schema
+
+
+def test_admission_pagination_respects_priority_boundary(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    pipeline = PipelineDefinition(
+        key=PipelineKey(f"priority-page-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name="execute-queue",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    set_stage_capacity(
+        pipeline=pipeline.identity,
+        stage_key=StageKey("execute"),
+        capacity=2,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    submit_items(
+        campaign_key=f"campaign-{suffix}",
+        run_key=f"run-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:priority",
+        items=(
+            WorkInput(
+                work_key="work-top",
+                input_reference="input:top",
+                labels={},
+                priority=0,
+            ),
+            WorkInput(
+                work_key="work-mid-a",
+                input_reference="input:mid-a",
+                labels={},
+                priority=1,
+            ),
+            WorkInput(
+                work_key="work-mid-b",
+                input_reference="input:mid-b",
+                labels={},
+                priority=1,
+            ),
+            WorkInput(
+                work_key="work-next",
+                input_reference="input:next",
+                labels={},
+                priority=2,
+            ),
+            WorkInput(
+                work_key="work-high",
+                input_reference="input:high",
+                labels={},
+                priority=5,
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        expected_member_count=5,
+        clock=lambda: NOW,
+    )
+    with pg_engine.connect() as connection:
+        priority_one_keys = (
+            connection.execute(
+                select(schema.work_items.c.work_key)
+                .select_from(schema.stage_executions.join(schema.work_items))
+                .where(schema.stage_executions.c.priority == 1)
+                .order_by(schema.stage_executions.c.rank)
+            )
+            .scalars()
+            .all()
+        )
+    assert len(priority_one_keys) == 2
+    first_mid_key, second_mid_key = priority_one_keys
+    client = _RecordingClient()
+    lock_page_after: list[tuple[int, int, int] | None] = []
+    real_lock_page = admission_runner._lock_page
+
+    def _spy_lock_page(  # noqa: PLR0913 -- mirrors _lock_page
+        connection: Connection,
+        *,
+        schema: LedgerSchema,
+        limit: int,
+        after: tuple[int, int, int] | None,
+        full_control_ids: set[int],
+        excluded: set[_StageIdentity],
+        excluded_candidates: set[int],
+    ) -> _Page | None:
+        lock_page_after.append(after)
+        return real_lock_page(
+            connection,
+            schema=schema,
+            limit=limit,
+            after=after,
+            full_control_ids=full_control_ids,
+            excluded=excluded,
+            excluded_candidates=excluded_candidates,
+        )
+
+    with mock.patch.object(
+        admission_runner,
+        "_lock_page",
+        side_effect=_spy_lock_page,
+    ):
+        summary = run_admission_pass(
+            pg_engine,
+            client=_as_dbos_client(client),
+            registry=registry,
+            clock=lambda: NOW,
+            batch_size=3,
+        )
+    assert len(lock_page_after) == 2
+    assert lock_page_after[1] is not None
+    assert summary.admitted_total == 2
+    with pg_engine.connect() as connection:
+        admitted_work_keys = (
+            connection.execute(
+                select(schema.work_items.c.work_key)
+                .select_from(schema.stage_executions.join(schema.work_items))
+                .where(
+                    schema.stage_executions.c.state
+                    == StageExecutionState.ADMITTED.value
+                )
+                .order_by(
+                    schema.stage_executions.c.priority,
+                    schema.stage_executions.c.rank,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        remaining_ready = (
+            connection.execute(
+                select(schema.work_items.c.work_key)
+                .select_from(schema.stage_executions.join(schema.work_items))
+                .where(schema.stage_executions.c.state == "ready")
+                .order_by(
+                    schema.stage_executions.c.priority,
+                    schema.stage_executions.c.rank,
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert admitted_work_keys == ["work-top", first_mid_key]
+    assert remaining_ready == [second_mid_key, "work-next", "work-high"]
+    del schema

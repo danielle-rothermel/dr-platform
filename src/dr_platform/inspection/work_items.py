@@ -218,6 +218,7 @@ def _decode_stage_execution(row: RowMapping) -> StageExecutionRecord:
         state=StageExecutionState(row["state"]),
         current_attempt=row["current_attempt"],
         rank=row["rank"],
+        priority=row["priority"],
         input_reference=row["input_reference"],
         output_reference=row["output_reference"],
         barrier=row["barrier"],

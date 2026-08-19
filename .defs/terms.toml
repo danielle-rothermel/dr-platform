@@ -111,9 +111,16 @@ exported_symbols = ["PipelineDefinition"]
 name = "pipeline stage"
 definition = """
 One registered scheduling and durability step in a pipeline declaration. It \
-names an application-owned queue and operation plus the transformation from \
-immutable submission facts to operation arguments; it is not a graph node."""
-exported_symbols = ["StageDefinition"]
+names an application-owned default queue, optional exact-label queue routes \
+with non-empty selectors and distinct route queue names, and operation plus \
+the transformation from immutable submission facts to operation arguments; \
+routes overlap only when shared label keys agree on values. It is not a \
+graph node."""
+exported_symbols = [
+  "StageDefinition",
+  "LabelQueueRoute",
+  "resolve_stage_queue_name",
+]
 part_of = ["pipeline definition"]
 
 [[terms]]
@@ -276,16 +283,17 @@ part_of = ["stage attempt"]
 name = "label"
 definition = """
 An application-supplied string key and value attached to work and used only \
-for exact-match admission selection. The platform does not interpret its \
-meaning."""
+for exact-match admission selection and optional queue routing. The platform \
+does not interpret its meaning."""
+exported_symbols = ["selector_matches"]
 part_of = ["work input", "work item"]
 
 [[terms]]
 name = "work input"
 definition = """
 One validated immutable item at the submission boundary, carrying work \
-identity, a non-empty input reference, and labels independently of the source \
-transport."""
+identity, a non-empty input reference, optional priority, and labels \
+independently of the source transport."""
 exported_symbols = ["WorkInput", "WorkKey"]
 
 [[terms]]
@@ -408,11 +416,11 @@ definition = """
 A process-local registration that owns its durable-workflow client and runs \
 bounded admission, run-barrier, and abandoned-stage sweep passes on independent \
 schedules. The sweep registers by default unless disabled at registration time. \
-The caller supplies the live application version and executor ids observed at \
-registration so identity-orphaned pending work can be projected without time \
-thresholds. Supply the deployment-wide live executor set on the process that \
-owns sweep when multiple workers run. Its registration remains alive with the \
-runtime."""
+The caller supplies the live application version and either a static executor \
+set or a resolver observed at sweep time so identity-orphaned pending work \
+can be projected without time thresholds. Supply the deployment-wide live \
+executor set on the process that owns sweep when multiple workers run. Its \
+registration remains alive with the runtime."""
 exported_symbols = [
   "register_scheduled_dispatcher",
   "DispatcherRegistration",
@@ -464,6 +472,14 @@ exported_symbols = [
   "retry_run_completion",
   "RunCompletionRetryResult",
 ]
+
+[[terms]]
+name = "work priority"
+definition = """
+A non-negative integer attached to a work item that orders admission and, \
+when enqueued, DBOS queue dequeue. Lower numbers are preferred. Operators may \
+raise priority after submission for ready or admitted work."""
+exported_symbols = ["set_work_priority", "WorkPriorityResult"]
 
 [[terms]]
 name = "cancellation"

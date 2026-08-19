@@ -1196,7 +1196,7 @@ def test_partial_ready_admission_index_exists(pg_engine: Engine) -> None:
             text(
                 """
                 SELECT indexdef LIKE
-                    '% USING btree (stage_key, rank) '
+                    '% USING btree (stage_key, priority, rank) '
                     || 'WHERE (state = ''ready''::text)%'
                 FROM pg_indexes
                 WHERE schemaname = current_schema()
@@ -1207,3 +1207,55 @@ def test_partial_ready_admission_index_exists(pg_engine: Engine) -> None:
         ).scalar_one()
 
     assert index_matches is True
+
+
+def test_insert_stage_execution_replays_sync_priority_after_boost(
+    pg_engine: Engine,
+) -> None:
+    schema = LedgerSchema()
+    _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        insert_pipeline_run(
+            connection,
+            run_key="run-priority-replay",
+            campaign_key="campaign-priority-replay",
+            pipeline_key="pipeline",
+            pipeline_version=1,
+            execution_config_reference="config:1",
+            created_at=NOW,
+        )
+        work_item_id = connection.execute(
+            schema.work_items.insert()
+            .values(
+                campaign_key="campaign-priority-replay",
+                work_key="work-priority-replay",
+                origin_run_key="run-priority-replay",
+                input_reference="input:1",
+                labels={},
+                rank=1,
+                priority=5,
+            )
+            .returning(schema.work_items.c.work_item_id)
+        ).scalar_one()
+        first = insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=1,
+            created_at=NOW,
+        )
+        assert first.priority == 5
+        connection.execute(
+            schema.work_items.update()
+            .where(schema.work_items.c.work_item_id == work_item_id)
+            .values(priority=0)
+        )
+        replayed = insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=1,
+            created_at=NOW + timedelta(seconds=1),
+        )
+    assert replayed.stage_execution_id == first.stage_execution_id
+    assert replayed.priority == 0

@@ -19,6 +19,7 @@ from dr_platform.pipeline.definitions import (
     StageDefinition,
 )
 from dr_platform.pipeline.registry import PipelineRegistry
+from dr_platform.recovery.priority import set_work_priority
 from dr_platform.submission.runs import (
     PipelineRunConflictError,
     get_pipeline_run,
@@ -335,6 +336,68 @@ def test_reuse_rejects_different_execution_provenance(
             members=(_member(0),),
             execution_config_reference="config:other",
         )
+
+
+def test_reuse_allows_work_after_operator_priority_boost(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, pipeline = _registry()
+    _submit(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-1",
+        members=(
+            RunMemberInput(
+                ordinal=0,
+                work=WorkInput(
+                    work_key="work-0",
+                    input_reference="input:0",
+                    labels={"cohort": "blue"},
+                    priority=0,
+                ),
+            ),
+        ),
+    )
+    set_work_priority(
+        campaign_key="campaign-1",
+        work_key="work-0",
+        priority=5,
+        engine=pg_engine,
+    )
+    second = _submit(
+        pg_engine,
+        registry,
+        pipeline,
+        run_key="run-2",
+        members=(
+            RunMemberInput(
+                ordinal=0,
+                work=WorkInput(
+                    work_key="work-0",
+                    input_reference="input:0",
+                    labels={"cohort": "blue"},
+                    priority=0,
+                ),
+            ),
+            _member(1, ordinal=1),
+        ),
+    )
+    assert second.reused_work_count == 1
+    with pg_engine.connect() as connection:
+        work_priority = connection.execute(
+            select(schema.work_items.c.priority).where(
+                schema.work_items.c.work_key == "work-0"
+            )
+        ).scalar_one()
+        execution_priority = connection.execute(
+            select(schema.stage_executions.c.priority)
+            .select_from(schema.stage_executions.join(schema.work_items))
+            .where(schema.work_items.c.work_key == "work-0")
+        ).scalar_one()
+    assert work_priority == 0
+    assert execution_priority == 0
 
 
 def test_membership_digest_has_a_pinned_canonical_representation() -> None:

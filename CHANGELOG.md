@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Preemptible wrapped stage bodies so operator cancellation interrupts in-flight
+  work without recording application failure.
+- Optional `LabelQueueRoute` selectors on `StageDefinition` for enqueue-time
+  queue selection from work-item labels.
+- Work-item `priority` persisted at submission, used ahead of stable rank in
+  admission, passed to DBOS enqueue when non-zero, and adjustable via
+  `set_work_priority`.
+- `LiveDbosIdentity.resolve_executor_ids` for dynamic sweep executor identity.
+- Alembic revision `0004_work_priority` (irreversible).
+
+### Changed
+
 - Application-directed stage handoff via `StageCompletion` / `StageSuccessor`
   with fan-out, loops, and admission-gated join barriers.
 - `list_predecessor_stage_outputs` and `PredecessorStageOutput` for join
@@ -18,9 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `AdmissionPayload.work_item_id` and persisted per-stage `input_reference`.
 - `CancelledStageExecution` on the public cancellation API.
 - Alembic revision `0003_stage_index_identity` (irreversible).
-
-### Changed
-
 - Stage execution identity is `(work_item_id, stage_index)`; stage workflow-id
   digests include `stage_index` (invalidates in-flight stage workflow ids).
 - `str` stage returns are permitted only at the registration index; otherwise
@@ -33,11 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `cancel_work` is item-level: every nonterminal execution is cancelled.
 - Work-item status and run-barrier release counts derive from precedence over
   all executions, not `max(stage_index)`.
+- Label queue route overlap validation accepts disjoint label keys; route queue
+  names must be distinct at registration.
 
 ### Fixed
 
 - Repeated `cancel_work` on already-cancelled fan-out work reissues every stored
   admitted workflow identity, not just one representative row.
+- Sweep resolver failures and empty results suppress pending `dead_executor`
+  projection and set `executor_resolver_unavailable` on sweep summaries
+  instead of projecting every pending workflow as `dead_executor`.
+- Successor stage execution insert replays sync priority after an operator boost.
 - Alembic revision `0003_stage_index_identity` validates the schema prefix via
   `LedgerSchema` before interpolating privileged DDL.
 - `StageSuccessor` rejects boolean `stage_index` values at construction time

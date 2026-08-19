@@ -37,6 +37,9 @@ from dr_platform.execution.handoff import (
     _pipeline_stage_workflows,
     is_pipeline_wrapped,
 )
+from dr_platform.recovery.live_identity import (
+    LiveDbosIdentity,  # noqa: TC001 -- runtime validation
+)
 from dr_platform.recovery.sweep import (
     DEFAULT_SWEEP_BATCH_SIZE,
     sweep_abandoned_run_completions,
@@ -53,7 +56,6 @@ if TYPE_CHECKING:
     from dr_platform.admission.runner import AdmissionSummary
     from dr_platform.completion.barrier import RunBarrierSummary
     from dr_platform.pipeline.registry import PipelineRegistry
-    from dr_platform.recovery.live_identity import LiveDbosIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +207,23 @@ def _log_barrier_summary(summary: RunBarrierSummary) -> None:
         )
 
 
+def _validate_live_dbos_identity(
+    live_dbos_identity: LiveDbosIdentity,
+    *,
+    sweep_enabled: bool,
+) -> None:
+    if not sweep_enabled:
+        return
+    if (
+        not live_dbos_identity.executor_ids
+        and live_dbos_identity.resolve_executor_ids is None
+    ):
+        raise ValueError(
+            "live_dbos_identity must supply executor_ids or "
+            "resolve_executor_ids when sweep is enabled"
+        )
+
+
 def _validate_dispatcher_settings(  # noqa: PLR0913 -- explicit dispatcher settings
     *,
     config: PlatformDbosConfig,
@@ -308,6 +327,10 @@ def register_scheduled_dispatcher(  # noqa: PLR0913
         sweep_cron=sweep_cron,
         sweep_batch_size=sweep_batch_size,
     )
+    _validate_live_dbos_identity(
+        live_dbos_identity,
+        sweep_enabled=sweep_cron is not None,
+    )
     _require_wrapped_registry(registry)
     validate_registry_recovery_cap(registry, config.max_recovery_attempts)
     ownership_token = _DISPATCHER_OWNERSHIP.reserve()
@@ -392,11 +415,14 @@ def register_scheduled_dispatcher(  # noqa: PLR0913
                 )
                 logger.info(
                     "abandoned-stage sweep inspected=%s projected=%s; "
-                    "run-completion sweep inspected=%s projected=%s",
+                    "run-completion sweep inspected=%s projected=%s; "
+                    "executor_resolver_unavailable=%s",
                     stage_summary.inspected_count,
                     stage_summary.projected_count,
                     completion_summary.inspected_count,
                     completion_summary.projected_count,
+                    stage_summary.executor_resolver_unavailable
+                    or completion_summary.executor_resolver_unavailable,
                 )
 
             sweep_workflow = cast("ScheduledWorkflow", sweep)

@@ -7,7 +7,7 @@ from typing import cast
 import pytest
 from dbos import DBOS
 from dbos._dbos import _get_or_create_dbos_registry
-from sqlalchemy import create_engine
+from sqlalchemy import Engine, create_engine
 
 from dr_platform._core.identities import (
     PipelineKey,
@@ -27,6 +27,7 @@ from dr_platform.pipeline.definitions import (
     StageDefinition,
 )
 from dr_platform.pipeline.registry import PipelineRegistry
+from dr_platform.recovery.live_identity import LiveDbosIdentity
 from dr_platform.recovery.sweep import RunCompletionSweepSummary, SweepSummary
 from dr_platform.runtime import dispatcher
 from dr_platform.runtime.dbos import PlatformDbosConfig
@@ -865,3 +866,29 @@ def test_sweep_cron_registers_a_second_scheduled_workflow(
     assert completion_args[1]["batch_size"] == 25
     assert "live_identity" in completion_args[1]
     assert client.destroyed
+
+
+def test_register_rejects_empty_executor_identity_when_sweep_enabled(
+    pg_engine: Engine,
+) -> None:
+    config = PlatformDbosConfig(
+        database_url=pg_engine.url.render_as_string(hide_password=False),
+        system_database_url=pg_engine.url.render_as_string(
+            hide_password=False
+        ),
+        max_recovery_attempts=1,
+    )
+    registry = PipelineRegistry()
+    registry.register(
+        wrap_pipeline_workflows(_declared_pipeline(), max_recovery_attempts=1)
+    )
+    with pytest.raises(ValueError, match="resolve_executor_ids"):
+        dispatcher.register_scheduled_dispatcher(
+            live_dbos_identity=LiveDbosIdentity(
+                app_version="test",
+                executor_ids=frozenset(),
+            ),
+            config=config,
+            engine=pg_engine,
+            registry=registry,
+        )

@@ -188,6 +188,7 @@ class LedgerSchema:
             Column("input_reference", Text, nullable=False),
             Column("labels", JSONB, nullable=False),
             Column("rank", BigInteger, nullable=False),
+            Column("priority", Integer, nullable=False, server_default="0"),
             UniqueConstraint(
                 "campaign_key",
                 "work_key",
@@ -205,6 +206,10 @@ class LedgerSchema:
             CheckConstraint(
                 "rank > 0",
                 name=name("ck_work_items_rank"),
+            ),
+            CheckConstraint(
+                "priority >= 0 AND priority <= 2147483647",
+                name=name("ck_work_items_priority"),
             ),
         )
         Index(
@@ -263,6 +268,7 @@ class LedgerSchema:
             Column("state", Text, nullable=False),
             Column("current_attempt", Integer, nullable=False),
             Column("rank", BigInteger, nullable=False),
+            Column("priority", Integer, nullable=False, server_default="0"),
             Column("input_reference", Text),
             Column("output_reference", Text),
             Column(
@@ -304,6 +310,10 @@ class LedgerSchema:
                 name=name("ck_stage_executions_rank"),
             ),
             CheckConstraint(
+                "priority >= 0 AND priority <= 2147483647",
+                name=name("ck_stage_executions_priority"),
+            ),
+            CheckConstraint(
                 "updated_at >= created_at",
                 name=name("ck_stage_executions_updated_time"),
             ),
@@ -311,6 +321,7 @@ class LedgerSchema:
         Index(
             name("ix_stage_executions_ready_admission"),
             self.stage_executions.c.stage_key,
+            self.stage_executions.c.priority,
             self.stage_executions.c.rank,
             postgresql_where=text("state = 'ready'"),
         )

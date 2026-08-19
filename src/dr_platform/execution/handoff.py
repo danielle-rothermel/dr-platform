@@ -121,6 +121,7 @@ def wrap_pipeline_workflows(
         StageDefinition(
             key=stage.key,
             queue_name=stage.queue_name,
+            label_queue_routes=stage.label_queue_routes,
             workflow=_wrap_stage_workflow(
                 pipeline=pipeline,
                 registration_stage_index=stage_index,
@@ -205,6 +206,10 @@ def _wrap_stage_workflow(
         name=f"{workflow_name}_complete",
     )(_complete_stage_transaction)
 
+    @DBOS.step(preemptible=True, name=f"{workflow_name}_body")
+    async def _run_application_body(*workflow_args: object) -> object:
+        return await stage.workflow(*workflow_args)
+
     @DBOS.workflow(
         name=workflow_name,
         max_recovery_attempts=max_recovery_attempts,
@@ -216,7 +221,7 @@ def _wrap_stage_workflow(
         persisted_stage_index = payload.stage_index
         try:
             workflow_args = _validate_workflow_args(stage.args_for(payload))
-            raw_result = await stage.workflow(*workflow_args)
+            raw_result = await _run_application_body(*workflow_args)
             if isinstance(raw_result, str) and (
                 persisted_stage_index != registration_stage_index
             ):

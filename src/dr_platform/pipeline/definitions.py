@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
+from dr_platform._core.frozen import immutable_mapping
 from dr_platform._core.identities import (
     PipelineKey,
     RunCompletionKey,
@@ -32,6 +33,39 @@ def _validate_args_for(value: object) -> None:
         raise TypeError("args_for must be synchronous")
 
 
+def selector_matches(
+    selector: Mapping[str, str], labels: Mapping[str, str]
+) -> bool:
+    return all(labels.get(key) == value for key, value in selector.items())
+
+
+def _selectors_can_both_match(
+    left: Mapping[str, str],
+    right: Mapping[str, str],
+) -> bool:
+    shared = set(left) & set(right)
+    if not shared:
+        return False
+    return all(left[key] == right[key] for key in shared)
+
+
+def _validate_label_queue_routes(
+    routes: tuple[LabelQueueRoute, ...],
+) -> None:
+    for route in routes:
+        if not route.selector:
+            raise ValueError("label queue route selector must be non-empty")
+    route_queue_names = [route.queue_name for route in routes]
+    if len(set(route_queue_names)) != len(route_queue_names):
+        raise ValueError("label queue route queue names must be distinct")
+    for index, left in enumerate(routes):
+        for right in routes[index + 1 :]:
+            if _selectors_can_both_match(left.selector, right.selector):
+                raise ValueError(
+                    "label queue routes must not overlap on the same labels"
+                )
+
+
 @dataclass(frozen=True, slots=True)
 class PipelineIdentity:
     key: PipelineKey
@@ -50,18 +84,57 @@ def validate_pipeline_identity(value: object) -> PipelineIdentity:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class LabelQueueRoute:
+    selector: Mapping[str, str]
+    queue_name: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.selector, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in self.selector.items()
+        ):
+            raise TypeError(
+                "label queue route selector must map strings to strings"
+            )
+        object.__setattr__(
+            self, "selector", immutable_mapping(dict(self.selector))
+        )
+        validate_key_value(self.queue_name, label="queue name")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class StageDefinition:
     key: StageKey
     queue_name: str
     workflow: StageWorkflowCallable
     args_for: ArgumentsCallable
+    label_queue_routes: tuple[LabelQueueRoute, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, StageKey):
             raise TypeError("stage key must be a StageKey")
         validate_key_value(self.queue_name, label="queue name")
+        if not isinstance(self.label_queue_routes, tuple) or not all(
+            isinstance(route, LabelQueueRoute)
+            for route in self.label_queue_routes
+        ):
+            raise TypeError(
+                "label queue routes must be a tuple of LabelQueueRoute values"
+            )
+        _validate_label_queue_routes(self.label_queue_routes)
         _validate_async_workflow(self.workflow)
         _validate_args_for(self.args_for)
+
+
+def resolve_stage_queue_name(
+    stage: StageDefinition,
+    *,
+    labels: Mapping[str, str],
+) -> str:
+    for route in stage.label_queue_routes:
+        if selector_matches(route.selector, labels):
+            return route.queue_name
+    return stage.queue_name
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

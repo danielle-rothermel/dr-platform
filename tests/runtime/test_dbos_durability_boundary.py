@@ -47,7 +47,7 @@ def _dbos_attribute_calls(tree: ast.AST) -> list[ast.Call]:
     ]
 
 
-def test_platform_declares_no_dbos_steps() -> None:
+def test_platform_declares_only_preemptible_stage_body_step() -> None:
     step_usages: list[str] = []
     for path in _platform_source_files():
         tree = ast.parse(path.read_text())
@@ -57,7 +57,7 @@ def test_platform_declares_no_dbos_steps() -> None:
             if attr.attr == "step":
                 step_usages.append(f"{path.name}:{call.lineno}")
 
-    assert step_usages == []
+    assert step_usages == ["handoff.py:209"]
 
 
 def test_stage_wrapper_is_declared_as_dbos_workflow() -> None:

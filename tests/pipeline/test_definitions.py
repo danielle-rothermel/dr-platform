@@ -13,11 +13,14 @@ from dr_platform._core.identities import (
 
 if TYPE_CHECKING:
     from dr_platform.execution.stage_completion import StageCompletion
+from dr_platform.execution.handoff import wrap_pipeline_workflows
 from dr_platform.pipeline.definitions import (
+    LabelQueueRoute,
     PipelineDefinition,
     PipelineIdentity,
     RunCompletionDefinition,
     StageDefinition,
+    resolve_stage_queue_name,
 )
 from dr_platform.pipeline.registry import PipelineRegistry
 
@@ -195,3 +198,158 @@ def test_run_completion_key_cannot_collide_with_a_stage_key() -> None:
             stages=(_stage("execute"),),
             run_completion=completion,
         )
+
+
+def test_wrap_pipeline_workflows_preserves_label_queue_routes() -> None:
+    declared = PipelineDefinition(
+        key=PipelineKey("label-routes"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name="default-queue",
+                label_queue_routes=(
+                    LabelQueueRoute(
+                        selector={"device": "cuda"},
+                        queue_name="cuda-queue",
+                    ),
+                ),
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    wrapped = wrap_pipeline_workflows(declared, max_recovery_attempts=1)
+    assert (
+        wrapped.stages[0].label_queue_routes
+        == declared.stages[0].label_queue_routes
+    )
+
+
+def test_label_queue_routes_reject_empty_selector() -> None:
+    with pytest.raises(ValueError, match="selector must be non-empty"):
+        StageDefinition(
+            key=StageKey("execute"),
+            queue_name="default-queue",
+            label_queue_routes=(
+                LabelQueueRoute(selector={}, queue_name="cuda-queue"),
+            ),
+            workflow=_workflow,
+            args_for=_args_for,
+        )
+
+
+def test_label_queue_routes_accept_disjoint_selectors() -> None:
+    stage = StageDefinition(
+        key=StageKey("execute"),
+        queue_name="default-queue",
+        label_queue_routes=(
+            LabelQueueRoute(
+                selector={"accel": "cuda"},
+                queue_name="cuda-queue",
+            ),
+            LabelQueueRoute(
+                selector={"tier": "batch"},
+                queue_name="batch-queue",
+            ),
+        ),
+        workflow=_workflow,
+        args_for=_args_for,
+    )
+    assert (
+        resolve_stage_queue_name(stage, labels={"accel": "cuda"})
+        == "cuda-queue"
+    )
+    assert (
+        resolve_stage_queue_name(stage, labels={"tier": "batch"})
+        == "batch-queue"
+    )
+
+
+def test_label_queue_routes_accept_conflicting_shared_keys() -> None:
+    stage = StageDefinition(
+        key=StageKey("execute"),
+        queue_name="default-queue",
+        label_queue_routes=(
+            LabelQueueRoute(
+                selector={"a": "1"},
+                queue_name="queue-a",
+            ),
+            LabelQueueRoute(
+                selector={"a": "2"},
+                queue_name="queue-b",
+            ),
+        ),
+        workflow=_workflow,
+        args_for=_args_for,
+    )
+    assert resolve_stage_queue_name(stage, labels={"a": "1"}) == "queue-a"
+    assert resolve_stage_queue_name(stage, labels={"a": "2"}) == "queue-b"
+
+
+def test_label_queue_routes_reject_duplicate_queue_names() -> None:
+    with pytest.raises(ValueError, match="must be distinct"):
+        StageDefinition(
+            key=StageKey("execute"),
+            queue_name="default-queue",
+            label_queue_routes=(
+                LabelQueueRoute(
+                    selector={"device": "cuda"},
+                    queue_name="shared-queue",
+                ),
+                LabelQueueRoute(
+                    selector={"tier": "batch"},
+                    queue_name="shared-queue",
+                ),
+            ),
+            workflow=_workflow,
+            args_for=_args_for,
+        )
+
+
+def test_label_queue_routes_reject_overlapping_selectors() -> None:
+    with pytest.raises(ValueError, match="must not overlap"):
+        StageDefinition(
+            key=StageKey("execute"),
+            queue_name="default-queue",
+            label_queue_routes=(
+                LabelQueueRoute(
+                    selector={"device": "cuda"},
+                    queue_name="cuda-queue",
+                ),
+                LabelQueueRoute(
+                    selector={"device": "cuda", "pool": "a"},
+                    queue_name="cuda-a-queue",
+                ),
+            ),
+            workflow=_workflow,
+            args_for=_args_for,
+        )
+
+
+def test_resolve_stage_queue_name_uses_first_matching_route() -> None:
+    stage = StageDefinition(
+        key=StageKey("execute"),
+        queue_name="default-queue",
+        label_queue_routes=(
+            LabelQueueRoute(
+                selector={"device": "cuda"},
+                queue_name="cuda-queue",
+            ),
+            LabelQueueRoute(
+                selector={"device": "cpu"},
+                queue_name="cpu-queue",
+            ),
+        ),
+        workflow=_workflow,
+        args_for=_args_for,
+    )
+
+    assert (
+        resolve_stage_queue_name(stage, labels={"device": "cuda", "tier": "1"})
+        == "cuda-queue"
+    )
+    assert (
+        resolve_stage_queue_name(stage, labels={"tier": "1"})
+        == "default-queue"
+    )
