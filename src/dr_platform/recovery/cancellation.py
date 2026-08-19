@@ -77,9 +77,6 @@ class CancelledStageExecution:
 class WorkCancellationResult:
     work_item_id: int
     cancellations: tuple[CancelledStageExecution, ...]
-    disposition: CancellationDisposition
-    delegated_workflow_id: str | None
-    stage_execution: StageExecutionRecord
 
 
 def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
@@ -125,18 +122,9 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
                 for item in cancellations
                 if item.delegated_workflow_id is not None
             )
-            representative = cancellations[0].stage_execution
-            disposition = _aggregate_disposition(cancellations)
             result = WorkCancellationResult(
                 work_item_id=resolved_work_item_id,
                 cancellations=cancellations,
-                disposition=disposition,
-                delegated_workflow_id=(
-                    cancellations[0].delegated_workflow_id
-                    if len(cancellations) == 1
-                    else None
-                ),
-                stage_execution=representative,
             )
         else:
             representative = _terminal_representative(
@@ -152,9 +140,6 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
             result = WorkCancellationResult(
                 work_item_id=resolved_work_item_id,
                 cancellations=(),
-                disposition=CancellationDisposition.ALREADY_TERMINAL,
-                delegated_workflow_id=repair_workflow_id,
-                stage_execution=representative,
             )
             if repair_workflow_id is not None:
                 delegated.append(repair_workflow_id)
@@ -162,24 +147,6 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
     for workflow_id in delegated:
         client.cancel_workflow(workflow_id, cancel_children=False)
     return result
-
-
-def _aggregate_disposition(
-    cancellations: tuple[CancelledStageExecution, ...],
-) -> CancellationDisposition:
-    if len(cancellations) == 1:
-        return cancellations[0].disposition
-    if any(
-        item.disposition is CancellationDisposition.CANCELLED_ADMITTED
-        for item in cancellations
-    ):
-        return CancellationDisposition.CANCELLED_ADMITTED
-    if any(
-        item.disposition is CancellationDisposition.CANCELLED_FAILED
-        for item in cancellations
-    ):
-        return CancellationDisposition.CANCELLED_FAILED
-    return CancellationDisposition.CANCELLED_READY
 
 
 def _resolve_work_item_id(

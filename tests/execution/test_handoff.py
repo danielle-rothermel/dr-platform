@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import inspect
-import time
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
-from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
+from dbos import DBOS, DBOSClient, Queue
 from dr_serialize import Jsonable
 from dr_store.content_addressing import (
     OBJECT_REFERENCE_PREFIX,
@@ -17,7 +16,7 @@ from dr_store.content_addressing import (
 )
 from dr_store.object_store import ObjectStore
 from dr_store.storage_backends.postgresql import PostgresBackend
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, select
 
 from dr_platform._core.identities import (
     CampaignKey,
@@ -59,15 +58,23 @@ from tests.conftest import (
     default_live_dbos_identity,
     submit_items,
 )
+from tests.conftest import (
+    handoff_utc_now as _utc_now,
+)
+from tests.conftest import (
+    recorded_workflow_id as _recorded_workflow_id,
+)
+from tests.conftest import (
+    stage_state_count as _stage_state_count,
+)
+from tests.conftest import (
+    wait_for_handoff as _wait_for,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from dr_platform._core.ledger.schema import LedgerSchema
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _pipeline(
@@ -178,19 +185,6 @@ def _launch_dbos(
     return registration
 
 
-def _wait_for(
-    predicate: Callable[[], bool],
-    *,
-    timeout_seconds: float = 5,
-) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.02)
-    raise AssertionError("timed out waiting for DBOS stage workflow")
-
-
 def _wait_for_workflow_statuses(
     client: DBOSClient,
     workflow_ids: list[str],
@@ -210,30 +204,6 @@ def _wait_for_workflow_statuses(
             == len(workflow_ids)
         )
     )
-
-
-def _stage_state_count(
-    engine: Engine,
-    schema: LedgerSchema,
-    *,
-    stage_index: int,
-    state: StageExecutionState,
-) -> int:
-    with engine.connect() as connection:
-        return connection.execute(
-            select(func.count())
-            .select_from(schema.stage_executions)
-            .where(
-                schema.stage_executions.c.stage_index == stage_index,
-                schema.stage_executions.c.state == state.value,
-            )
-        ).scalar_one()
-
-
-def _recorded_workflow_id(options: EnqueueOptions) -> str:
-    workflow_id = options.get("workflow_id")
-    assert workflow_id is not None
-    return workflow_id
 
 
 def _submit_and_admit_one(

@@ -19,7 +19,10 @@ from dr_platform._core.ledger.attempts import (
     list_stage_attempts,
     record_stage_attempt_terminal,
 )
-from dr_platform._core.ledger.executions import transition_stage_execution
+from dr_platform._core.ledger.executions import (
+    get_stage_execution,
+    transition_stage_execution,
+)
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import (
@@ -502,9 +505,14 @@ def test_cancel_terminalizes_retry_prepared_attempt_without_delegation(
     )
 
     assert retried.stage_execution.state is StageExecutionState.READY
-    assert result.stage_execution.state is StageExecutionState.CANCELLED
-    assert result.disposition is CancellationDisposition.CANCELLED_READY
-    assert result.delegated_workflow_id is None
+    assert len(result.cancellations) == 1
+    assert result.cancellations[0].stage_execution.state is (
+        StageExecutionState.CANCELLED
+    )
+    assert result.cancellations[0].disposition is (
+        CancellationDisposition.CANCELLED_READY
+    )
+    assert result.cancellations[0].delegated_workflow_id is None
     assert canceller.cancelled == []
     with pg_engine.connect() as connection:
         second_attempt = get_stage_attempt(
@@ -619,10 +627,11 @@ def test_cancellation_delegates_only_an_admitted_exact_attempt(
         work_item_id=ready[1],
         clock=lambda: NOW + timedelta(seconds=1),
     )
-    assert ready_result.disposition is (
+    assert len(ready_result.cancellations) == 1
+    assert ready_result.cancellations[0].disposition is (
         CancellationDisposition.CANCELLED_READY
     )
-    assert ready_result.delegated_workflow_id is None
+    assert ready_result.cancellations[0].delegated_workflow_id is None
     assert canceller.cancelled == []
 
     admitted_result = cancel_work(
@@ -631,8 +640,8 @@ def test_cancellation_delegates_only_an_admitted_exact_attempt(
         work_item_id=admitted[1],
         clock=lambda: NOW + timedelta(seconds=2),
     )
-    workflow_id = admitted_result.delegated_workflow_id
-    assert admitted_result.disposition is (
+    workflow_id = admitted_result.cancellations[0].delegated_workflow_id
+    assert admitted_result.cancellations[0].disposition is (
         CancellationDisposition.CANCELLED_ADMITTED
     )
     assert workflow_id is not None
@@ -748,7 +757,10 @@ def test_live_dbos_cancellation_targets_only_the_admitted_workflow(
             load_input=False,
             load_output=False,
         )
-        assert result.delegated_workflow_id == attempt.workflow_id
+        assert (
+            result.cancellations[0].delegated_workflow_id
+            == attempt.workflow_id
+        )
         assert statuses == {
             attempt.workflow_id: "CANCELLED",
             child_workflow_id: "ENQUEUED",
@@ -832,8 +844,13 @@ def test_cancel_resolves_work_by_campaign_and_work_keys(
     )
 
     assert result.work_item_id == work_item_id
-    assert result.disposition is CancellationDisposition.CANCELLED_READY
-    assert result.stage_execution.state is StageExecutionState.CANCELLED
+    assert len(result.cancellations) == 1
+    assert result.cancellations[0].disposition is (
+        CancellationDisposition.CANCELLED_READY
+    )
+    assert result.cancellations[0].stage_execution.state is (
+        StageExecutionState.CANCELLED
+    )
     assert canceller.cancelled == []
 
 
@@ -863,8 +880,13 @@ def test_cancel_samples_timestamp_after_locking_current_stage(
         ),
     )
 
-    assert result.stage_execution.state is StageExecutionState.CANCELLED
-    assert result.disposition is CancellationDisposition.CANCELLED_READY
+    assert len(result.cancellations) == 1
+    assert result.cancellations[0].stage_execution.state is (
+        StageExecutionState.CANCELLED
+    )
+    assert result.cancellations[0].disposition is (
+        CancellationDisposition.CANCELLED_READY
+    )
 
 
 def test_cancel_of_succeeded_work_is_idempotent(
@@ -910,12 +932,15 @@ def test_cancel_of_succeeded_work_is_idempotent(
         clock=lambda: NOW + timedelta(seconds=3),
     )
 
-    assert first.disposition is CancellationDisposition.ALREADY_TERMINAL
-    assert second.disposition is CancellationDisposition.ALREADY_TERMINAL
-    assert first.stage_execution.state is StageExecutionState.SUCCEEDED
-    assert second.stage_execution == first.stage_execution
-    assert first.delegated_workflow_id is None
-    assert second.delegated_workflow_id is None
+    assert first.cancellations == ()
+    assert second.cancellations == ()
+    with pg_engine.connect() as connection:
+        execution = get_stage_execution(
+            connection,
+            stage_execution_id=stage_execution_id,
+        )
+    assert execution is not None
+    assert execution.state is StageExecutionState.SUCCEEDED
     assert canceller.cancelled == []
 
 
@@ -953,9 +978,14 @@ def test_cancel_fences_failed_work_against_a_later_retry(
         work_item_id=work_item_id,
         clock=lambda: NOW + timedelta(seconds=2),
     )
-    assert result.disposition is CancellationDisposition.CANCELLED_FAILED
-    assert result.delegated_workflow_id is None
-    assert result.stage_execution.state is StageExecutionState.CANCELLED
+    assert len(result.cancellations) == 1
+    assert result.cancellations[0].disposition is (
+        CancellationDisposition.CANCELLED_FAILED
+    )
+    assert result.cancellations[0].delegated_workflow_id is None
+    assert result.cancellations[0].stage_execution.state is (
+        StageExecutionState.CANCELLED
+    )
     assert canceller.cancelled == []
 
     with pytest.raises(ValueError, match="only a FAILED stage execution"):
@@ -1000,8 +1030,7 @@ def test_repeated_cancel_self_heals_a_lost_admitted_delegation(
         clock=lambda: NOW + timedelta(seconds=2),
     )
     lost_workflow_id = raising.attempts[0][0]
-    assert result.disposition is CancellationDisposition.ALREADY_TERMINAL
-    assert result.delegated_workflow_id == lost_workflow_id
+    assert result.cancellations == ()
     assert healing.cancelled == [(lost_workflow_id, False)]
 
 
@@ -1080,11 +1109,17 @@ def test_cancel_after_committed_handoff_cancels_the_successor(
         cancellation_engine.dispose()
         holder.dispose()
 
-    assert result.disposition is not CancellationDisposition.ALREADY_TERMINAL
-    assert result.disposition is CancellationDisposition.CANCELLED_READY
-    assert result.stage_execution.stage_index == 1
-    assert result.stage_execution.stage_key == StageKey("score")
-    assert result.stage_execution.state is StageExecutionState.CANCELLED
+    assert len(result.cancellations) == 1
+    assert result.cancellations[0].disposition is (
+        CancellationDisposition.CANCELLED_READY
+    )
+    assert result.cancellations[0].stage_execution.stage_index == 1
+    assert result.cancellations[0].stage_execution.stage_key == StageKey(
+        "score"
+    )
+    assert result.cancellations[0].stage_execution.state is (
+        StageExecutionState.CANCELLED
+    )
     assert canceller.cancelled == []
 
 

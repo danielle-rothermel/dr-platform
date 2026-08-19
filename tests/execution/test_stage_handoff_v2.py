@@ -15,6 +15,7 @@ from dr_platform._core.identities import (
 )
 from dr_platform._core.ledger.attempts import (
     append_stage_attempt,
+    get_stage_attempt,
     record_stage_attempt_terminal,
 )
 from dr_platform._core.ledger.executions import (
@@ -1660,6 +1661,142 @@ def test_str_return_at_non_registration_index_raises_in_wrapped_workflow(
             ),
             timeout_seconds=20,
         )
+    finally:
+        if registration is not None:
+            registration.close()
+        DBOS.destroy(destroy_registry=True)
+
+
+def test_str_return_at_non_registration_fan_out_leaf_fails(
+    clean_pg: str,
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+
+    def split(_input_reference: str) -> StageCompletion:
+        return StageCompletion(
+            output_reference="split:output",
+            successors=(
+                StageSuccessor(
+                    stage_key=StageKey("branch_a"),
+                    stage_index=2,
+                    input_reference="row:a",
+                ),
+            ),
+        )
+
+    def branch_a(_input_reference: str) -> str:
+        return "leaf:output"
+
+    declared = PipelineDefinition(
+        key=PipelineKey(f"str-fanout-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("split"),
+                queue_name=f"str-fanout-{suffix}-split-queue",
+                workflow=_as_async(split),
+                args_for=_args_for,
+            ),
+            StageDefinition(
+                key=StageKey("branch_a"),
+                queue_name=f"str-fanout-{suffix}-branch-queue",
+                workflow=_as_async(branch_a),
+                args_for=_args_for,
+            ),
+        ),
+    )
+    pipeline = wrap_pipeline_workflows(
+        declared,
+        clock=_utc_now,
+        max_recovery_attempts=1,
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    _configure_controls(pg_engine, pipeline, capacity=2)
+    submit_items(
+        campaign_key=f"campaign-str-fanout-{suffix}",
+        run_key=f"run-str-fanout-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:1",
+        items=(WorkInput(work_key="work", input_reference="seed", labels={}),),
+        registry=registry,
+        engine=pg_engine,
+        clock=_utc_now,
+    )
+    for stage in pipeline.stages:
+        Queue(stage.queue_name, polling_interval_sec=0.02)
+
+    registration: DispatcherRegistration | None = None
+    try:
+        registration = _launch_dbos(
+            clean_pg,
+            suffix=suffix,
+            engine=pg_engine,
+            registry=registry,
+        )
+        client = registration.client
+        assert (
+            run_admission_pass(
+                pg_engine,
+                client=client,
+                registry=registry,
+                clock=_utc_now,
+            ).admitted_total
+            == 1
+        )
+        _wait_for(
+            lambda: (
+                _stage_state_count(
+                    pg_engine,
+                    schema,
+                    stage_index=0,
+                    state=StageExecutionState.SUCCEEDED,
+                )
+                == 1
+            )
+        )
+        assert (
+            run_admission_pass(
+                pg_engine,
+                client=client,
+                registry=registry,
+                clock=_utc_now,
+            ).admitted_total
+            == 1
+        )
+        _wait_for(
+            lambda: (
+                _stage_state_count(
+                    pg_engine,
+                    schema,
+                    stage_index=2,
+                    state=StageExecutionState.FAILED,
+                )
+                == 1
+            ),
+            timeout_seconds=20,
+        )
+        with pg_engine.connect() as connection:
+            stage_execution_id = connection.execute(
+                select(schema.stage_executions.c.stage_execution_id).where(
+                    schema.stage_executions.c.stage_index == 2,
+                    schema.stage_executions.c.state
+                    == StageExecutionState.FAILED.value,
+                )
+            ).scalar_one()
+            attempt = get_stage_attempt(
+                connection,
+                stage_execution_id=stage_execution_id,
+                attempt_number=1,
+            )
+        assert attempt is not None
+        assert attempt.terminal_summary is not None
+        message = attempt.terminal_summary.get("message")
+        assert isinstance(message, str)
+        assert "non-registration index" in message
+        assert "StageCompletion, not str" in message
     finally:
         if registration is not None:
             registration.close()

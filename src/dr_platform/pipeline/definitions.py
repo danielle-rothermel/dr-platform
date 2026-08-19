@@ -15,7 +15,6 @@ from dr_platform.execution.stage_completion import StageCompletion
 
 StageWorkflowCallable = Callable[..., Awaitable[str | StageCompletion]]
 RunCompletionWorkflowCallable = Callable[..., Awaitable[str | None]]
-AsyncWorkflowCallable = RunCompletionWorkflowCallable
 ArgumentsCallable = Callable[..., tuple[object, ...]]
 
 

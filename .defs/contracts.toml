@@ -186,16 +186,17 @@ date = "2026-08-09"
 check = "uv run pytest -q tests/completion/test_run_execution.py tests/recovery/test_run_completion_retry.py"
 
 [[contracts]]
-title = "Pipeline declarations are immutable and linear"
+title = "Pipeline declarations are immutable and ordered"
 statement = """
 A pipeline definition contains a non-empty ordered sequence of uniquely keyed \
 stages, at most one optional run completion, and a positive version; one \
 registry binds each pipeline identity to exactly one definition and rejects a \
 differing definition at that identity."""
 rationale = """
-A closed linear order gives submission, admission, and handoff one stable \
-interpretation. Mutable or graph-shaped declarations would make persisted \
-stage positions and replayed identities ambiguous."""
+Registration order gives submission, admission, and handoff one stable \
+interpretation of stage position. Mutable declarations would make persisted \
+stage positions and replayed identities ambiguous; fan-out and loops extend \
+routing without changing the declared order."""
 date = "2026-08-09"
 check = "uv run pytest -q tests/pipeline/test_definitions.py tests/pipeline/test_registry.py"
 
@@ -455,9 +456,11 @@ unscoped to the work item; a future scoped variant should widen this contract \
 rather than bolt on a parallel rule."""
 rationale = """
 One barrier predicate shared between admission and predecessor-output readers \
-keeps join semantics auditable without manifest deferrals."""
+keeps join semantics auditable without manifest deferrals. A FAILED lower \
+sibling keeps the run unsealed until that sibling is retried; ``cancel_work`` \
+on such an item derives cancelled (not failed) under precedence."""
 date = "2026-08-18"
-check = "uv run pytest -q tests/admission/test_runner.py -k barrier tests/execution/test_stage_handoff_v2.py -k barrier"
+check = "uv run pytest -q tests/admission/test_runner.py tests/execution/test_stage_handoff_v2.py -k barrier"
 
 [[contracts]]
 title = "Work-item status derives from all executions"

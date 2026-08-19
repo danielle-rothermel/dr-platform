@@ -364,7 +364,10 @@ def test_sweep_race_with_operator_cancellation_has_one_terminal_outcome(
     assert attempts[0].terminal_at is not None
     if winner == "cancellation":
         assert summary.projected_count == 0
-        assert result.disposition is CancellationDisposition.CANCELLED_ADMITTED
+        assert len(result.cancellations) == 1
+        assert result.cancellations[0].disposition is (
+            CancellationDisposition.CANCELLED_ADMITTED
+        )
         assert attempts[0].terminal_summary == {
             "outcome": "cancelled",
             "producer": "cancellation",
@@ -373,7 +376,10 @@ def test_sweep_race_with_operator_cancellation_has_one_terminal_outcome(
         assert canceller.cancelled == [(workflow_id, False)]
     else:
         assert summary.projected_count == 1
-        assert result.disposition is CancellationDisposition.CANCELLED_FAILED
+        assert len(result.cancellations) == 1
+        assert result.cancellations[0].disposition is (
+            CancellationDisposition.CANCELLED_FAILED
+        )
         assert attempts[0].terminal_summary == {
             "outcome": "failed",
             "producer": "abandonment",

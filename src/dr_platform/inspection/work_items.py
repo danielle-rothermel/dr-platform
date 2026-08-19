@@ -169,8 +169,10 @@ def list_predecessor_stage_outputs(
 ) -> tuple[PredecessorStageOutput, ...]:
     """Return succeeded lower-index sibling outputs for join stage bodies.
 
-    Complements the admission barrier gate, which blocks until every lower
-    ``stage_index`` for the same work item is ``SUCCEEDED``.
+    Rows are ordered by ascending ``stage_index``. Only ``SUCCEEDED``
+    executions with a non-null ``output_reference`` are included. Complements
+    the admission barrier gate, which blocks until every lower ``stage_index``
+    for the same work item is ``SUCCEEDED``.
     """
     validate_work_item_id(work_item_id)
     validate_nonnegative_integer(below_stage_index, label="below stage index")

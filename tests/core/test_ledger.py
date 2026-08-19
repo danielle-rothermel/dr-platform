@@ -613,6 +613,27 @@ def test_migration_0003_backfills_input_reference_from_work_items(
         ).scalar_one()
     assert input_reference == "submission:input"
     assert barrier is False
+    table_name = f"{prefix}_stage_executions"
+    inspector = inspect(pg_engine)
+    inventory = _table_inventory(
+        inspector,
+        table=table_name,
+        prefix=prefix,
+    )
+    assert (
+        "uq_stage_executions_work_index",
+        ("work_item_id", "stage_index"),
+    ) in inventory.unique_constraints
+    assert (
+        "uq_stage_executions_work_stage",
+        ("work_item_id", "stage_key"),
+    ) not in inventory.unique_constraints
+    runtime_prefix = f"{prefix}_runtime"
+    LedgerSchema(runtime_prefix).metadata.create_all(pg_engine)
+    assert _schema_inventory(pg_engine, prefix=prefix) == _schema_inventory(
+        pg_engine,
+        prefix=runtime_prefix,
+    )
     with pg_engine.connect() as connection:
         revision = connection.execute(
             text(f"SELECT version_num FROM {prefix}_platform_alembic_version")  # noqa: S608

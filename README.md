@@ -91,11 +91,16 @@ so completion identity matches the ledger row and join bodies can read
 sibling outputs. Join example:
 
 ```python
-def join(payload: AdmissionPayload) -> str:
+async def join(payload: AdmissionPayload) -> StageCompletion:
     outputs = list_predecessor_stage_outputs(
-        payload.work_item_id, payload.stage_index, engine=engine
+        payload.work_item_id,
+        payload.stage_index,
+        engine=engine,
     )
-    return f"join:{payload.input_reference}"
+    refs = "|".join(item.output_reference for item in outputs)
+    return StageCompletion(
+        output_reference=f"join:{payload.input_reference}:{refs}"
+    )
 ```
 Fan-out inserts every successor in one handoff transaction. Loops reuse a
 `stage_key` at a higher `stage_index`; identity is `(work_item_id,
@@ -228,6 +233,18 @@ same work item is `SUCCEEDED`; admission reports skips in
 `AdmissionSummary.skipped_for_barrier`.
 
 ```python
+@dataclass(frozen=True, slots=True)
+class AdmissionSummary:
+    admitted_counts: tuple[StageAdmissionCount, ...]
+    skipped_for_capacity: int
+    skipped_for_pause: int
+    skipped_for_barrier: int
+    unconfigured_stages: tuple[StageIdentityRecord, ...]
+    failed_stages: tuple[StageAdmissionFailure, ...]
+    mismatched_stages: tuple[StageMismatch, ...]
+```
+
+```python
 class AdmissionPayload(BaseModel):
     campaign_key: CampaignKey
     work_key: WorkKey
@@ -265,7 +282,7 @@ read_controls(pipeline, stage_key, labels=None) -> tuple[StageControlRecord, ...
 ### Execution and handoff
 
 Execution wraps async application stage callables in package-owned DBOS workflows
-that record one terminal outcome and prepare the next stage transactionally.
+that record one terminal outcome and insert all successors in one transaction.
 Stage bodies must tolerate at-least-once execution across workflow recovery.
 Crash recovery requires `DBOS.launch()` on a worker with the matching executor
 and application version and with the workflows registered; cross-version
@@ -312,7 +329,7 @@ Applications own and close any loop-affine clients used by their workflows.
 A completion-enabled pipeline requires an immutable manifest reference and the
 canonical digest of its declared ordered membership. Independent scheduled
 barrier reconciliation releases exactly one completion execution after every
-member's current stage settles. Release facts remain fixed if a member later
+member's representative stage state settles. Release facts remain fixed if a member later
 changes state.
 
 ```python
@@ -382,14 +399,14 @@ class CancelledStageExecution:
 class WorkCancellationResult:
     work_item_id: int
     cancellations: tuple[CancelledStageExecution, ...]
-    disposition: CancellationDisposition
-    delegated_workflow_id: str | None
-    stage_execution: StageExecutionRecord
 ```
 
 `cancel_work` cancels every nonterminal execution (`READY`, `ADMITTED`,
-`FAILED`) for the item. Retry the FAILED sibling stage, not a READY barrier
-join.
+`FAILED`) for the item. When a barrier join is blocked by a FAILED sibling,
+retry that sibling execution — `retry_stage` only accepts FAILED rows. A FAILED
+lower sibling keeps the run unsealed until that sibling is retried;
+`cancel_work` on such an item derives **cancelled** (not failed) under
+precedence.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -423,11 +440,14 @@ sweep_abandoned_run_completions(DBOS client, live_identity) -> RunCompletionSwee
 Inspection provides read-only projections over stable logical identities rather
 than exposing database rows. Collection readers are bounded; direct work-item
 inspection returns its complete stage-attempt history. Run member listing is
-paginated by membership ordinal and reports current stage state without
-returning evidence payloads. Work-item `current_stage_*` fields name the
-representative execution under precedence
+paginated by membership ordinal and reports representative stage state without
+returning evidence payloads. State counts (`campaign_state_counts`,
+`run_state_counts`, `bulk_run_state_counts`) and work-item `current_stage_*`
+fields derive from precedence
 (`FAILED > CANCELLED > ADMITTED > READY > SUCCEEDED`), not simply the highest
-`stage_index`.
+`stage_index`; ties within a precedence band break on `stage_execution_id`.
+Representative index: lowest in that state except `SUCCEEDED`, which uses the
+highest index.
 
 Terminal attempt summaries use pinned wire keys (`TerminalSummaryField`,
 `TerminalSummaryProducer`) with an explicit producer tag on failed,
