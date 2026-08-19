@@ -15,7 +15,7 @@ from dr_platform._core.ledger import (
 )
 from dr_platform.admission import controls, runner
 from dr_platform.completion import execution as completion_execution
-from dr_platform.execution import failures, handoff
+from dr_platform.execution import failures, handoff, stage_completion
 from dr_platform.inspection import (
     campaigns,
     run_members,
@@ -54,6 +54,7 @@ _ROOT_BINDINGS = {
     "PipelineRegistry": registry.PipelineRegistry,
     "PipelineRunConflictError": runs.PipelineRunConflictError,
     "PlatformDbosConfig": dbos.PlatformDbosConfig,
+    "PredecessorStageOutput": inspection_work_items.PredecessorStageOutput,
     "RegistrationClosureError": stream.RegistrationClosureError,
     "RunCompletionDefinition": definitions.RunCompletionDefinition,
     "RunCompletionExecutionRecord": (
@@ -73,6 +74,7 @@ _ROOT_BINDINGS = {
     "RunSummary": campaigns.RunSummary,
     "StageApplicationFailure": failures.StageApplicationFailure,
     "StageAttemptRecord": attempts.StageAttemptRecord,
+    "StageCompletion": stage_completion.StageCompletion,
     "StageControlRecord": controls.StageControlRecord,
     "StageDefinition": definitions.StageDefinition,
     "StageExecutionRecord": executions.StageExecutionRecord,
@@ -81,6 +83,7 @@ _ROOT_BINDINGS = {
     "StageHandoffMismatchError": handoff.StageHandoffMismatchError,
     "StageKey": identities.StageKey,
     "StageRetryResult": retry.StageRetryResult,
+    "StageSuccessor": stage_completion.StageSuccessor,
     "StateCount": states.StateCount,
     "SubmissionReceipt": stream.SubmissionReceipt,
     "SweepProjection": sweep.SweepProjection,
@@ -92,6 +95,7 @@ _ROOT_BINDINGS = {
     ),
     "TelemetryInitializationResult": telemetry.TelemetryInitializationResult,
     "UnwrappedPipelineError": dispatcher.UnwrappedPipelineError,
+    "CancelledStageExecution": cancellation.CancelledStageExecution,
     "WorkCancellationResult": cancellation.WorkCancellationResult,
     "WorkInput": stream.WorkInput,
     "WorkItemSummary": inspection_work_items.WorkItemSummary,
@@ -110,6 +114,9 @@ _ROOT_BINDINGS = {
     "inspect_campaign": campaigns.inspect_campaign,
     "inspect_run_completion": completion_execution.inspect_run_completion,
     "list_campaigns": campaigns.list_campaigns,
+    "list_predecessor_stage_outputs": (
+        inspection_work_items.list_predecessor_stage_outputs
+    ),
     "list_run_members": run_members.list_run_members,
     "list_runs": campaigns.list_runs,
     "list_work_items": inspection_work_items.list_work_items,

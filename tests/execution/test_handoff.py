@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import inspect
-import time
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
-from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
+from dbos import DBOS, DBOSClient, Queue
 from dr_serialize import Jsonable
 from dr_store.content_addressing import (
     OBJECT_REFERENCE_PREFIX,
@@ -17,7 +16,7 @@ from dr_store.content_addressing import (
 )
 from dr_store.object_store import ObjectStore
 from dr_store.storage_backends.postgresql import PostgresBackend
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, select
 
 from dr_platform._core.identities import (
     CampaignKey,
@@ -37,6 +36,7 @@ from dr_platform.execution.handoff import (
     _complete_stage_in_transaction,
     wrap_pipeline_workflows,
 )
+from dr_platform.execution.stage_completion import StageSuccessor
 from dr_platform.pipeline.definitions import (
     PipelineDefinition,
     StageDefinition,
@@ -58,15 +58,23 @@ from tests.conftest import (
     default_live_dbos_identity,
     submit_items,
 )
+from tests.conftest import (
+    handoff_utc_now as _utc_now,
+)
+from tests.conftest import (
+    recorded_workflow_id as _recorded_workflow_id,
+)
+from tests.conftest import (
+    stage_state_count as _stage_state_count,
+)
+from tests.conftest import (
+    wait_for_handoff as _wait_for,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from dr_platform._core.ledger.schema import LedgerSchema
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _pipeline(
@@ -177,19 +185,6 @@ def _launch_dbos(
     return registration
 
 
-def _wait_for(
-    predicate: Callable[[], bool],
-    *,
-    timeout_seconds: float = 5,
-) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.02)
-    raise AssertionError("timed out waiting for DBOS stage workflow")
-
-
 def _wait_for_workflow_statuses(
     client: DBOSClient,
     workflow_ids: list[str],
@@ -209,30 +204,6 @@ def _wait_for_workflow_statuses(
             == len(workflow_ids)
         )
     )
-
-
-def _stage_state_count(
-    engine: Engine,
-    schema: LedgerSchema,
-    *,
-    stage_index: int,
-    state: StageExecutionState,
-) -> int:
-    with engine.connect() as connection:
-        return connection.execute(
-            select(func.count())
-            .select_from(schema.stage_executions)
-            .where(
-                schema.stage_executions.c.stage_index == stage_index,
-                schema.stage_executions.c.state == state.value,
-            )
-        ).scalar_one()
-
-
-def _recorded_workflow_id(options: EnqueueOptions) -> str:
-    workflow_id = options.get("workflow_id")
-    assert workflow_id is not None
-    return workflow_id
 
 
 def _submit_and_admit_one(
@@ -481,8 +452,13 @@ def test_completion_and_next_ready_insert_roll_back_together(
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="output:prepare",
             evidence=None,
-            next_stage_key="execute",
-            next_stage_index=1,
+            successors=(
+                StageSuccessor(
+                    stage_key=StageKey("execute"),
+                    stage_index=1,
+                    input_reference="output:prepare",
+                ),
+            ),
             completed_at=_utc_now(),
             before_next_stage=fail_before_successor,
         )
@@ -566,8 +542,13 @@ def test_completion_identity_mismatch_does_not_mutate_state(
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="output:prepare",
             evidence=None,
-            next_stage_key="execute",
-            next_stage_index=1,
+            successors=(
+                StageSuccessor(
+                    stage_key=StageKey("execute"),
+                    stage_index=1,
+                    input_reference="output:prepare",
+                ),
+            ),
             completed_at=_utc_now(),
         )
 
@@ -614,8 +595,7 @@ def test_output_reference_is_transported_opaquely_without_parsing(
             terminal_summary={"outcome": "succeeded"},
             terminal_reference=_TERMINAL_OBJECT_REFERENCE,
             evidence=None,
-            next_stage_key=None,
-            next_stage_index=None,
+            successors=(),
             completed_at=_utc_now(),
         )
 
@@ -858,14 +838,23 @@ def test_invalid_application_output_lands_failed_without_a_successor(
 
     assert execution_rows == [(0, "execute", "failed", None)]
     assert attempt.terminal_at is not None
+    if invalid_output == "":
+        expected_error_type = "builtins.ValueError"
+        expected_message = (
+            "stage application logic must return a non-empty "
+            "output-reference string"
+        )
+    else:
+        expected_error_type = "builtins.TypeError"
+        expected_message = (
+            "stage workflow must return str or StageCompletion, "
+            "not <class 'int'>"
+        )
     assert attempt.terminal_summary == {
         "outcome": "failed",
         "producer": "application_failure",
-        "error_type": "builtins.ValueError",
-        "message": (
-            "stage application logic must return a non-empty "
-            "output-reference string"
-        ),
+        "error_type": expected_error_type,
+        "message": expected_message,
         "traceback": attempt.terminal_summary["traceback"],
     }
     assert isinstance(attempt.terminal_summary["traceback"], str)
@@ -1112,8 +1101,7 @@ def test_failure_evidence_write_aborts_whole_checkpoint(
             terminal_summary={"outcome": "failed"},
             terminal_reference=None,
             evidence={"partial": 1},
-            next_stage_key=None,
-            next_stage_index=None,
+            successors=(),
             completed_at=_utc_now(),
             schema=schema,
         )

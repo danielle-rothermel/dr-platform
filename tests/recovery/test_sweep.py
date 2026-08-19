@@ -16,6 +16,7 @@ from dr_platform.execution.handoff import (
     StageHandoffMismatchError,
     _complete_stage_in_transaction,
 )
+from dr_platform.execution.stage_completion import StageSuccessor
 from dr_platform.pipeline.registry import PipelineRegistry
 from dr_platform.recovery.cancellation import (
     CancellationDisposition,
@@ -104,8 +105,13 @@ def _commit_successful_handoff(
             terminal_summary={"outcome": "succeeded"},
             terminal_reference="output:prepare",
             evidence=None,
-            next_stage_key=pipeline.stages[1].key.value,
-            next_stage_index=1,
+            successors=(
+                StageSuccessor(
+                    stage_key=pipeline.stages[1].key,
+                    stage_index=1,
+                    input_reference="output:prepare",
+                ),
+            ),
             completed_at=completed_at,
             before_next_stage=before_next_stage,
         )
@@ -279,22 +285,22 @@ def test_sweep_race_with_operator_cancellation_has_one_terminal_outcome(
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         if winner == "cancellation":
-            cancel_current = cast(
-                "Callable[..., WorkCancellationResult]",
-                cancellation_module._cancel_current_stage,
+            cancel_one = cast(
+                "Callable[..., object]",
+                cancellation_module._cancel_one_execution,
             )
 
             def cancel_then_release(
                 *args: object,
                 **kwargs: object,
-            ) -> WorkCancellationResult:
-                result = cancel_current(*args, **kwargs)
+            ) -> object:
+                result = cancel_one(*args, **kwargs)
                 barrier.wait(timeout=10)
                 return result
 
             monkeypatch.setattr(
                 cancellation_module,
-                "_cancel_current_stage",
+                "_cancel_one_execution",
                 cancel_then_release,
             )
             cancellation = executor.submit(
@@ -358,7 +364,10 @@ def test_sweep_race_with_operator_cancellation_has_one_terminal_outcome(
     assert attempts[0].terminal_at is not None
     if winner == "cancellation":
         assert summary.projected_count == 0
-        assert result.disposition is CancellationDisposition.CANCELLED_ADMITTED
+        assert len(result.cancellations) == 1
+        assert result.cancellations[0].disposition is (
+            CancellationDisposition.CANCELLED_ADMITTED
+        )
         assert attempts[0].terminal_summary == {
             "outcome": "cancelled",
             "producer": "cancellation",
@@ -367,7 +376,10 @@ def test_sweep_race_with_operator_cancellation_has_one_terminal_outcome(
         assert canceller.cancelled == [(workflow_id, False)]
     else:
         assert summary.projected_count == 1
-        assert result.disposition is CancellationDisposition.CANCELLED_FAILED
+        assert len(result.cancellations) == 1
+        assert result.cancellations[0].disposition is (
+            CancellationDisposition.CANCELLED_FAILED
+        )
         assert attempts[0].terminal_summary == {
             "outcome": "failed",
             "producer": "abandonment",

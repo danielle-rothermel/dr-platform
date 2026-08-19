@@ -130,13 +130,14 @@ check = "uv run pytest -q tests/inspection/test_run_membership.py tests/inspecti
 [[contracts]]
 title = "Run barrier releases completion once"
 statement = """
-A closed run that declares completion releases once when every member's current \
-stage is succeeded, failed, or cancelled. Each scanning pass exclusively \
-advances one \
-persisted barrier cursor, examines at most its candidate budget, and rotates \
-past ineligible, lock-skipped, or failed candidates. Release time and terminal \
-state counts are immutable; later member transitions neither invalidate release \
-nor create another completion execution."""
+A closed run that declares completion releases once when every member has no \
+READY or ADMITTED execution. Release terminal state counts record each \
+member's derived terminal outcome under work-item status precedence \
+(``FAILED > CANCELLED > ADMITTED > READY > SUCCEEDED``). Each scanning pass \
+exclusively advances one persisted barrier cursor, examines at most its \
+candidate budget, and rotates past ineligible, lock-skipped, or failed \
+candidates. Release time and terminal state counts are immutable; later member \
+transitions neither invalidate release nor create another completion execution."""
 rationale = """
 Immutable edge-triggered release provides durable terminality evidence without \
 duplicate aggregation, while the bounded fair cursor prevents a permanently \
@@ -185,16 +186,17 @@ date = "2026-08-09"
 check = "uv run pytest -q tests/completion/test_run_execution.py tests/recovery/test_run_completion_retry.py"
 
 [[contracts]]
-title = "Pipeline declarations are immutable and linear"
+title = "Pipeline declarations are immutable and ordered"
 statement = """
 A pipeline definition contains a non-empty ordered sequence of uniquely keyed \
 stages, at most one optional run completion, and a positive version; one \
 registry binds each pipeline identity to exactly one definition and rejects a \
 differing definition at that identity."""
 rationale = """
-A closed linear order gives submission, admission, and handoff one stable \
-interpretation. Mutable or graph-shaped declarations would make persisted \
-stage positions and replayed identities ambiguous."""
+Registration order gives submission, admission, and handoff one stable \
+interpretation of stage position. Mutable declarations would make persisted \
+stage positions and replayed identities ambiguous; fan-out and loops extend \
+routing without changing the declared order."""
 date = "2026-08-09"
 check = "uv run pytest -q tests/pipeline/test_definitions.py tests/pipeline/test_registry.py"
 
@@ -298,17 +300,19 @@ check = "uv run pytest -q tests/recovery/test_actions.py -k 'pause or lowering_c
 title = "Stage handoff is one guarded transaction"
 statement = """
 A successful handoff settles the current attempt, marks its stage succeeded, \
-and creates the next linear stage as ready when one exists, in one transaction \
-and at most once. A completion whose workflow is not the persisted current \
-admitted attempt is rejected, except that a late completion from the current \
-attempt of a cancelled stage is discarded without advancing work."""
+and creates explicit successor stages from application-directed \
+``StageCompletion`` data or a linear ``str`` return at the registration \
+index, in one transaction and at most once. A completion whose workflow is not \
+the persisted current admitted attempt is rejected, except that a late \
+completion from the current attempt of a cancelled stage is discarded without \
+advancing work."""
 rationale = """
 Separating outcome from successor creation permits half-completed pipelines, \
 while accepting stale completion permits an older attempt to overwrite newer \
 operator intent. The cancelled-current exception makes logical cancellation \
 win its race without turning a harmless late return into a retryable failure."""
 date = "2026-08-05"
-check = "uv run pytest -q tests/execution/test_handoff.py -k 'completion_and_next_ready_insert_roll_back_together or completion_identity_mismatch or operator_cancellation'"
+check = "uv run pytest -q tests/execution/test_handoff.py tests/execution/test_stage_handoff_v2.py"
 
 [[contracts]]
 title = "Retry creates one fresh attempt"
@@ -326,12 +330,12 @@ check = "uv run pytest -q tests/recovery/test_actions.py -k 'retry'"
 [[contracts]]
 title = "Cancellation commits logical intent before delegation"
 statement = """
-Cancellation first commits the current logical stage as cancelled and settles \
-its current nonterminal attempt. It delegates only the exact current admitted \
-workflow, never requests child cancellation, and a repeated call on that \
-cancelled stage may reissue the same stored workflow identity to repair a lost \
-post-commit request; the workflow-canceller boundary does not promise \
-universal idempotence."""
+Cancellation commits every nonterminal execution for a work item as cancelled \
+and settles each current nonterminal attempt before delegating to DBOS for \
+admitted rows. It delegates only exact current admitted workflows, never \
+requests child cancellation, and a repeated call on already-cancelled work may \
+reissue stored workflow identities to repair a lost post-commit request; the \
+workflow-canceller boundary does not promise universal idempotence."""
 rationale = """
 The database transaction cannot be atomic with an external cancellation call, \
 so durable logical intent comes first and a narrow repair path covers the \
@@ -430,3 +434,44 @@ orchestration boundary. Adding graph, provider, rollout, artifact, or worker-\
 pool policy would make the persistence model and recovery rules depend on one \
 consumer."""
 date = "2026-08-05"
+
+[[contracts]]
+title = "Stage execution identity is positional"
+statement = """
+Stage execution identity within a work item is ``(work_item_id, stage_index)``. \
+Successor indices are application-chosen, sparse, strictly greater than the \
+completed index, and unique within one handoff transaction."""
+rationale = """
+Fan-out and loops reuse ``stage_key`` at distinct positions. One index axis \
+keeps admission, handoff, and inspection aligned without a graph engine."""
+date = "2026-08-18"
+check = "uv run pytest -q tests/core/test_work_item_status.py tests/execution/test_stage_handoff_v2.py -k 'fan_out or loop or linear'"
+
+[[contracts]]
+title = "Join barrier is work-item-wide"
+statement = """
+A barrier successor remains ``READY`` until every lower ``stage_index`` \
+execution for the same work item is ``SUCCEEDED``. The gate is deliberately \
+unscoped to the work item; a future scoped variant should widen this contract \
+rather than bolt on a parallel rule."""
+rationale = """
+One barrier predicate shared between admission and predecessor-output readers \
+keeps join semantics auditable without manifest deferrals. A FAILED lower \
+sibling keeps the run unsealed until that sibling is retried; ``cancel_work`` \
+on such an item derives cancelled (not failed) under precedence."""
+date = "2026-08-18"
+check = "uv run pytest -q tests/admission/test_runner.py tests/execution/test_stage_handoff_v2.py -k barrier"
+
+[[contracts]]
+title = "Work-item status derives from all executions"
+statement = """
+Work-item status is the highest-precedence execution state across all rows \
+(``FAILED > CANCELLED > ADMITTED > READY > SUCCEEDED``). Representative \
+``current_stage_*`` fields point at the lowest ``stage_index`` in that state \
+except ``SUCCEEDED``, which uses the highest index. Under a linear pipeline \
+this reduces to the former max-index behavior."""
+rationale = """
+Fan-out must surface a FAILED sibling ahead of a READY join so inspection, \
+run-barrier counts, and operator tooling stay coherent."""
+date = "2026-08-18"
+check = "uv run pytest -q tests/core/test_work_item_status.py tests/completion/test_run_barrier.py::test_fan_out_failed_branch_release_counts_as_failed"

@@ -33,7 +33,9 @@ from dr_platform.inspection.statuses import (
     run_state_counts,
 )
 from dr_platform.inspection.work_items import (
+    PredecessorStageOutput,
     get_work_item_stages,
+    list_predecessor_stage_outputs,
     list_work_items,
 )
 from dr_platform.pipeline.definitions import (
@@ -293,6 +295,107 @@ def test_get_work_item_stages_returns_stage_history(
 
     assert len(stages) == 1
     assert stages[0].attempts == ()
+
+
+def test_list_predecessor_stage_outputs_returns_succeeded_lower_stages(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        run_key = "run-predecessors"
+        connection.execute(
+            schema.pipeline_runs.insert().values(
+                run_key=run_key,
+                campaign_key="campaign-predecessors",
+                pipeline_key="evaluation",
+                pipeline_version=1,
+                execution_config_reference="config:1",
+                expected_member_count=1,
+                created_at=NOW,
+            )
+        )
+        work_item_id = connection.execute(
+            schema.work_items.insert()
+            .values(
+                campaign_key="campaign-predecessors",
+                work_key="work-predecessors",
+                origin_run_key=run_key,
+                input_reference="seed",
+                labels={},
+                rank=1,
+            )
+            .returning(schema.work_items.c.work_item_id)
+        ).scalar_one()
+        first = insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="split",
+            stage_index=0,
+            input_reference="seed",
+            created_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=first.stage_execution_id,
+            new_state=StageExecutionState.ADMITTED,
+            updated_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=first.stage_execution_id,
+            new_state=StageExecutionState.SUCCEEDED,
+            output_reference="split:out",
+            updated_at=NOW,
+        )
+        pending = insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="branch",
+            stage_index=1,
+            input_reference="row:a",
+            created_at=NOW,
+        )
+        second = insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="branch_b",
+            stage_index=2,
+            input_reference="row:b",
+            created_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=second.stage_execution_id,
+            new_state=StageExecutionState.ADMITTED,
+            updated_at=NOW,
+        )
+        transition_stage_execution(
+            connection,
+            stage_execution_id=second.stage_execution_id,
+            new_state=StageExecutionState.SUCCEEDED,
+            output_reference="branch_b:out",
+            updated_at=NOW,
+        )
+        assert pending.stage_execution_id
+
+    outputs = list_predecessor_stage_outputs(
+        work_item_id,
+        3,
+        engine=pg_engine,
+    )
+
+    assert outputs == (
+        PredecessorStageOutput(
+            stage_index=0,
+            stage_key=StageKey("split"),
+            output_reference="split:out",
+        ),
+        PredecessorStageOutput(
+            stage_index=2,
+            stage_key=StageKey("branch_b"),
+            output_reference="branch_b:out",
+        ),
+    )
 
 
 def test_state_counts_report_current_items_for_campaign_and_run(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -9,6 +10,9 @@ from dr_platform._core.identities import (
     RunCompletionKey,
     StageKey,
 )
+
+if TYPE_CHECKING:
+    from dr_platform.execution.stage_completion import StageCompletion
 from dr_platform.pipeline.definitions import (
     PipelineDefinition,
     PipelineIdentity,
@@ -44,7 +48,7 @@ def _stage(
     key: str,
     *,
     queue_name: str | None = None,
-    workflow: Callable[..., Awaitable[str | None]] = _workflow,
+    workflow: Callable[..., Awaitable[str | StageCompletion]] = _workflow,
 ) -> StageDefinition:
     return StageDefinition(
         key=StageKey(key),

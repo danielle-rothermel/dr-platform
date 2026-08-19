@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from sqlalchemy import and_, select
+from sqlalchemy import select
 
 from dr_platform._core.frozen import immutable_mapping
 from dr_platform._core.identities import (
@@ -20,6 +20,11 @@ from dr_platform._core.ledger.attempts import (
 from dr_platform._core.ledger.executions import StageExecutionRecord
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.work_item_status import (
+    list_predecessor_stage_outputs_statement,
+    work_item_status_rows,
+)
+from dr_platform._core.validation import validate_nonnegative_integer
 from dr_platform.inspection._validation import (
     DEFAULT_INSPECTION_LIMIT,
     require_campaign,
@@ -27,7 +32,6 @@ from dr_platform.inspection._validation import (
     validate_work_item_cursor,
     validate_work_item_id,
 )
-from dr_platform.inspection.statuses import current_stage_indexes
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -47,6 +51,13 @@ class WorkItemSummary:
     current_stage_key: StageKey
     current_stage_index: int
     state: StageExecutionState
+
+
+@dataclass(frozen=True, slots=True)
+class PredecessorStageOutput:
+    stage_index: int
+    stage_key: StageKey
+    output_reference: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,11 +81,10 @@ def list_work_items(  # noqa: PLR0913 -- explicit reader filters
     selected_schema = schema or LedgerSchema()
     normalized_campaign = normalize_key(campaign_key, CampaignKey)
     items = selected_schema.work_items
-    executions = selected_schema.stage_executions
     campaign_item_ids = select(items.c.work_item_id).where(
         items.c.campaign_key == normalized_campaign.value
     )
-    current = current_stage_indexes(selected_schema, campaign_item_ids)
+    status = work_item_status_rows(selected_schema, campaign_item_ids)
     statement = (
         select(
             items.c.work_item_id,
@@ -82,21 +92,15 @@ def list_work_items(  # noqa: PLR0913 -- explicit reader filters
             items.c.work_key,
             items.c.origin_run_key,
             items.c.labels,
-            executions.c.stage_execution_id,
-            executions.c.stage_key,
-            executions.c.stage_index,
-            executions.c.state,
+            status.c.stage_execution_id,
+            status.c.stage_key,
+            status.c.stage_index,
+            status.c.state,
         )
         .select_from(
             items.join(
-                current,
-                current.c.work_item_id == items.c.work_item_id,
-            ).join(
-                executions,
-                and_(
-                    executions.c.work_item_id == current.c.work_item_id,
-                    executions.c.stage_index == current.c.stage_index,
-                ),
+                status,
+                status.c.work_item_id == items.c.work_item_id,
             )
         )
         .where(items.c.campaign_key == normalized_campaign.value)
@@ -104,7 +108,7 @@ def list_work_items(  # noqa: PLR0913 -- explicit reader filters
         .limit(limit)
     )
     if state is not None:
-        statement = statement.where(executions.c.state == state.value)
+        statement = statement.where(status.c.state == state.value)
     with engine.connect() as connection:
         require_campaign(
             connection,
@@ -156,6 +160,41 @@ def get_work_item_stages(
     return summaries
 
 
+def list_predecessor_stage_outputs(
+    work_item_id: int,
+    below_stage_index: int,
+    *,
+    engine: Engine,
+    schema: LedgerSchema | None = None,
+) -> tuple[PredecessorStageOutput, ...]:
+    """Return succeeded lower-index sibling outputs for join stage bodies.
+
+    Rows are ordered by ascending ``stage_index``. Only ``SUCCEEDED``
+    executions with a non-null ``output_reference`` are included. Complements
+    the admission barrier gate, which blocks until every lower ``stage_index``
+    for the same work item is ``SUCCEEDED``.
+    """
+    validate_work_item_id(work_item_id)
+    validate_nonnegative_integer(below_stage_index, label="below stage index")
+    selected_schema = schema or LedgerSchema()
+    with engine.connect() as connection:
+        rows = connection.execute(
+            list_predecessor_stage_outputs_statement(
+                selected_schema,
+                work_item_id=work_item_id,
+                below_stage_index=below_stage_index,
+            )
+        ).mappings()
+        return tuple(
+            PredecessorStageOutput(
+                stage_index=row["stage_index"],
+                stage_key=StageKey(row["stage_key"]),
+                output_reference=row["output_reference"],
+            )
+            for row in rows
+        )
+
+
 def _decode_work_item_summary(row: RowMapping) -> WorkItemSummary:
     return WorkItemSummary(
         work_item_id=row["work_item_id"],
@@ -179,7 +218,9 @@ def _decode_stage_execution(row: RowMapping) -> StageExecutionRecord:
         state=StageExecutionState(row["state"]),
         current_attempt=row["current_attempt"],
         rank=row["rank"],
+        input_reference=row["input_reference"],
         output_reference=row["output_reference"],
+        barrier=row["barrier"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

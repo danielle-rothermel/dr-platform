@@ -43,8 +43,12 @@ from dr_platform._core.ledger.attempts import (
 from dr_platform._core.ledger.executions import transition_stage_execution
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.work_item_status import (
+    lower_stage_not_succeeded_exists,
+)
 from dr_platform._core.validation import (
     validate_non_empty_string,
+    validate_nonnegative_integer,
     validate_positive_integer,
 )
 
@@ -91,12 +95,14 @@ class AdmissionPayload(BaseModel):
 
     campaign_key: CampaignKey
     work_key: WorkKey
+    work_item_id: StrictInt
     origin_run_key: RunKey
     input_reference: str
     labels: Mapping[str, str]
     pipeline_key: str
     pipeline_version: StrictInt
     stage_key: StageKey
+    stage_index: StrictInt
     attempt_number: StrictInt
 
     @field_validator("campaign_key", mode="before")
@@ -147,6 +153,8 @@ class AdmissionPayload(BaseModel):
             self.pipeline_version, label="pipeline version"
         )
         validate_positive_integer(self.attempt_number, label="attempt number")
+        validate_nonnegative_integer(self.stage_index, label="stage index")
+        validate_positive_integer(self.work_item_id, label="work item id")
         return self
 
 
@@ -187,6 +195,7 @@ class AdmissionSummary:
     admitted_counts: tuple[StageAdmissionCount, ...]
     skipped_for_capacity: int
     skipped_for_pause: int
+    skipped_for_barrier: int
     unconfigured_stages: tuple[StageIdentityRecord, ...]
     failed_stages: tuple[StageAdmissionFailure, ...]
     mismatched_stages: tuple[StageMismatch, ...]
@@ -203,8 +212,10 @@ class PipelineStageMismatchError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class _Candidate:
     stage_execution_id: int
+    work_item_id: int
     rank: int
     stage_index: int
+    barrier: bool
     campaign_key: str
     work_key: str
     origin_run_key: str
@@ -237,6 +248,7 @@ class _PassTally:
     admitted: dict[_StageIdentity, int] = field(default_factory=dict)
     skipped_for_capacity: int = 0
     skipped_for_pause: int = 0
+    skipped_for_barrier: int = 0
     unconfigured: set[_StageIdentity] = field(default_factory=set)
     failed: dict[_StageIdentity, StageAdmissionFailure] = field(
         default_factory=dict
@@ -310,6 +322,7 @@ class _PassTally:
             admitted_counts=counts,
             skipped_for_capacity=self.skipped_for_capacity,
             skipped_for_pause=self.skipped_for_pause,
+            skipped_for_barrier=self.skipped_for_barrier,
             unconfigured_stages=unconfigured_stages,
             failed_stages=failed_stages,
             mismatched_stages=mismatched_stages,
@@ -408,6 +421,14 @@ def _admit_in_transaction(  # noqa: PLR0912, PLR0913 -- pass evaluation loop
             if candidate.stage_identity in tally.unconfigured:
                 continue
             if candidate.stage_execution_id in tally.excluded_candidates:
+                continue
+            if candidate.barrier and _barrier_blocked(
+                connection,
+                work_item_id=candidate.work_item_id,
+                stage_index=candidate.stage_index,
+                schema=schema,
+            ):
+                tally.skipped_for_barrier += 1
                 continue
             controls = page.controls_by_stage[candidate.stage_identity]
             match _evaluate_candidate(
@@ -554,12 +575,14 @@ def _admit_candidate(  # noqa: PLR0913 -- explicit admission facts
     payload = AdmissionPayload(
         campaign_key=CampaignKey(candidate.campaign_key),
         work_key=WorkKey(candidate.work_key),
+        work_item_id=candidate.work_item_id,
         origin_run_key=RunKey(candidate.origin_run_key),
         input_reference=candidate.input_reference,
         labels=candidate.labels,
         pipeline_key=candidate.pipeline_key,
         pipeline_version=candidate.pipeline_version,
         stage_key=StageKey(candidate.stage_key),
+        stage_index=candidate.stage_index,
         attempt_number=attempt.attempt_number,
     )
     options: EnqueueOptions = {
@@ -641,12 +664,17 @@ def _lock_candidates(  # noqa: PLR0913 -- explicit paging predicates
     statement = (
         select(
             executions.c.stage_execution_id,
+            executions.c.work_item_id,
             executions.c.rank,
             executions.c.stage_index,
+            executions.c.barrier,
             work_items.c.campaign_key,
             work_items.c.work_key,
             work_items.c.origin_run_key.label("origin_run_key"),
-            work_items.c.input_reference,
+            func.coalesce(
+                executions.c.input_reference,
+                work_items.c.input_reference,
+            ).label("input_reference"),
             work_items.c.labels,
             runs.c.pipeline_key,
             runs.c.pipeline_version,
@@ -713,6 +741,22 @@ def _lock_candidates(  # noqa: PLR0913 -- explicit paging predicates
         _decode_candidate(row)
         for row in connection.execute(statement).mappings()
     )
+
+
+def _barrier_blocked(
+    connection: Connection,
+    *,
+    work_item_id: int,
+    stage_index: int,
+    schema: LedgerSchema,
+) -> bool:
+    return connection.execute(
+        lower_stage_not_succeeded_exists(
+            schema,
+            work_item_id=work_item_id,
+            below_stage_index=stage_index,
+        )
+    ).scalar_one()
 
 
 def _unconfigured_identities(
@@ -813,19 +857,12 @@ def _registered_stage(
         key=PipelineKey(candidate.pipeline_key),
         version=candidate.pipeline_version,
     )
-    try:
-        stage = pipeline.stages[candidate.stage_index]
-    except IndexError as error:
-        raise PipelineStageMismatchError(
-            "persisted stage index is outside the registered pipeline: "
-            f"{candidate.stage_index}"
-        ) from error
-    if stage.key.value != candidate.stage_key:
-        raise PipelineStageMismatchError(
-            "persisted stage key disagrees with its registered position: "
-            f"{candidate.stage_key!r}"
-        )
-    return stage
+    for stage in pipeline.stages:
+        if stage.key.value == candidate.stage_key:
+            return stage
+    raise PipelineStageMismatchError(
+        f"persisted stage key is not registered: {candidate.stage_key!r}"
+    )
 
 
 def _workflow_name(stage: StageDefinition) -> str:
@@ -842,8 +879,10 @@ def _workflow_name(stage: StageDefinition) -> str:
 def _decode_candidate(row: RowMapping) -> _Candidate:
     return _Candidate(
         stage_execution_id=row["stage_execution_id"],
+        work_item_id=row["work_item_id"],
         rank=row["rank"],
         stage_index=row["stage_index"],
+        barrier=row["barrier"],
         campaign_key=row["campaign_key"],
         work_key=row["work_key"],
         origin_run_key=row["origin_run_key"],

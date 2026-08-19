@@ -37,6 +37,10 @@ from dr_platform.execution.handoff import (
     StageHandoffMismatchError,
     wrap_pipeline_workflows,
 )
+from dr_platform.execution.stage_completion import (
+    StageCompletion,
+    StageSuccessor,
+)
 from dr_platform.inspection.campaigns import (
     CampaignSummary,
     RunSummary,
@@ -61,9 +65,11 @@ from dr_platform.inspection.statuses import (
 )
 from dr_platform.inspection.terminal_filters import TerminalSummaryFilter
 from dr_platform.inspection.work_items import (
+    PredecessorStageOutput,
     StageExecutionSummary,
     WorkItemSummary,
     get_work_item_stages,
+    list_predecessor_stage_outputs,
     list_work_items,
 )
 from dr_platform.pipeline.definitions import (
@@ -78,6 +84,7 @@ from dr_platform.pipeline.registry import (
 )
 from dr_platform.recovery.cancellation import (
     CancellationDisposition,
+    CancelledStageExecution,
     WorkCancellationResult,
     WorkflowCanceller,
     cancel_work,
@@ -132,6 +139,7 @@ __all__ = [
     "CampaignKey",
     "CampaignSummary",
     "CancellationDisposition",
+    "CancelledStageExecution",
     "DispatcherRegistration",
     "LedgerSchema",
     "LiveDbosIdentity",
@@ -142,6 +150,7 @@ __all__ = [
     "PipelineRegistry",
     "PipelineRunConflictError",
     "PlatformDbosConfig",
+    "PredecessorStageOutput",
     "RegistrationClosureError",
     "RunCompletionDefinition",
     "RunCompletionExecutionRecord",
@@ -159,6 +168,7 @@ __all__ = [
     "RunSummary",
     "StageApplicationFailure",
     "StageAttemptRecord",
+    "StageCompletion",
     "StageControlRecord",
     "StageDefinition",
     "StageExecutionRecord",
@@ -167,6 +177,7 @@ __all__ = [
     "StageHandoffMismatchError",
     "StageKey",
     "StageRetryResult",
+    "StageSuccessor",
     "StateCount",
     "SubmissionReceipt",
     "SweepProjection",
@@ -194,6 +205,7 @@ __all__ = [
     "inspect_campaign",
     "inspect_run_completion",
     "list_campaigns",
+    "list_predecessor_stage_outputs",
     "list_run_members",
     "list_runs",
     "list_work_items",

@@ -263,7 +263,14 @@ class LedgerSchema:
             Column("state", Text, nullable=False),
             Column("current_attempt", Integer, nullable=False),
             Column("rank", BigInteger, nullable=False),
+            Column("input_reference", Text),
             Column("output_reference", Text),
+            Column(
+                "barrier",
+                Boolean,
+                nullable=False,
+                server_default="false",
+            ),
             Column("created_at", DateTime(timezone=True), nullable=False),
             Column("updated_at", DateTime(timezone=True), nullable=False),
             ForeignKeyConstraint(
@@ -277,8 +284,8 @@ class LedgerSchema:
             ),
             UniqueConstraint(
                 "work_item_id",
-                "stage_key",
-                name=name("uq_stage_executions_work_stage"),
+                "stage_index",
+                name=name("uq_stage_executions_work_index"),
             ),
             CheckConstraint(
                 "stage_index >= 0",

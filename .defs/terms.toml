@@ -110,9 +110,9 @@ exported_symbols = ["PipelineDefinition"]
 [[terms]]
 name = "pipeline stage"
 definition = """
-One ordered scheduling and durability step in a linear pipeline. It names an \
-application-owned queue and operation plus the transformation from immutable \
-submission facts to operation arguments; it is not a graph node."""
+One registered scheduling and durability step in a pipeline declaration. It \
+names an application-owned queue and operation plus the transformation from \
+immutable submission facts to operation arguments; it is not a graph node."""
 exported_symbols = ["StageDefinition"]
 part_of = ["pipeline definition"]
 
@@ -298,6 +298,8 @@ exported_symbols = [
   "WorkItemSummary",
   "list_work_items",
   "get_work_item_stages",
+  "list_predecessor_stage_outputs",
+  "PredecessorStageOutput",
   "BulkWorkStatus",
   "BulkStatusResult",
   "bulk_work_statuses",
@@ -357,8 +359,9 @@ from other candidates."""
 name = "admission payload"
 definition = """
 The immutable routing identity and submission facts supplied when deriving a \
-stage operation's arguments. It excludes platform interpretation of those \
-derived arguments."""
+stage operation's arguments, including the persisted stage position \
+(`stage_index`) for completion identity. It excludes platform interpretation \
+of those derived arguments."""
 exported_symbols = ["AdmissionPayload"]
 
 [[terms]]
@@ -429,10 +432,24 @@ is_a = ["pipeline definition"]
 name = "stage handoff"
 definition = """
 The single completion transaction that settles a successful attempt, marks \
-its stage succeeded, and creates the next linear stage as ready when one \
-exists. A completion \
+its stage succeeded, and creates successor stages as ready from application \
+directed StageCompletion data or linear str compat. A completion \
 must identify the persisted current admitted attempt."""
-exported_symbols = ["StageHandoffMismatchError", "StageApplicationFailure"]
+exported_symbols = [
+  "StageHandoffMismatchError",
+  "StageApplicationFailure",
+  "StageCompletion",
+  "StageSuccessor",
+]
+
+[[terms]]
+name = "stage barrier"
+definition = """
+An admission gate on one stage execution that stays ready until every lower \
+stage_index execution for the same work item has succeeded. Failed or \
+cancelled lower siblings block admission until an operator retries the \
+sibling stage."""
+part_of = ["stage handoff", "stage execution"]
 
 [[terms]]
 name = "retry"
@@ -457,6 +474,7 @@ exact admitted workflow when one exists. Delegation is non-recursive and \
 logically cancelled work cannot be readmitted or advanced."""
 exported_symbols = [
   "cancel_work",
+  "CancelledStageExecution",
   "WorkCancellationResult",
   "CancellationDisposition",
   "WorkflowCanceller",

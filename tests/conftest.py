@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Iterator, Sized
+from collections.abc import Callable, Iterable, Iterator, Sized
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
@@ -12,9 +12,15 @@ from dbos import DBOS, DBOSConfig
 from sqlalchemy import Engine, create_engine, make_url, text
 
 from dr_platform._core.ledger.schema import LedgerSchema
+from dr_platform._core.ledger.states import StageExecutionState  # noqa: TC001
+from dr_platform.pipeline.definitions import PipelineDefinition
+from dr_platform.pipeline.registry import PipelineRegistry  # noqa: TC001
 from dr_platform.recovery.live_identity import LiveDbosIdentity
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
 from dr_platform.runtime.dbos import DEFAULT_POOL_SIZE, PlatformDbosConfig
+from dr_platform.runtime.dispatcher import (
+    DispatcherRegistration,  # noqa: TC001
+)
 from dr_platform.submission.stream import (
     RunMemberInput,
     RunRegistrationDeclaration,
@@ -28,6 +34,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
 
     from dr_platform.admission.runner import AdmissionPayload
+    from dr_platform.pipeline.definitions import PipelineDefinition
 
 TEST_DATABASE_URL = os.environ.get(
     "DR_PLATFORM_TEST_DATABASE_URL",
@@ -274,3 +281,112 @@ def initialize_dbos_schema(config: DBOSConfig) -> None:
         DBOS.launch()
     finally:
         DBOS.destroy(destroy_registry=True)
+
+
+def handoff_utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def configure_stage_controls(
+    engine: Engine,
+    pipeline: PipelineDefinition,
+    *,
+    capacity: int,
+    clock: Callable[[], datetime] | None = None,
+) -> None:
+    from dr_platform.admission.controls import upsert_stage_control
+
+    selected_clock = clock or handoff_utc_now
+    with engine.begin() as connection:
+        for stage in pipeline.stages:
+            upsert_stage_control(
+                connection,
+                pipeline_key=pipeline.key.value,
+                pipeline_version=pipeline.version,
+                stage_key=stage.key,
+                selector={},
+                capacity=capacity,
+                paused=False,
+                updated_at=selected_clock(),
+            )
+
+
+def stage_state_count(
+    engine: Engine,
+    schema: LedgerSchema,
+    *,
+    stage_index: int,
+    state: StageExecutionState,
+) -> int:
+    from sqlalchemy import func, select
+
+    with engine.connect() as connection:
+        return connection.execute(
+            select(func.count())
+            .select_from(schema.stage_executions)
+            .where(
+                schema.stage_executions.c.stage_index == stage_index,
+                schema.stage_executions.c.state == state.value,
+            )
+        ).scalar_one()
+
+
+def wait_for_handoff(
+    predicate: Callable[[], bool],
+    *,
+    timeout_seconds: float = 15,
+) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError("timed out waiting for DBOS stage workflow")
+
+
+def launch_handoff_dbos(
+    database_url: str,
+    *,
+    suffix: str,
+    engine: Engine,
+    registry: PipelineRegistry,
+    app_version_prefix: str = "handoff-v2",
+) -> DispatcherRegistration:
+    from dr_platform.runtime.dispatcher import register_scheduled_dispatcher
+
+    DBOS(
+        config=dbos_config(
+            name=f"drp-{app_version_prefix}-{suffix}",
+            system_database_url=database_url,
+            application_database_url=database_url,
+            application_version=f"{app_version_prefix}-{suffix}",
+            notification_listener_polling_interval_sec=0.01,
+        )
+    )
+    registration = register_scheduled_dispatcher(
+        live_dbos_identity=default_live_dbos_identity(
+            app_version=f"{app_version_prefix}-{suffix}"
+        ),
+        config=PlatformDbosConfig(
+            database_url=database_url,
+            system_database_url=database_url,
+            max_recovery_attempts=1,
+        ),
+        engine=engine,
+        registry=registry,
+        sweep_cron=None,
+    )
+    try:
+        DBOS.launch()
+    except Exception:
+        registration.close()
+        raise
+    return registration
+
+
+def recorded_workflow_id(options: EnqueueOptions) -> str:
+    workflow_id = options.get("workflow_id")
+    assert workflow_id is not None
+    return workflow_id

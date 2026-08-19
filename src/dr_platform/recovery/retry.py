@@ -38,7 +38,11 @@ def retry_stage(
     clock: Callable[[], datetime] = utc_now,
     schema: LedgerSchema | None = None,
 ) -> StageRetryResult:
-    """Only FAILED stages may prepare a new attempt for later admission."""
+    """Prepare a new attempt for a FAILED stage execution.
+
+    When a barrier join is blocked by a FAILED sibling, retry that sibling
+    execution — only FAILED rows are eligible.
+    """
     selected_schema = schema or LedgerSchema()
     with engine.begin() as connection:
         table = selected_schema.stage_executions
