@@ -6,7 +6,7 @@ from datetime import timedelta
 from uuid import uuid4
 
 from dbos import DBOS, Queue
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from dr_platform._core.identities import PipelineKey, StageKey
 from dr_platform._core.ledger.states import StageExecutionState
@@ -25,6 +25,7 @@ from tests.execution.test_handoff import _launch_dbos
 
 _body_started = threading.Event()
 _body_cancelled = threading.Event()
+_body_completed = threading.Event()
 
 
 async def _long_running_body(input_reference: str) -> str:
@@ -37,16 +38,29 @@ async def _long_running_body(input_reference: str) -> str:
     return f"done:{input_reference}"
 
 
+async def _swallowing_body(input_reference: str) -> str:
+    _body_started.set()
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        _body_completed.set()
+        return f"swallowed:{input_reference}"
+    return f"done:{input_reference}"
+
+
 def _args_for(payload: AdmissionPayload) -> tuple[object, ...]:
     return (payload.input_reference,)
 
 
-def test_cancel_work_reaches_running_preemptible_stage_body(
+def _run_cancelled_preemptible_test(
     clean_pg: str,
     pg_engine,
+    *,
+    suffix: str,
+    body,
+    cancelled_event: threading.Event,
 ) -> None:
     schema = _migrate(pg_engine)
-    suffix = uuid4().hex[:10]
     pipeline = wrap_pipeline_workflows(
         PipelineDefinition(
             key=PipelineKey(f"preempt-{suffix}"),
@@ -55,7 +69,7 @@ def test_cancel_work_reaches_running_preemptible_stage_body(
                 StageDefinition(
                     key=StageKey("execute"),
                     queue_name=f"preempt-{suffix}",
-                    workflow=_long_running_body,
+                    workflow=body,
                     args_for=_args_for,
                 ),
             ),
@@ -89,7 +103,7 @@ def test_cancel_work_reaches_running_preemptible_stage_body(
     )
     Queue(pipeline.stages[0].queue_name, polling_interval_sec=0.02)
     _body_started.clear()
-    _body_cancelled.clear()
+    cancelled_event.clear()
     registration = _launch_dbos(
         clean_pg,
         suffix=suffix,
@@ -112,15 +126,55 @@ def test_cancel_work_reaches_running_preemptible_stage_body(
             work_key="work",
             clock=lambda: NOW + timedelta(seconds=1),
         )
-        wait_for_handoff(_body_cancelled.is_set, timeout_seconds=5)
+        wait_for_handoff(cancelled_event.is_set, timeout_seconds=5)
         with pg_engine.connect() as connection:
             state = connection.execute(
                 select(schema.stage_executions.c.state).where(
                     schema.stage_executions.c.stage_index == 0
                 )
             ).scalar_one()
+            attempt_count = connection.execute(
+                select(func.count()).select_from(schema.stage_attempts)
+            ).scalar_one()
+            terminal_summary = connection.execute(
+                select(schema.stage_attempts.c.terminal_summary)
+            ).scalar_one()
         assert state == StageExecutionState.CANCELLED.value
+        assert attempt_count == 1
+        assert terminal_summary is None or terminal_summary.get("outcome") != (
+            "failed"
+        )
     finally:
         registration.close()
         DBOS.destroy()
     del schema
+
+
+def test_cancel_work_reaches_running_preemptible_stage_body(
+    clean_pg: str,
+    pg_engine,
+) -> None:
+    suffix = uuid4().hex[:10]
+    _run_cancelled_preemptible_test(
+        clean_pg,
+        pg_engine,
+        suffix=suffix,
+        body=_long_running_body,
+        cancelled_event=_body_cancelled,
+    )
+
+
+def test_cancelled_preemptible_body_must_reraise_to_avoid_success(
+    clean_pg: str,
+    pg_engine,
+) -> None:
+    suffix = uuid4().hex[:10]
+    _body_started.clear()
+    _body_completed.clear()
+    _run_cancelled_preemptible_test(
+        clean_pg,
+        pg_engine,
+        suffix=suffix,
+        body=_swallowing_body,
+        cancelled_event=_body_completed,
+    )

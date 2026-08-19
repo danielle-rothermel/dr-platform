@@ -50,7 +50,7 @@ Distinct worker classes listen on distinct DBOS queue names; routing at \
 enqueue time keeps CUDA and CPU work on the correct processes without \
 changing label-based capacity controls."""
 date = "2026-08-18"
-check = "uv run pytest -q tests/admission/test_runner.py -k label_queue_routes tests/pipeline/test_definitions.py -k label_queue"
+check = "uv run pytest -q tests/admission/test_runner.py tests/pipeline/test_definitions.py -k 'label_queue_routes or label_queue'"
 
 [[contracts]]
 title = "Work priority orders admission and enqueue"
@@ -74,7 +74,7 @@ rationale = """
 A static frozenset captured at registration projects legitimately running \
 cluster work as dead when a reconciler on another host owns sweep."""
 date = "2026-08-18"
-check = "uv run pytest -q tests/recovery/test_sweep.py -k resolver tests/runtime/test_dispatcher.py -k executor_identity"
+check = "uv run pytest -q tests/recovery/test_sweep.py tests/runtime/test_dispatcher.py -k 'resolver or executor_identity'"
 
 [[contracts]]
 title = "Applications own workflow resources"

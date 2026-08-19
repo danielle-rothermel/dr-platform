@@ -29,5 +29,11 @@ class LiveDbosIdentity:
 
     def live_executor_ids(self) -> frozenset[str]:
         if self.resolve_executor_ids is not None:
-            return frozenset(self.resolve_executor_ids())
+            try:
+                resolved = frozenset(self.resolve_executor_ids())
+            except Exception:  # noqa: BLE001 -- resolver must not fail sweep
+                return self.executor_ids
+            if not resolved:
+                return self.executor_ids
+            return resolved | self.executor_ids
         return self.executor_ids

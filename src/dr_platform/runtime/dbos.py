@@ -47,6 +47,9 @@ def normalize_postgresql_driver_url(database_url: str) -> str:
 
 DEFAULT_POOL_SIZE = 10_000
 
+# DBOS 2.27 colocated system schema; keep beside the package pin.
+DBOS_WORKFLOW_STATUS_TABLE = "dbos.workflow_status"
+
 
 class PlatformDbosConfig(BaseModel):
     """Queue registration and concurrency remain application-owned.

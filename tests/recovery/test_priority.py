@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from uuid import uuid4
 
-import pytest
-from dbos import Queue
-from sqlalchemy import select
+from dbos import DBOS, Queue
+from sqlalchemy import select, text
 
 from dr_platform._core.identities import (
     CampaignKey,
@@ -22,6 +22,7 @@ from dr_platform.pipeline.definitions import (
 )
 from dr_platform.pipeline.registry import PipelineRegistry
 from dr_platform.recovery.priority import set_work_priority
+from dr_platform.runtime.dbos import DBOS_WORKFLOW_STATUS_TABLE
 from dr_platform.submission.stream import WorkInput
 from tests.admission.test_runner import (
     _as_dbos_client,
@@ -31,6 +32,7 @@ from tests.admission.test_runner import (
     _submit_two_stage_backlog,
 )
 from tests.conftest import NOW, _migrate, submit_items
+from tests.execution.test_handoff import _launch_dbos
 
 
 async def _workflow(*args: object) -> str:
@@ -179,7 +181,8 @@ def test_set_work_priority_reorders_ready_executions(pg_engine) -> None:
     assert priorities["work-b"] == 0
 
 
-def test_set_work_priority_requires_client_for_admitted_work(
+def test_set_work_priority_updates_dbos_workflow_status(
+    clean_pg: str,
     pg_engine,
 ) -> None:
     _migrate(pg_engine)
@@ -226,17 +229,40 @@ def test_set_work_priority_requires_client_for_admitted_work(
         clock=lambda: NOW,
     )
     Queue(pipeline.stages[0].queue_name, priority_enabled=True)
-    client = _RecordingClient()
-    run_admission_pass(
-        pg_engine,
-        client=_as_dbos_client(client),
+    registration = _launch_dbos(
+        clean_pg,
+        suffix=suffix,
+        engine=pg_engine,
         registry=registry,
-        clock=lambda: NOW,
     )
-    with pytest.raises(ValueError, match="client is required"):
-        set_work_priority(
+    try:
+        summary = run_admission_pass(
+            pg_engine,
+            client=registration.client,
+            registry=registry,
+            clock=lambda: NOW,
+        )
+        assert summary.admitted_total == 1
+        result = set_work_priority(
             campaign_key=f"campaign-{suffix}",
             work_key="work",
             priority=1,
             engine=pg_engine,
+            clock=lambda: NOW + timedelta(seconds=1),
         )
+        assert result.updated_workflow_ids
+        with pg_engine.connect() as connection:
+            dbos_priority = connection.execute(
+                text(
+                    """
+                    SELECT priority FROM dbos.workflow_status
+                    WHERE workflow_uuid = :workflow_id
+                    """
+                ),
+                {"workflow_id": result.updated_workflow_ids[0]},
+            ).scalar_one()
+        assert DBOS_WORKFLOW_STATUS_TABLE == "dbos.workflow_status"
+        assert dbos_priority == 1
+    finally:
+        registration.close()
+        DBOS.destroy()

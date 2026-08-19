@@ -771,6 +771,81 @@ def test_sweep_resolver_includes_peer_executor_ids(pg_engine: Engine) -> None:
     assert summary.projected_count == 0
 
 
+def test_sweep_empty_resolver_falls_back_to_static_executor_ids(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-resolver-empty",
+        campaign_key="campaign-resolver-empty",
+        run_key="run-resolver-empty",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=LiveDbosIdentity(
+            app_version="test",
+            executor_ids=frozenset({"local"}),
+            resolve_executor_ids=lambda: (),
+        ),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        executor_id="local",
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 0
+
+
+def test_sweep_raising_resolver_falls_back_to_static_executor_ids(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-resolver-error",
+        campaign_key="campaign-resolver-error",
+        run_key="run-resolver-error",
+    )
+    del registry
+
+    def _raise_resolver() -> tuple[str, ...]:
+        raise RuntimeError("resolver unavailable")
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=LiveDbosIdentity(
+            app_version="test",
+            executor_ids=frozenset({"local"}),
+            resolve_executor_ids=_raise_resolver,
+        ),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        executor_id="local",
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 0
+
+
 def test_sweep_skips_pending_with_live_identity(
     pg_engine: Engine,
 ) -> None:

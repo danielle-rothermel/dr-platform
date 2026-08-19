@@ -31,6 +31,7 @@ from dr_platform._core.ledger.executions import (
 )
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.controls import (
+    set_stage_capacity,
     upsert_stage_control,
 )
 from dr_platform.admission.runner import (
@@ -42,7 +43,10 @@ from dr_platform.admission.runner import (
     _StageIdentity,
     run_admission_pass,
 )
-from dr_platform.execution.handoff import _complete_stage_in_transaction
+from dr_platform.execution.handoff import (
+    _complete_stage_in_transaction,
+    wrap_pipeline_workflows,
+)
 from dr_platform.execution.stage_completion import StageSuccessor
 from dr_platform.pipeline.definitions import (
     LabelQueueRoute,
@@ -1686,7 +1690,7 @@ def test_label_queue_routes_select_enqueue_queue_name(
 ) -> None:
     schema = _migrate(pg_engine)
     suffix = uuid4().hex[:10]
-    pipeline = PipelineDefinition(
+    declared = PipelineDefinition(
         key=PipelineKey(f"label-queue-{suffix}"),
         version=1,
         stages=(
@@ -1704,6 +1708,7 @@ def test_label_queue_routes_select_enqueue_queue_name(
             ),
         ),
     )
+    pipeline = wrap_pipeline_workflows(declared, max_recovery_attempts=1)
     registry = PipelineRegistry()
     registry.register(pipeline)
     with pg_engine.begin() as connection:
@@ -1751,4 +1756,105 @@ def test_label_queue_routes_select_enqueue_queue_name(
         "default-queue",
         "cuda-queue",
     }
+    del schema
+
+
+def test_admission_pagination_respects_priority_boundary(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    suffix = uuid4().hex[:10]
+    pipeline = PipelineDefinition(
+        key=PipelineKey(f"priority-page-{suffix}"),
+        version=1,
+        stages=(
+            StageDefinition(
+                key=StageKey("execute"),
+                queue_name="execute-queue",
+                workflow=_workflow,
+                args_for=_args_for,
+            ),
+        ),
+    )
+    registry = PipelineRegistry()
+    registry.register(pipeline)
+    set_stage_capacity(
+        pipeline=pipeline.identity,
+        stage_key=StageKey("execute"),
+        capacity=2,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    submit_items(
+        campaign_key=f"campaign-{suffix}",
+        run_key=f"run-{suffix}",
+        pipeline=pipeline.identity,
+        execution_config_reference="config:priority",
+        items=(
+            WorkInput(
+                work_key="work-mid",
+                input_reference="input:mid",
+                labels={},
+                priority=1,
+            ),
+            WorkInput(
+                work_key="work-high",
+                input_reference="input:high",
+                labels={},
+                priority=5,
+            ),
+            WorkInput(
+                work_key="work-top",
+                input_reference="input:top",
+                labels={},
+                priority=0,
+            ),
+        ),
+        registry=registry,
+        engine=pg_engine,
+        expected_member_count=3,
+        clock=lambda: NOW,
+    )
+    client = _RecordingClient()
+    first = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW,
+        batch_size=1,
+    )
+    assert first.admitted_total == 1
+    second = run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(client),
+        registry=registry,
+        clock=lambda: NOW + timedelta(seconds=1),
+        batch_size=1,
+    )
+    assert second.admitted_total == 1
+    with pg_engine.connect() as connection:
+        admitted_work_keys = (
+            connection.execute(
+                select(schema.work_items.c.work_key)
+                .select_from(schema.stage_executions.join(schema.work_items))
+                .where(
+                    schema.stage_executions.c.state
+                    == StageExecutionState.ADMITTED.value
+                )
+                .order_by(schema.stage_executions.c.priority)
+            )
+            .scalars()
+            .all()
+        )
+        remaining_ready = (
+            connection.execute(
+                select(schema.work_items.c.work_key)
+                .select_from(schema.stage_executions.join(schema.work_items))
+                .where(schema.stage_executions.c.state == "ready")
+            )
+            .scalars()
+            .all()
+        )
+    assert admitted_work_keys == ["work-top", "work-mid"]
+    assert remaining_ready == ["work-high"]
     del schema

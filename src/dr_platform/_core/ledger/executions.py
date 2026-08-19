@@ -143,7 +143,6 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
         if (
             existing.stage_key != normalized_stage_key
             or existing.rank != rank
-            or existing.priority != priority
             or existing.barrier != barrier
             or (
                 input_reference is not None
@@ -153,6 +152,27 @@ def insert_stage_execution(  # noqa: PLR0913 -- explicit persistence facts
             raise StageExecutionConflictError(
                 "work item stage is already bound to different immutable facts"
             )
+        if existing.priority != priority:
+            connection.execute(
+                update(table)
+                .where(
+                    table.c.stage_execution_id == existing.stage_execution_id
+                )
+                .values(priority=priority, updated_at=created_at)
+            )
+            refreshed = _get_stage_execution_for_work_index(
+                connection,
+                work_item_id=work_item_id,
+                stage_index=stage_index,
+                schema=selected_schema,
+            )
+            if refreshed is None:
+                raise RuntimeError(
+                    "stage execution priority sync failed on read-back "
+                    f"(work_item_id={work_item_id!r}, "
+                    f"stage_index={stage_index!r})"
+                )
+            return refreshed
         return existing
     return _decode_stage_execution(row)
 

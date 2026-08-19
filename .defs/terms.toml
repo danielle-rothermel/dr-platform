@@ -111,9 +111,11 @@ exported_symbols = ["PipelineDefinition"]
 name = "pipeline stage"
 definition = """
 One registered scheduling and durability step in a pipeline declaration. It \
-names an application-owned default queue, optional exact-label queue routes, \
-and operation plus the transformation from immutable submission facts to \
-operation arguments; it is not a graph node."""
+names an application-owned default queue, optional exact-label queue routes \
+with non-empty selectors and distinct route queue names, and operation plus \
+the transformation from immutable submission facts to operation arguments; \
+routes overlap only when shared label keys agree on values. It is not a \
+graph node."""
 exported_symbols = [
   "StageDefinition",
   "LabelQueueRoute",

@@ -30,9 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `AdmissionPayload.work_item_id` and persisted per-stage `input_reference`.
 - `CancelledStageExecution` on the public cancellation API.
 - Alembic revision `0003_stage_index_identity` (irreversible).
-
-### Changed
-
 - Stage execution identity is `(work_item_id, stage_index)`; stage workflow-id
   digests include `stage_index` (invalidates in-flight stage workflow ids).
 - `str` stage returns are permitted only at the registration index; otherwise
@@ -45,11 +42,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `cancel_work` is item-level: every nonterminal execution is cancelled.
 - Work-item status and run-barrier release counts derive from precedence over
   all executions, not `max(stage_index)`.
+- Label queue route overlap validation accepts disjoint label keys; route queue
+  names must be distinct at registration.
 
 ### Fixed
 
 - Repeated `cancel_work` on already-cancelled fan-out work reissues every stored
   admitted workflow identity, not just one representative row.
+- Sweep resolver failures and empty results fall back to static `executor_ids`
+  instead of projecting every pending workflow as `dead_executor`.
+- Successor stage execution insert replays sync priority after an operator boost.
 - Alembic revision `0003_stage_index_identity` validates the schema prefix via
   `LedgerSchema` before interpolating privileged DDL.
 - `StageSuccessor` rejects boolean `stage_index` values at construction time

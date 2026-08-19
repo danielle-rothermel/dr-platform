@@ -16,14 +16,21 @@ from dr_platform._core.ledger.attempts import get_stage_attempt
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.validation import validate_work_priority
+from dr_platform.runtime.dbos import DBOS_WORKFLOW_STATUS_TABLE
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
 
-    from dbos import DBOSClient
     from sqlalchemy import Connection, Engine
 
+
+_UPDATE_ADMITTED_WORKFLOW_PRIORITY = (
+    "UPDATE dbos.workflow_status "
+    "SET priority = :priority "
+    "WHERE workflow_uuid = :workflow_id"
+)
+assert DBOS_WORKFLOW_STATUS_TABLE == "dbos.workflow_status"
 
 _NONTERMINAL_STATES = frozenset(
     {
@@ -48,11 +55,15 @@ def set_work_priority(  # noqa: PLR0913 -- explicit operator dependencies
     work_key: WorkKey | str,
     priority: int,
     engine: Engine,
-    client: DBOSClient | None = None,
     clock: Callable[[], datetime] = utc_now,
     schema: LedgerSchema | None = None,
 ) -> WorkPriorityResult:
-    """Raise a work item's admission and queue priority."""
+    """Raise a work item's admission and queue priority.
+
+    Ready executions pick up the new order on the next admission pass. Admitted
+    executions also update the colocated DBOS ``workflow_status.priority`` row
+    for each current attempt workflow id.
+    """
     normalized_campaign = normalize_key(campaign_key, CampaignKey)
     normalized_work = normalize_key(work_key, WorkKey)
     validate_work_priority(priority)
@@ -94,7 +105,6 @@ def set_work_priority(  # noqa: PLR0913 -- explicit operator dependencies
             connection,
             stage_execution_ids=stage_execution_ids,
             priority=priority,
-            client=client,
             schema=selected_schema,
         )
 
@@ -135,7 +145,6 @@ def _update_admitted_workflow_priorities(
     *,
     stage_execution_ids: tuple[int, ...],
     priority: int,
-    client: DBOSClient | None,
     schema: LedgerSchema,
 ) -> tuple[str, ...]:
     if not stage_execution_ids:
@@ -162,17 +171,8 @@ def _update_admitted_workflow_priorities(
         if attempt is None or not attempt.workflow_id:
             continue
         workflow_ids.append(attempt.workflow_id)
-        # DBOS 2.27 colocated workflow_status.priority controls dequeue order.
         connection.execute(
-            text(
-                "UPDATE dbos.workflow_status "
-                "SET priority = :priority "
-                "WHERE workflow_uuid = :workflow_id"
-            ),
+            text(_UPDATE_ADMITTED_WORKFLOW_PRIORITY),
             {"priority": priority, "workflow_id": attempt.workflow_id},
-        )
-    if workflow_ids and client is None:
-        raise ValueError(
-            "client is required when boosting priority for admitted work"
         )
     return tuple(workflow_ids)

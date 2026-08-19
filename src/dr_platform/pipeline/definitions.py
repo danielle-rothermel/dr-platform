@@ -43,7 +43,10 @@ def _selectors_can_both_match(
     left: Mapping[str, str],
     right: Mapping[str, str],
 ) -> bool:
-    return all(left[key] == right[key] for key in set(left) & set(right))
+    shared = set(left) & set(right)
+    if not shared:
+        return False
+    return all(left[key] == right[key] for key in shared)
 
 
 def _validate_label_queue_routes(
@@ -52,6 +55,9 @@ def _validate_label_queue_routes(
     for route in routes:
         if not route.selector:
             raise ValueError("label queue route selector must be non-empty")
+    route_queue_names = [route.queue_name for route in routes]
+    if len(set(route_queue_names)) != len(route_queue_names):
+        raise ValueError("label queue route queue names must be distinct")
     for index, left in enumerate(routes):
         for right in routes[index + 1 :]:
             if _selectors_can_both_match(left.selector, right.selector):

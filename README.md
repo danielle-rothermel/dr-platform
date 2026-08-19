@@ -126,6 +126,13 @@ class StageDefinition:
     queue_name: str
     workflow: Callable[..., Awaitable[str | StageCompletion]]
     args_for: Callable[[AdmissionPayload], tuple[object, ...]]
+    label_queue_routes: tuple[LabelQueueRoute, ...] = ()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LabelQueueRoute:
+    selector: Mapping[str, str]
+    queue_name: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -159,6 +166,20 @@ class PipelineRegistry:
     ) -> PipelineDefinition: ...
 ```
 
+#### Label queue routing
+
+Stages may declare optional `LabelQueueRoute` selectors for enqueue-time queue
+selection. Each route uses a non-empty exact-label predicate; routes overlap
+only when shared label keys agree on values. Route queue names must be distinct.
+Admission enqueues to the first matching route queue name and otherwise uses the
+stage default `queue_name`. Capacity and pause controls remain label-based and
+unchanged.
+
+Every distinct queue name referenced by a stage (default plus routes) must be
+registered as a DBOS `Queue` on a worker that will dequeue it before
+`DBOS.launch()`. The platform cannot detect a missing queue at enqueue time;
+misconfiguration leaves work `ADMITTED` with no dequeue.
+
 ### Submission
 
 Submission registers one declared ordered membership in bounded, set-oriented
@@ -172,6 +193,7 @@ class WorkInput:
     work_key: WorkKey
     input_reference: str
     labels: Mapping[str, str]
+    priority: int = 0
 
     def __init__(
         self,
@@ -179,6 +201,7 @@ class WorkInput:
         work_key: WorkKey | str,
         input_reference: str,
         labels: Mapping[str, str],
+        priority: int = 0,
     ) -> None: ...
 
 
@@ -226,7 +249,9 @@ zero-based member order and pins the digest wire format used again at closure.
 ### Admission and controls
 
 Admission supplies each selected stage with immutable work context and respects
-every matching capacity control. Operators can change capacity or pause future
+every matching capacity control. Ready work is ordered by `(priority, stable
+rank, stage_execution_id)`; lower priority numbers are admitted first and `0`
+is the default highest priority. Operators can change capacity or pause future
 admissions without preempting work that is already running. Join successors
 with `barrier=True` remain `READY` until every lower `stage_index` for the
 same work item is `SUCCEEDED`; admission reports skips in
@@ -324,6 +349,16 @@ def wrap_pipeline_workflows(
 Argument derivation runs inside the durable wrapper, after admission commits.
 Applications own and close any loop-affine clients used by their workflows.
 
+#### Preemptible stage bodies
+
+Wrapped application bodies run inside a preemptible DBOS step so operator
+cancellation can interrupt in-flight work with roughly one-second latency
+(DBOS poll interval). Bodies must re-raise `asyncio.CancelledError`; swallowing
+cancellation can still complete the step while the ledger is already
+`CANCELLED`. Do not call `DBOS.transaction()` inside a body (DBOS asserts).
+Avoid nested DBOS steps inside the body; return values cross the step boundary
+via pickle, so keep returns small and serializable.
+
 ### Run completion
 
 A completion-enabled pipeline requires an immutable manifest reference and the
@@ -408,6 +443,34 @@ lower sibling keeps the run unsealed until that sibling is retried;
 `cancel_work` on such an item derives **cancelled** (not failed) under
 precedence.
 
+#### Work priority
+
+Each work item carries an optional submission `priority` (default `0`, lower
+numbers are preferred). Admission orders ready work by priority before stable
+rank. Non-zero priorities are passed to DBOS enqueue; application queues must
+set `priority_enabled=True` when priority should affect dequeue order.
+`set_work_priority` updates ready and admitted executions and, for admitted
+work, the colocated DBOS `workflow_status.priority` row on the current attempt.
+
+#### Dynamic executor identity
+
+When sweep is enabled, pass `LiveDbosIdentity` with either a non-empty static
+`executor_ids` set or a `resolve_executor_ids` callable that returns the
+current live worker ids (for example from SLURM). Sweep resolves the executor
+set once per pass. On resolver error or an empty result, the platform falls
+back to static `executor_ids` so a transient resolver failure does not project
+the entire fleet as `dead_executor`. The resolver must be fast and
+side-effect-free.
+
+```python
+@dataclass(frozen=True, slots=True)
+class WorkPriorityResult:
+    work_item_id: int
+    priority: int
+    updated_stage_execution_ids: tuple[int, ...]
+    updated_workflow_ids: tuple[str, ...]
+```
+
 ```python
 @dataclass(frozen=True, slots=True)
 class StageRetryResult:
@@ -429,6 +492,7 @@ class SweepSummary:
 
 ```text
 cancel_work(work identity, canceller) -> WorkCancellationResult
+set_work_priority(campaign_key, work_key, priority) -> WorkPriorityResult
 retry_stage(stage_execution_id) -> StageRetryResult
 retry_run_completion(run_key, DBOS client, registry) -> RunCompletionRetryResult
 sweep_abandoned_stages(DBOS client, live_identity) -> SweepSummary
@@ -551,13 +615,16 @@ retaining before explicitly resetting it. All three revisions refuse downgrade
 outright rather than delete the recorded ledger.
 
 Register wrapped workflows, application queues, and the scheduled dispatcher
-before `DBOS.launch()`. Admission, run-barrier reconciliation, and
+before `DBOS.launch()`. Declare every queue name used by a stage default or
+label route, and enable `priority_enabled=True` on queues that should honor
+work priority. Admission, run-barrier reconciliation, and
 abandoned-stage and run-completion sweep have separate schedule and batch
 settings; both register by default unless `sweep_cron=None`. Pass `LiveDbosIdentity` from `DBOS.application_version` and either a static
 executor set or a `resolve_executor_ids` callable at dispatcher registration.
 When multiple worker processes run, either disable sweep on all but one
 reconciler or supply every live executor ID to the process that owns sweep so
-peer work is not projected as `dead_executor`.
+peer work is not projected as `dead_executor`. If the resolver raises or returns
+an empty collection, sweep falls back to static `executor_ids`.
 The barrier also has a candidate budget, which
 must be at least its release batch size and bounds all evaluated runs, including
 ineligible and lock-skipped candidates. A persisted cursor rotates blocked or
