@@ -1,6 +1,6 @@
 [project]
 name = "dr-platform"
-version = "0.2.1"
+version = "0.2.2"
 description = "Durable staged pipelines and run fan-in on PostgreSQL and DBOS."
 readme = "README.md"
 license = "MIT"
