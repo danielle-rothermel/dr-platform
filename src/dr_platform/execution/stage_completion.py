@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from dr_platform._core.identities import StageKey, normalize_key
-from dr_platform._core.validation import validate_non_empty_string
+from dr_platform._core.validation import (
+    validate_non_empty_string,
+    validate_nonnegative_integer,
+)
 
 if TYPE_CHECKING:
     from dr_platform.pipeline.definitions import PipelineDefinition
@@ -32,8 +35,7 @@ class StageSuccessor:
             "stage_key",
             normalize_key(self.stage_key, StageKey),
         )
-        if self.stage_index < 0:
-            raise ValueError("stage_index must be non-negative")
+        validate_nonnegative_integer(self.stage_index, label="stage index")
         validate_non_empty_string(
             self.input_reference,
             label="successor input reference",

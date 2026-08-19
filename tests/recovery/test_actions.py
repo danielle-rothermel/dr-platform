@@ -137,6 +137,22 @@ class _RaisingCanceller:
         raise RuntimeError("delegation exploded")
 
 
+class _PartialRaisingCanceller:
+    def __init__(self, *, fail_after: int) -> None:
+        self.attempts: list[tuple[str, bool]] = []
+        self.fail_after = fail_after
+
+    def cancel_workflow(
+        self,
+        workflow_id: str,
+        *,
+        cancel_children: bool = False,
+    ) -> None:
+        self.attempts.append((workflow_id, cancel_children))
+        if len(self.attempts) > self.fail_after:
+            raise RuntimeError("delegation exploded")
+
+
 def _clock_after_execution_lock(
     engine: Engine,
     *,
@@ -1032,6 +1048,112 @@ def test_repeated_cancel_self_heals_a_lost_admitted_delegation(
     lost_workflow_id = raising.attempts[0][0]
     assert result.cancellations == ()
     assert healing.cancelled == [(lost_workflow_id, False)]
+
+
+def test_repeated_cancel_repairs_all_lost_fan_out_delegations(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry = _registry()
+    _submit(
+        pg_engine,
+        registry,
+        run_key="run-fanout-cancel",
+        work_keys=("work-fanout-cancel",),
+    )
+    set_stage_capacity(
+        pipeline=PipelineIdentity(PipelineKey("evaluation"), 1),
+        stage_key="execute",
+        capacity=4,
+        engine=pg_engine,
+        clock=lambda: NOW,
+    )
+    admission_client = _RecordingClient()
+    run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(admission_client),
+        registry=registry,
+        clock=lambda: NOW,
+    )
+    split_workflow_id = admission_client.enqueued[0]["workflow_id"]
+    with pg_engine.begin() as connection:
+        _complete_stage_in_transaction(
+            connection,
+            workflow_id=split_workflow_id,
+            pipeline_key="evaluation",
+            pipeline_version=1,
+            stage_key="execute",
+            stage_index=0,
+            succeeded=True,
+            output_reference="split:output",
+            terminal_summary={"outcome": "succeeded"},
+            terminal_reference="split:output",
+            evidence=None,
+            successors=(
+                StageSuccessor(
+                    stage_key=StageKey("execute"),
+                    stage_index=1,
+                    input_reference="row:1",
+                ),
+                StageSuccessor(
+                    stage_key=StageKey("execute"),
+                    stage_index=2,
+                    input_reference="row:2",
+                ),
+            ),
+            completed_at=NOW + timedelta(seconds=1),
+        )
+    run_admission_pass(
+        pg_engine,
+        client=_as_dbos_client(admission_client),
+        registry=registry,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    with pg_engine.connect() as connection:
+        admitted_workflow_ids = list(
+            connection.execute(
+                select(schema.stage_attempts.c.workflow_id)
+                .join(
+                    schema.stage_executions,
+                    schema.stage_attempts.c.stage_execution_id
+                    == schema.stage_executions.c.stage_execution_id,
+                )
+                .where(
+                    schema.stage_executions.c.work_item_id
+                    == _execution_rows(pg_engine, schema)[0][1],
+                    schema.stage_executions.c.stage_index.in_((1, 2)),
+                    schema.stage_executions.c.state
+                    == StageExecutionState.ADMITTED.value,
+                )
+                .order_by(schema.stage_executions.c.stage_index)
+            ).scalars()
+        )
+    assert len(admitted_workflow_ids) == 2
+    work_item_id = _execution_rows(pg_engine, schema)[0][1]
+
+    partial = _PartialRaisingCanceller(fail_after=1)
+    with pytest.raises(RuntimeError, match="delegation exploded"):
+        cancel_work(
+            engine=pg_engine,
+            client=partial,
+            work_item_id=work_item_id,
+            clock=lambda: NOW + timedelta(seconds=3),
+        )
+    assert len(partial.attempts) == 2
+    cancelled_states = [row[2] for row in _execution_rows(pg_engine, schema)]
+    assert cancelled_states.count(StageExecutionState.CANCELLED.value) == 2
+
+    healing = _RecordingCanceller()
+    result = cancel_work(
+        engine=pg_engine,
+        client=healing,
+        work_item_id=work_item_id,
+        clock=lambda: NOW + timedelta(seconds=4),
+    )
+    assert result.cancellations == ()
+    assert healing.cancelled == [
+        (workflow_id, False) for workflow_id in admitted_workflow_ids
+    ]
 
 
 def test_cancel_after_committed_handoff_cancels_the_successor(

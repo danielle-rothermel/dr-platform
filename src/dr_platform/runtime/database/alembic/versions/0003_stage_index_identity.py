@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import context, op
 
-from dr_platform._core.ledger.schema import DEFAULT_PREFIX
+from dr_platform._core.ledger.schema import DEFAULT_PREFIX, LedgerSchema
 
 revision = "0003_stage_index_identity"
 down_revision = "0002_dr_store_baseline"
@@ -14,10 +14,10 @@ depends_on = None
 
 
 def _prefix() -> str:
-    prefix = context.config.attributes.get("prefix", DEFAULT_PREFIX)
-    if not isinstance(prefix, str):
+    raw = context.config.attributes.get("prefix", DEFAULT_PREFIX)
+    if not isinstance(raw, str):
         raise TypeError("migration prefix must be a string")
-    return prefix
+    return LedgerSchema(raw).prefix
 
 
 def _name(prefix: str, suffix: str) -> str:

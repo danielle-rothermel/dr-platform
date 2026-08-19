@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import pytest
 from dbos import DBOS, Queue
 from sqlalchemy import Engine, select
 
@@ -189,6 +190,15 @@ def _pipeline_with_completion(
             for stage_key, logic in stages
         ),
     )
+
+
+def test_stage_successor_rejects_boolean_stage_index() -> None:
+    with pytest.raises(TypeError, match="stage index must be an integer"):
+        StageSuccessor(
+            stage_key=StageKey("execute"),
+            stage_index=True,
+            input_reference="row:1",
+        )
 
 
 def test_linear_str_return_forwards_output_as_next_input(

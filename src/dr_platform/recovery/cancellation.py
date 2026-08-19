@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
-from sqlalchemy import literal, select
+from sqlalchemy import select
 
 from dr_platform._core.clock import utc_now
 from dr_platform._core.identities import (
@@ -27,7 +27,6 @@ from dr_platform._core.ledger.terminal_summary import (
     TerminalSummaryProducer,
     build_terminal_summary,
 )
-from dr_platform._core.ledger.work_item_status import work_item_status_rows
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -127,22 +126,17 @@ def cancel_work(  # noqa: PLR0913 -- two explicit identity forms
                 cancellations=cancellations,
             )
         else:
-            representative = _terminal_representative(
-                connection,
-                work_item_id=resolved_work_item_id,
-                schema=selected_schema,
-            )
-            repair_workflow_id = _redelegable_workflow_id(
-                connection,
-                current=representative,
-                schema=selected_schema,
+            delegated.extend(
+                _collect_redelegable_workflow_ids(
+                    connection,
+                    work_item_id=resolved_work_item_id,
+                    schema=selected_schema,
+                )
             )
             result = WorkCancellationResult(
                 work_item_id=resolved_work_item_id,
                 cancellations=(),
             )
-            if repair_workflow_id is not None:
-                delegated.append(repair_workflow_id)
 
     for workflow_id in delegated:
         client.cancel_workflow(workflow_id, cancel_children=False)
@@ -329,27 +323,40 @@ def _cancel_one_execution(
     )
 
 
-def _terminal_representative(
+def _collect_redelegable_workflow_ids(
     connection: Connection,
     *,
     work_item_id: int,
     schema: LedgerSchema,
-) -> StageExecutionRecord:
-    status = work_item_status_rows(
-        schema,
-        select(literal(work_item_id).label("work_item_id")),
-    )
-    stage_execution_id = connection.execute(
-        select(status.c.stage_execution_id)
-    ).scalar_one()
-    representative = get_stage_execution(
-        connection,
-        stage_execution_id=stage_execution_id,
-        schema=schema,
-    )
-    if representative is None:
-        raise LookupError(f"work item has no stage execution: {work_item_id}")
-    return representative
+) -> tuple[str, ...]:
+    table = schema.stage_executions
+    cancelled_ids = connection.execute(
+        select(table.c.stage_execution_id)
+        .where(
+            table.c.work_item_id == work_item_id,
+            table.c.state == StageExecutionState.CANCELLED.value,
+        )
+        .order_by(table.c.stage_execution_id)
+    ).scalars()
+    seen: set[str] = set()
+    workflow_ids: list[str] = []
+    for stage_execution_id in cancelled_ids:
+        current = get_stage_execution(
+            connection,
+            stage_execution_id=stage_execution_id,
+            schema=schema,
+        )
+        if current is None:
+            continue
+        workflow_id = _redelegable_workflow_id(
+            connection,
+            current=current,
+            schema=schema,
+        )
+        if workflow_id is not None and workflow_id not in seen:
+            seen.add(workflow_id)
+            workflow_ids.append(workflow_id)
+    return tuple(workflow_ids)
 
 
 def _redelegable_workflow_id(

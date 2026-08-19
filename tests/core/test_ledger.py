@@ -641,6 +641,23 @@ def test_migration_0003_backfills_input_reference_from_work_items(
     assert revision == PLATFORM_HEAD_REVISION
 
 
+def test_migration_0003_rejects_invalid_prefix(pg_engine: Engine) -> None:
+    prefix = "legacy0003bad"
+    dsn = engine_dsn(pg_engine)
+    upgrade_platform_schema(
+        dsn, prefix=prefix, revision="0002_dr_store_baseline"
+    )
+    with pytest.raises(
+        ValueError,
+        match="prefix must be a lowercase SQL identifier",
+    ):
+        upgrade_platform_schema(
+            dsn,
+            prefix="bad;drop",
+            revision=PLATFORM_HEAD_REVISION,
+        )
+
+
 def test_upgrade_rejects_conflicting_table_without_destroying_data(
     pg_engine: Engine,
 ) -> None:

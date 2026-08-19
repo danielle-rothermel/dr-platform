@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Work-item status and run-barrier release counts derive from precedence over
   all executions, not `max(stage_index)`.
 
+### Fixed
+
+- Repeated `cancel_work` on already-cancelled fan-out work reissues every stored
+  admitted workflow identity, not just one representative row.
+- Alembic revision `0003_stage_index_identity` validates the schema prefix via
+  `LedgerSchema` before interpolating privileged DDL.
+- `StageSuccessor` rejects boolean `stage_index` values at construction time
+  so application failures are recorded instead of durable workflow errors.
+
 ## 0.2.1 - 2026-08-12
 
 ### Added
