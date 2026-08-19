@@ -388,11 +388,13 @@ def test_list_predecessor_stage_outputs_returns_succeeded_lower_stages(
         PredecessorStageOutput(
             stage_index=0,
             stage_key=StageKey("split"),
+            input_reference="seed",
             output_reference="split:out",
         ),
         PredecessorStageOutput(
             stage_index=2,
             stage_key=StageKey("branch_b"),
+            input_reference="row:b",
             output_reference="branch_b:out",
         ),
     )

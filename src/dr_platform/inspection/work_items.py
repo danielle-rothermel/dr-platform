@@ -22,12 +22,14 @@ from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.ledger.work_item_status import (
     list_predecessor_stage_outputs_statement,
+    list_stage_executions_statement,
     work_item_status_rows,
 )
 from dr_platform._core.validation import validate_nonnegative_integer
 from dr_platform.inspection._validation import (
     DEFAULT_INSPECTION_LIMIT,
     require_campaign,
+    validate_exclusive_stage_index_range,
     validate_limit,
     validate_work_item_cursor,
     validate_work_item_id,
@@ -57,6 +59,7 @@ class WorkItemSummary:
 class PredecessorStageOutput:
     stage_index: int
     stage_key: StageKey
+    input_reference: str | None
     output_reference: str
 
 
@@ -160,12 +163,15 @@ def get_work_item_stages(
     return summaries
 
 
-def list_predecessor_stage_outputs(
+def list_predecessor_stage_outputs(  # noqa: PLR0913 -- explicit reader filters
     work_item_id: int,
     below_stage_index: int,
     *,
     engine: Engine,
     schema: LedgerSchema | None = None,
+    stage_key: StageKey | str | None = None,
+    min_stage_index: int | None = None,
+    max_stage_index: int | None = None,
 ) -> tuple[PredecessorStageOutput, ...]:
     """Return succeeded lower-index sibling outputs for join stage bodies.
 
@@ -173,9 +179,40 @@ def list_predecessor_stage_outputs(
     executions with a non-null ``output_reference`` are included. Complements
     the admission barrier gate, which blocks until every lower ``stage_index``
     for the same work item is ``SUCCEEDED``.
+
+    ``min_stage_index`` and ``max_stage_index`` are **exclusive** bounds on
+    ``stage_index`` (``stage_index > min``, ``stage_index < max``). When
+    ``max_stage_index`` is omitted, the exclusive upper bound is
+    ``below_stage_index``. Filters are ANDed; unset filters apply no
+    constraint.
+
+    Typical fan-in for one deferral episode at index ``F`` after deferring
+    ``optim_step`` at ``O``::
+
+        list_predecessor_stage_outputs(
+            work_item_id,
+            below_stage_index=F,
+            stage_key=STAGE_EVAL_ROW,
+            min_stage_index=O,
+            engine=engine,
+        )
     """
     validate_work_item_id(work_item_id)
     validate_nonnegative_integer(below_stage_index, label="below stage index")
+    effective_max = (
+        max_stage_index if max_stage_index is not None else below_stage_index
+    )
+    if max_stage_index is not None and max_stage_index > below_stage_index:
+        raise ValueError("max stage index must not exceed below stage index")
+    validate_exclusive_stage_index_range(
+        min_stage_index=min_stage_index,
+        max_stage_index=effective_max,
+    )
+    normalized_stage_key = (
+        normalize_key(stage_key, StageKey).value
+        if stage_key is not None
+        else None
+    )
     selected_schema = schema or LedgerSchema()
     with engine.connect() as connection:
         rows = connection.execute(
@@ -183,16 +220,68 @@ def list_predecessor_stage_outputs(
                 selected_schema,
                 work_item_id=work_item_id,
                 below_stage_index=below_stage_index,
+                stage_key=normalized_stage_key,
+                min_stage_index=min_stage_index,
+                max_stage_index=max_stage_index,
             )
         ).mappings()
         return tuple(
             PredecessorStageOutput(
                 stage_index=row["stage_index"],
                 stage_key=StageKey(row["stage_key"]),
+                input_reference=row["input_reference"],
                 output_reference=row["output_reference"],
             )
             for row in rows
         )
+
+
+def list_stage_executions(  # noqa: PLR0913 -- explicit reader filters
+    work_item_id: int,
+    *,
+    engine: Engine,
+    schema: LedgerSchema | None = None,
+    stage_key: StageKey | str | None = None,
+    min_stage_index: int | None = None,
+    max_stage_index: int | None = None,
+    state: StageExecutionState | None = None,
+) -> tuple[StageExecutionRecord, ...]:
+    """Return stage executions for one work item with optional filters.
+
+    ``min_stage_index`` and ``max_stage_index`` are **exclusive** bounds on
+    ``stage_index``. Rows are ordered by ``stage_index``, then
+    ``stage_execution_id``. An empty tuple is valid.
+    """
+    validate_work_item_id(work_item_id)
+    if state is not None and not isinstance(state, StageExecutionState):
+        raise TypeError("state must be a StageExecutionState")
+    if min_stage_index is not None or max_stage_index is not None:
+        if max_stage_index is None:
+            raise ValueError(
+                "max stage index is required when min stage index is set"
+            )
+        validate_exclusive_stage_index_range(
+            min_stage_index=min_stage_index,
+            max_stage_index=max_stage_index,
+        )
+    normalized_stage_key = (
+        normalize_key(stage_key, StageKey).value
+        if stage_key is not None
+        else None
+    )
+    selected_schema = schema or LedgerSchema()
+    with engine.connect() as connection:
+        rows = connection.execute(
+            list_stage_executions_statement(
+                selected_schema,
+                work_item_id=work_item_id,
+                stage_key=normalized_stage_key,
+                min_stage_index=min_stage_index,
+                max_stage_index=max_stage_index,
+                state=state,
+            )
+        ).mappings()
+        return tuple(_decode_stage_execution(row) for row in rows)
 
 
 def _decode_work_item_summary(row: RowMapping) -> WorkItemSummary:

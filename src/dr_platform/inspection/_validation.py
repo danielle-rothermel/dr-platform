@@ -4,7 +4,10 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
-from dr_platform._core.validation import validate_positive_integer
+from dr_platform._core.validation import (
+    validate_nonnegative_integer,
+    validate_positive_integer,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection
@@ -80,6 +83,25 @@ def validate_work_item_cursor(
 
 def validate_limit(limit: int) -> None:
     validate_positive_integer(limit, label="inspection limit")
+
+
+def validate_exclusive_stage_index_range(
+    *,
+    min_stage_index: int | None,
+    max_stage_index: int,
+) -> None:
+    """Validate an exclusive index window on ``stage_index``."""
+    validate_nonnegative_integer(max_stage_index, label="max stage index")
+    if min_stage_index is not None:
+        validate_nonnegative_integer(
+            min_stage_index,
+            label="min stage index",
+        )
+        if min_stage_index >= max_stage_index:
+            raise ValueError(
+                "min stage index must be less than max stage index "
+                "(exclusive range)"
+            )
 
 
 def validate_work_item_id(work_item_id: int) -> None:
