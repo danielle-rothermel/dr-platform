@@ -38,7 +38,8 @@ from dr_platform.execution.handoff import (
     is_pipeline_wrapped,
 )
 from dr_platform.recovery.live_identity import (
-    LiveDbosIdentity,  # noqa: TC001 -- runtime validation
+    LOCAL_EXECUTOR_SENTINEL,
+    LiveDbosIdentity,
 )
 from dr_platform.recovery.sweep import (
     DEFAULT_SWEEP_BATCH_SIZE,
@@ -222,7 +223,7 @@ def _validate_live_dbos_identity(
             "live_dbos_identity must supply executor_ids or "
             "resolve_executor_ids when sweep is enabled"
         )
-    if DBOS.executor_id == "local":
+    if DBOS.executor_id == LOCAL_EXECUTOR_SENTINEL:
         logger.warning(
             "sweep is enabled with default local executor id; "
             "dead_executor detection requires distinct per-process "

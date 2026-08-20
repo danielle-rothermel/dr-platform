@@ -26,6 +26,10 @@ from dr_platform.completion.execution import (
     RunCompletionOutcomeError,
     record_run_completion_outcome,
 )
+from dr_platform.recovery.live_identity import (
+    LiveDbosIdentity,
+    present_identity_field,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -33,8 +37,6 @@ if TYPE_CHECKING:
 
     from dbos import DBOSClient, WorkflowStatus
     from sqlalchemy import Connection
-
-    from dr_platform.recovery.live_identity import LiveDbosIdentity
 
 
 DEFAULT_SWEEP_BATCH_SIZE = 10_000
@@ -66,13 +68,6 @@ _FAILED_DBOS_STATUSES = frozenset(
     }
 )
 
-_IDENTITY_ORPHAN_PENDING_STATUSES = frozenset(
-    {
-        DbosWorkflowStatus.PENDING.value,
-        DbosWorkflowStatus.ENQUEUED.value,
-    }
-)
-
 
 def _safe_error_message(error: object) -> str:
     # Broken DBOS error rendering must not abort the projection page.
@@ -91,13 +86,18 @@ def _pending_abandonment_evidence(  # noqa: PLR0913 -- explicit evidence boundar
     suppress_stale_app_version: bool,
     suppress_dead_executor: bool,
 ) -> AbandonmentEvidence | None:
-    if app_version is None or executor_id is None:
+    present_app_version = present_identity_field(app_version)
+    present_executor_id = present_identity_field(executor_id)
+    if present_app_version is None or present_executor_id is None:
         return None
-    if not suppress_stale_app_version and app_version != live_app_version:
+    if (
+        not suppress_stale_app_version
+        and present_app_version != live_app_version
+    ):
         return AbandonmentEvidence.STALE_APP_VERSION
     if suppress_dead_executor:
         return None
-    if executor_id not in live_executor_ids:
+    if present_executor_id not in live_executor_ids:
         return AbandonmentEvidence.DEAD_EXECUTOR
     return None
 
@@ -208,7 +208,7 @@ def sweep_abandoned_stages(  # noqa: PLR0913 -- explicit projection boundary
                 target_state = StageExecutionState.CANCELLED
             elif status.status in _FAILED_DBOS_STATUSES:
                 target_state = StageExecutionState.FAILED
-            elif status.status in _IDENTITY_ORPHAN_PENDING_STATUSES:
+            elif status.status == DbosWorkflowStatus.PENDING.value:
                 evidence = _pending_abandonment_evidence(
                     app_version=status.app_version,
                     executor_id=status.executor_id,
@@ -385,7 +385,7 @@ def _run_completion_abandonment_error_summary(
 ) -> dict[str, object] | None:
     if status.status in _FAILED_DBOS_STATUSES:
         return _dbos_failure_error_summary(status)
-    if status.status in _IDENTITY_ORPHAN_PENDING_STATUSES:
+    if status.status == DbosWorkflowStatus.PENDING.value:
         evidence = _pending_abandonment_evidence(
             app_version=status.app_version,
             executor_id=status.executor_id,

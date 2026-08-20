@@ -23,7 +23,10 @@ from dr_platform.recovery.cancellation import (
     WorkCancellationResult,
     cancel_work,
 )
-from dr_platform.recovery.live_identity import LiveDbosIdentity
+from dr_platform.recovery.live_identity import (
+    LOCAL_EXECUTOR_SENTINEL,
+    LiveDbosIdentity,
+)
 from dr_platform.recovery.sweep import sweep_abandoned_stages
 from dr_platform.submission.stream import WorkInput
 from tests.conftest import (
@@ -677,6 +680,113 @@ def _admit_one_for_sweep(
     return registry, workflow_id
 
 
+def test_sweep_does_not_stale_project_enqueued_backlog_after_upgrade(
+    pg_engine: Engine,
+) -> None:
+    """ENQUEUED backlog must not identity-orphan stale-project."""
+    _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-enqueued-backlog",
+        campaign_key="campaign-enqueued-backlog",
+        run_key="run-enqueued-backlog",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=LiveDbosIdentity(
+            executor_ids=frozenset({"reconciler-local"}),
+        ),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "ENQUEUED",
+                        app_version="old-version",
+                        executor_id="reconciler-local",
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 0
+
+
+def test_sweep_suppresses_dead_executor_when_live_executor_id_empty(
+    pg_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_live_dbos_identity(monkeypatch, app_version="test", executor_id="")
+    _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-empty-live-executor",
+        campaign_key="campaign-empty-live-executor",
+        run_key="run-empty-live-executor",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=LiveDbosIdentity(
+            executor_ids=frozenset({""}),
+        ),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version="test",
+                        executor_id="reconciler-local",
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 0
+    assert summary.identity_unavailable is True
+
+
+def test_sweep_skips_pending_with_whitespace_identity_fields(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-whitespace-identity",
+        campaign_key="campaign-whitespace-identity",
+        run_key="run-whitespace-identity",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=default_live_dbos_identity(),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version="   ",
+                        executor_id="  ",
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 0
+
+
 def test_sweep_projects_pending_with_dead_executor(
     pg_engine: Engine,
 ) -> None:
@@ -700,6 +810,7 @@ def test_sweep_projects_pending_with_dead_executor(
                     _WorkflowStatus(
                         workflow_id,
                         "PENDING",
+                        app_version="test",
                         executor_id="other-executor",
                     ),
                 )
@@ -751,7 +862,7 @@ def test_sweep_skips_pending_owned_by_local_executor_without_static_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     set_live_dbos_identity(
-        monkeypatch, app_version="test", executor_id="local"
+        monkeypatch, app_version="test", executor_id=LOCAL_EXECUTOR_SENTINEL
     )
     _migrate(pg_engine)
     registry, workflow_id = _admit_one_for_sweep(
@@ -773,7 +884,8 @@ def test_sweep_skips_pending_owned_by_local_executor_without_static_entry(
                     _WorkflowStatus(
                         workflow_id,
                         "PENDING",
-                        executor_id="local",
+                        app_version="test",
+                        executor_id=LOCAL_EXECUTOR_SENTINEL,
                     ),
                 )
             )
@@ -788,7 +900,9 @@ def test_sweep_suppresses_stale_app_version_when_live_version_empty(
     pg_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    set_live_dbos_identity(monkeypatch, app_version="", executor_id="local")
+    set_live_dbos_identity(
+        monkeypatch, app_version="", executor_id=LOCAL_EXECUTOR_SENTINEL
+    )
     _migrate(pg_engine)
     registry, workflow_id = _admit_one_for_sweep(
         pg_engine,
@@ -877,6 +991,7 @@ def test_sweep_resolver_includes_peer_executor_ids(pg_engine: Engine) -> None:
                     _WorkflowStatus(
                         workflow_id,
                         "PENDING",
+                        app_version="test",
                         executor_id="other-executor",
                     ),
                 )
@@ -915,6 +1030,7 @@ def test_sweep_suppresses_dead_executor_when_resolver_raises_squeue_case(
                     _WorkflowStatus(
                         workflow_id,
                         "PENDING",
+                        app_version="test",
                         executor_id="slurm-node-17",
                     ),
                 )
@@ -1034,7 +1150,7 @@ def test_sweep_skips_pending_with_live_identity(
                         workflow_id,
                         "PENDING",
                         app_version="test",
-                        executor_id="local",
+                        executor_id=LOCAL_EXECUTOR_SENTINEL,
                     ),
                 )
             )

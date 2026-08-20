@@ -860,6 +860,38 @@ def test_sweep_cron_registers_a_second_scheduled_workflow(
     assert client.destroyed
 
 
+def test_register_warns_when_sweep_enabled_with_local_executor(
+    pg_engine: Engine,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dispatcher.DBOS, "executor_id", "local")
+    config = PlatformDbosConfig(
+        database_url=pg_engine.url.render_as_string(hide_password=False),
+        system_database_url=pg_engine.url.render_as_string(
+            hide_password=False
+        ),
+        max_recovery_attempts=1,
+    )
+    registry = PipelineRegistry()
+    registry.register(
+        wrap_pipeline_workflows(_declared_pipeline(), max_recovery_attempts=1)
+    )
+    with caplog.at_level("WARNING", logger=dispatcher.logger.name):
+        registration = dispatcher.register_scheduled_dispatcher(
+            live_dbos_identity=default_live_dbos_identity(),
+            config=config,
+            engine=pg_engine,
+            registry=registry,
+            sweep_cron="0 * * * * *",
+        )
+    assert any(
+        "default local executor id" in record.message
+        for record in caplog.records
+    )
+    registration.close()
+
+
 def test_register_rejects_empty_executor_identity_when_sweep_enabled(
     pg_engine: Engine,
 ) -> None:

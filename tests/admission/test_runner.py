@@ -892,6 +892,8 @@ def test_real_dbos_client_enqueues_exactly_one_deterministic_workflow(
         assert len(matches) == 1
         assert matches[0].workflow_id == workflow_id
         assert matches[0].status == "ENQUEUED"
+        assert matches[0].app_version is None
+        assert matches[0].executor_id is None
         assert matches[0].queue_name == "execute-queue"
     finally:
         client.destroy()

@@ -502,7 +502,10 @@ When sweep is enabled, pass `LiveDbosIdentity` with either a non-empty static
 current live worker ids (for example from SLURM). Sweep reads application
 version and the local process executor id from the live DBOS runtime once per
 pass, then unions resolved ids, static `executor_ids`, and the local process
-executor id. When any identity axis is unavailable, sweep suppresses the
+executor id. Identity-orphan projection applies to **`PENDING` DBOS rows
+only**; `ENQUEUED` and `DELAYED` queue backlog is left for dequeue and
+startup recovery. Blank or whitespace identity fields are treated as absent.
+When any identity axis is unavailable, sweep suppresses the
 dependent pending projections and sets `identity_unavailable` on the sweep
 summary: empty application version suppresses `stale_app_version`; resolver
 failure or an empty result, or an executor set that is only the `"local"`

@@ -7,15 +7,32 @@ from typing import TYPE_CHECKING
 from dbos import DBOS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Callable, Collection, Iterable
 
 logger = logging.getLogger(__name__)
 
-_LOCAL_EXECUTOR_SENTINEL = "local"
+LOCAL_EXECUTOR_SENTINEL = "local"
+
+
+def present_identity_field(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def normalize_executor_ids(*collections: Iterable[str]) -> frozenset[str]:
+    normalized: set[str] = set()
+    for collection in collections:
+        for executor_id in collection:
+            present = present_identity_field(executor_id)
+            if present is not None:
+                normalized.add(present)
+    return frozenset(normalized)
 
 
 def _local_executor_sentinel_only(executor_ids: frozenset[str]) -> bool:
-    return not executor_ids or executor_ids == {_LOCAL_EXECUTOR_SENTINEL}
+    return not executor_ids or executor_ids == {LOCAL_EXECUTOR_SENTINEL}
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,12 +64,15 @@ class LiveDbosIdentity:
             )
 
     def resolve_for_sweep(self) -> LiveExecutorSweepContext:
-        live_app_version = DBOS.application_version
-        local_executor_id = DBOS.executor_id
+        live_app_version = (
+            present_identity_field(DBOS.application_version) or ""
+        )
+        local_executor_id = present_identity_field(DBOS.executor_id)
+        static_executor_ids = normalize_executor_ids(self.executor_ids)
         suppress_pending_stale_app_version = False
         suppress_pending_dead_executor = False
 
-        if live_app_version == "":
+        if not live_app_version:
             suppress_pending_stale_app_version = True
             logger.warning(
                 "sweep application version unavailable; "
@@ -60,24 +80,41 @@ class LiveDbosIdentity:
             )
 
         if self.resolve_executor_ids is None:
-            live_executor_ids = self.executor_ids | {local_executor_id}
+            live_executor_ids = normalize_executor_ids(
+                static_executor_ids,
+                [local_executor_id] if local_executor_id is not None else (),
+            )
         else:
             try:
-                resolved = frozenset(self.resolve_executor_ids())
+                resolved = normalize_executor_ids(self.resolve_executor_ids())
             except Exception as error:  # noqa: BLE001 -- resolver must not fail sweep
                 logger.warning(
                     "executor resolver failed during sweep",
                     exc_info=error,
                 )
                 suppress_pending_dead_executor = True
-                live_executor_ids = self.executor_ids | {local_executor_id}
+                live_executor_ids = normalize_executor_ids(
+                    static_executor_ids,
+                    [local_executor_id]
+                    if local_executor_id is not None
+                    else (),
+                )
             else:
                 if not resolved:
                     suppress_pending_dead_executor = True
-                    live_executor_ids = self.executor_ids | {local_executor_id}
+                    live_executor_ids = normalize_executor_ids(
+                        static_executor_ids,
+                        [local_executor_id]
+                        if local_executor_id is not None
+                        else (),
+                    )
                 else:
-                    live_executor_ids = (
-                        resolved | self.executor_ids | {local_executor_id}
+                    live_executor_ids = normalize_executor_ids(
+                        resolved,
+                        static_executor_ids,
+                        [local_executor_id]
+                        if local_executor_id is not None
+                        else (),
                     )
 
         if _local_executor_sentinel_only(live_executor_ids):

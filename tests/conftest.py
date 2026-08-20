@@ -15,7 +15,10 @@ from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState  # noqa: TC001
 from dr_platform.pipeline.definitions import PipelineDefinition
 from dr_platform.pipeline.registry import PipelineRegistry  # noqa: TC001
-from dr_platform.recovery.live_identity import LiveDbosIdentity
+from dr_platform.recovery.live_identity import (
+    LOCAL_EXECUTOR_SENTINEL,
+    LiveDbosIdentity,
+)
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
 from dr_platform.runtime.dbos import DEFAULT_POOL_SIZE, PlatformDbosConfig
 from dr_platform.runtime.dispatcher import (
@@ -46,14 +49,16 @@ DEFAULT_MAX_RECOVERY_ATTEMPTS = 1
 
 
 def default_live_dbos_identity() -> LiveDbosIdentity:
-    return LiveDbosIdentity(executor_ids=frozenset({"local"}))
+    return LiveDbosIdentity(
+        executor_ids=frozenset({LOCAL_EXECUTOR_SENTINEL}),
+    )
 
 
 def set_live_dbos_identity(
     monkeypatch: pytest.MonkeyPatch,
     *,
     app_version: str,
-    executor_id: str = "local",
+    executor_id: str = LOCAL_EXECUTOR_SENTINEL,
 ) -> None:
     from dbos._utils import GlobalParams
 
@@ -197,8 +202,8 @@ class _WorkflowStatus:
     workflow_id: str
     status: str
     error: Exception | None = None
-    app_version: str | None = "test"
-    executor_id: str | None = "local"
+    app_version: str | None = None
+    executor_id: str | None = None
 
 
 def _payload_of(args: tuple[object, ...]) -> dict[str, object]:

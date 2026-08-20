@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sweep suppresses dependent pending abandonment projection when identity
   evidence is absent instead of inferring terminal failure from empty values
   or the default `"local"` executor sentinel.
+- Identity-orphan projection applies to PENDING DBOS rows only; ENQUEUED and
+  DELAYED queue backlog is excluded. Blank or whitespace identity fields are
+  treated as absent end-to-end.
 
 ### Removed
 

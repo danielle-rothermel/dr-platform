@@ -11,7 +11,10 @@ from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.runner import run_admission_pass
 from dr_platform.execution.handoff import wrap_pipeline_workflows
 from dr_platform.pipeline.registry import PipelineRegistry
-from dr_platform.recovery.live_identity import LiveDbosIdentity
+from dr_platform.recovery.live_identity import (
+    LOCAL_EXECUTOR_SENTINEL,
+    LiveDbosIdentity,
+)
 from dr_platform.recovery.sweep import (
     DbosWorkflowStatus,
     sweep_abandoned_stages,
@@ -34,7 +37,7 @@ from tests.execution.test_handoff import (
 )
 
 
-def test_sweep_does_not_stale_project_default_path_pending_after_launch(
+def test_sweep_does_not_stale_project_default_path_pending_after_launch(  # noqa: PLR0915
     clean_pg: str,
     pg_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
@@ -80,6 +83,9 @@ def test_sweep_does_not_stale_project_default_path_pending_after_launch(
     )
     client = registration.client
     schema = LedgerSchema()
+    live_identity = LiveDbosIdentity(
+        executor_ids=frozenset({"reconciler-local"}),
+    )
     try:
         DBOS.launch()
         live_app_version = DBOS.application_version
@@ -112,9 +118,17 @@ def test_sweep_does_not_stale_project_default_path_pending_after_launch(
             DbosWorkflowStatus.PENDING.value,
             DbosWorkflowStatus.ENQUEUED.value,
         }
-        # Versionless enqueue leaves application_version unset until a worker
-        # dequeues; stamp identity to exercise the post-launch stale trap.
         assert row.application_version is None
+
+        if row.status == DbosWorkflowStatus.ENQUEUED.value:
+            enqueued_summary = sweep_abandoned_stages(
+                pg_engine,
+                client=client,
+                live_identity=live_identity,
+                clock=_utc_now,
+            )
+            assert enqueued_summary.projected_count == 0
+
         with pg_engine.begin() as connection:
             connection.execute(
                 text(
@@ -147,23 +161,19 @@ def test_sweep_does_not_stale_project_default_path_pending_after_launch(
         summary = sweep_abandoned_stages(
             pg_engine,
             client=client,
-            live_identity=LiveDbosIdentity(
-                executor_ids=frozenset({"reconciler-local"}),
-            ),
+            live_identity=live_identity,
             clock=_utc_now,
         )
         assert summary.projected_count == 0
         assert summary.identity_unavailable is False
 
         set_live_dbos_identity(
-            monkeypatch, app_version="", executor_id="local"
+            monkeypatch, app_version="", executor_id=LOCAL_EXECUTOR_SENTINEL
         )
         summary_after_empty_version = sweep_abandoned_stages(
             pg_engine,
             client=client,
-            live_identity=LiveDbosIdentity(
-                executor_ids=frozenset({"reconciler-local"}),
-            ),
+            live_identity=live_identity,
             clock=_utc_now,
         )
         assert summary_after_empty_version.projected_count == 0
