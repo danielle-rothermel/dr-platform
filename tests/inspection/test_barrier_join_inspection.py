@@ -14,6 +14,7 @@ from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.inspection.barrier_join import resolve_barrier_join_cluster
 from dr_platform.inspection.work_items import (
     PredecessorStageOutput,
+    list_episode_predecessor_outputs,
     list_predecessor_stage_outputs,
     list_stage_executions,
 )
@@ -314,6 +315,116 @@ def test_filtered_predecessors_reject_invalid_range(
             max_stage_index=2,
             engine=pg_engine,
         )
+
+
+def test_episode_predecessors_return_single_episode_rows(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        work_item_id = _seed_single_deferral_episode(connection, schema)
+
+    outputs = list_episode_predecessor_outputs(
+        work_item_id,
+        3,
+        origin_stage_index=0,
+        stage_key=StageKey("eval_row"),
+        engine=pg_engine,
+    )
+
+    assert outputs == (
+        PredecessorStageOutput(
+            stage_index=1,
+            stage_key=StageKey("eval_row"),
+            input_reference="row:in:1",
+            output_reference="row:out:1",
+        ),
+        PredecessorStageOutput(
+            stage_index=2,
+            stage_key=StageKey("eval_row"),
+            input_reference="row:in:2",
+            output_reference="row:out:2",
+        ),
+    )
+
+
+def test_episode_predecessors_exclude_other_episode_rows(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        work_item_id, optim_index, fanin_index = _seed_double_deferral_episode(
+            connection,
+            schema,
+        )
+
+    outputs = list_episode_predecessor_outputs(
+        work_item_id,
+        fanin_index,
+        origin_stage_index=optim_index,
+        stage_key=StageKey("eval_row"),
+        engine=pg_engine,
+    )
+
+    assert [item.stage_index for item in outputs] == [5, 6]
+    assert all(item.stage_key == StageKey("eval_row") for item in outputs)
+
+
+def test_episode_predecessors_return_empty_for_empty_range(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        work_item_id = _seed_single_deferral_episode(connection, schema)
+
+    assert (
+        list_episode_predecessor_outputs(
+            work_item_id,
+            1,
+            origin_stage_index=0,
+            stage_key=StageKey("eval_row"),
+            engine=pg_engine,
+        )
+        == ()
+    )
+
+
+def test_episode_predecessors_reject_invalid_range(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        work_item_id = _seed_single_deferral_episode(connection, schema)
+
+    with pytest.raises(ValueError, match="exclusive range"):
+        list_episode_predecessor_outputs(
+            work_item_id,
+            3,
+            origin_stage_index=3,
+            stage_key=StageKey("eval_row"),
+            engine=pg_engine,
+        )
+
+
+def test_episode_predecessors_order_by_stage_index(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        work_item_id = _seed_single_deferral_episode(
+            connection, schema, row_count=3
+        )
+
+    outputs = list_episode_predecessor_outputs(
+        work_item_id,
+        4,
+        origin_stage_index=0,
+        stage_key=StageKey("eval_row"),
+        engine=pg_engine,
+    )
+
+    assert [item.stage_index for item in outputs] == [1, 2, 3]
+    assert all(item.output_reference for item in outputs)
 
 
 def test_unfiltered_predecessors_remain_backward_compatible(

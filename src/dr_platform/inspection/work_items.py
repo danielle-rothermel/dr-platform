@@ -234,6 +234,37 @@ def list_predecessor_stage_outputs(  # noqa: PLR0913 -- explicit reader filters
         )
 
 
+def list_episode_predecessor_outputs(  # noqa: PLR0913 -- explicit reader inputs
+    work_item_id: int,
+    fanin_stage_index: int,
+    *,
+    origin_stage_index: int,
+    stage_key: StageKey | str,
+    engine: Engine,
+    schema: LedgerSchema | None = None,
+) -> tuple[PredecessorStageOutput, ...]:
+    """Episode-scoped predecessor outputs.
+
+    Delegates to ``list_predecessor_stage_outputs`` with
+    ``min_stage_index=origin_stage_index`` and the implicit exclusive cap at
+    ``fanin_stage_index``. Only ``SUCCEEDED`` rows with a non-null
+    ``output_reference`` are returned, ordered by ascending ``stage_index``.
+
+    When the deferring step index is not already in the join payload, discover
+    or verify it with ``resolve_barrier_join_cluster(...).optim_step``;
+    carrying ``origin_stage_index`` in the payload remains the preferred
+    pattern.
+    """
+    return list_predecessor_stage_outputs(
+        work_item_id,
+        fanin_stage_index,
+        engine=engine,
+        schema=schema,
+        stage_key=stage_key,
+        min_stage_index=origin_stage_index,
+    )
+
+
 def list_stage_executions(  # noqa: PLR0913 -- explicit reader filters
     work_item_id: int,
     *,
