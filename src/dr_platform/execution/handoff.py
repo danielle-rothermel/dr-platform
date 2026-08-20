@@ -6,7 +6,7 @@ import traceback
 from typing import TYPE_CHECKING, cast
 
 from dbos import DBOS
-from dr_store.content_addressing import format_object_reference
+from dr_store import format_object_reference
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 from sqlalchemy import select
 

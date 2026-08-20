@@ -14,7 +14,7 @@ from dr_platform.execution._workflow_binding import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable
 
-    from dr_store.object_store import ObjectStore
+    from dr_store import ObjectStore
 
 _OBJECT_STORE_ATTRIBUTE = "_dr_platform_object_store"
 _ACTIVE_OBJECT_STORE: ContextVar[ObjectStore | None] = ContextVar(

@@ -8,8 +8,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, cast
 
 from dbos import DBOS, DBOSClient
-from dr_store.object_store import ObjectStore
-from dr_store.storage_backends.postgresql import PostgresBackend
+from dr_store import ObjectStore, PostgresBackend
 
 from dr_platform._core.validation import validate_positive_integer
 from dr_platform.admission.runner import (

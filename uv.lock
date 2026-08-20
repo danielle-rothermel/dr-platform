@@ -190,7 +190,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.16.2" },
     { name = "dbos", extras = ["otel"], specifier = "==2.27.0" },
     { name = "dr-serialize", specifier = "==0.1.2" },
-    { name = "dr-store", specifier = "==0.2.3" },
+    { name = "dr-store", specifier = "==0.2.4" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
@@ -218,7 +218,7 @@ wheels = [
 
 [[package]]
 name = "dr-store"
-version = "0.2.3"
+version = "0.2.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "dr-serialize" },
@@ -226,9 +226,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ae/a3/3c509a09d571f028a019eb60cdd29acce7c935d2d28fbdc086da083cfa3b/dr_store-0.2.3.tar.gz", hash = "sha256:fc7fa39e56d094ac3427e1aeb095bec93ff9af12b78ccd4bf075cd57fd86c62f", size = 54349, upload-time = "2026-08-12T19:09:55.904Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ae/00/bf13ff6433e749615edac8d90e9bd427b1393040abaf837262888f807714/dr_store-0.2.4.tar.gz", hash = "sha256:7c3edf1f7c1c10736c9d9aa5acc22964f5f3284ae25d65debb426204cece6458", size = 77664, upload-time = "2026-08-20T17:44:12.192Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e9/bd/582436e02202b4f7edcde6435f04dd50be984bfb3f54fe25db699bb29cdc/dr_store-0.2.3-py3-none-any.whl", hash = "sha256:9945d3d8cdd26380d7ff1eac42831b4f7da0f23a66afe48b63c17f56543ee8e4", size = 62886, upload-time = "2026-08-12T19:09:54.481Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/a4/25ed3763875e9dad7449dd09894f3569ece0b97ba0d037889d11a1a2de49/dr_store-0.2.4-py3-none-any.whl", hash = "sha256:bad05edf07cadcdbb9ffdaf2a0837dbb1fcbbfcf1e96b93d2ea36bd6911a8694", size = 93287, upload-time = "2026-08-20T17:44:10.781Z" },
 ]
 
 [[package]]

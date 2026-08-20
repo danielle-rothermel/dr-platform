@@ -1,4 +1,4 @@
-from dr_store.content_addressing import OBJECT_REFERENCE_PREFIX
+from dr_store import OBJECT_REFERENCE_PREFIX
 
 from dr_platform._core.ledger.evidence import STAGE_FAILURE_EVIDENCE_SCHEMA
 

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- Bumped `dr-store` to 0.2.4; consolidated imports to canonical root exports
+  and kept the PostgreSQL enlisted evidence checkpoint path.
+
 ### Added
 
 - `dr_platform.testing.seed_deferral_fanout` seeds a validated deferral fan-out
