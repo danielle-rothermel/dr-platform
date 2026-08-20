@@ -3,14 +3,16 @@ from __future__ import annotations
 from sqlalchemy import Engine, select
 
 from dr_platform._core.identities import StageKey
+from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.inspection.barrier_join import resolve_barrier_join_cluster
+from dr_platform.runtime.database.migrate import upgrade_platform_schema
 from dr_platform.testing import (
     seed_deferral_episode,
     seed_double_deferral_episode,
     succeed_stage,
 )
-from tests.conftest import _migrate
+from tests.conftest import _migrate, engine_dsn
 
 
 def test_seed_deferral_episode_indices_match_topology(
@@ -117,3 +119,46 @@ def test_succeed_stage_persists_succeeded_row_with_barrier_flag(
     assert row["state"] == StageExecutionState.SUCCEEDED.value
     assert row["output_reference"] == "extra:out"
     assert row["barrier"] is True
+
+
+def test_seed_deferral_episode_honors_custom_ledger_schema(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    prefix = "fixturetenant"
+    schema = LedgerSchema(prefix)
+    upgrade_platform_schema(engine_dsn(pg_engine), prefix=prefix)
+    with pg_engine.begin() as connection:
+        work_item_id, _optim_index, fanin_index = seed_deferral_episode(
+            connection,
+            campaign_key="campaign-custom-schema",
+            work_key="work-custom-schema",
+            run_key="run-custom-schema",
+            schema=schema,
+        )
+
+    default_schema = LedgerSchema()
+    with pg_engine.connect() as connection:
+        default_count = connection.execute(
+            select(default_schema.stage_executions.c.stage_execution_id)
+            .select_from(default_schema.stage_executions)
+            .where(
+                default_schema.stage_executions.c.work_item_id == work_item_id
+            )
+        ).all()
+        prefixed_count = connection.execute(
+            select(schema.stage_executions.c.stage_execution_id)
+            .select_from(schema.stage_executions)
+            .where(schema.stage_executions.c.work_item_id == work_item_id)
+        ).all()
+
+    assert default_count == []
+    assert len(prefixed_count) == 4
+    resolve_barrier_join_cluster(
+        work_item_id,
+        fanin_index,
+        optim_step_stage_key=StageKey("optim_step"),
+        eval_row_stage_key=StageKey("eval_row"),
+        engine=pg_engine,
+        schema=schema,
+    )

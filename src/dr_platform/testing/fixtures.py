@@ -62,8 +62,10 @@ def succeed_stage(  # noqa: PLR0913 -- explicit ledger seed facts
     input_reference: str,
     output_reference: str,
     barrier: bool = False,
+    schema: LedgerSchema | None = None,
 ) -> None:
     """Insert one stage execution and drive it to ``SUCCEEDED``."""
+    selected_schema = schema or LedgerSchema()
     execution = insert_stage_execution(
         connection,
         work_item_id=work_item_id,
@@ -72,18 +74,21 @@ def succeed_stage(  # noqa: PLR0913 -- explicit ledger seed facts
         input_reference=input_reference,
         barrier=barrier,
         created_at=FIXTURE_TIMESTAMP,
+        schema=selected_schema,
     )
     append_stage_attempt(
         connection,
         stage_execution_id=execution.stage_execution_id,
         created_at=FIXTURE_TIMESTAMP,
         admitted_at=FIXTURE_TIMESTAMP,
+        schema=selected_schema,
     )
     transition_stage_execution(
         connection,
         stage_execution_id=execution.stage_execution_id,
         new_state=StageExecutionState.ADMITTED,
         updated_at=FIXTURE_TIMESTAMP,
+        schema=selected_schema,
     )
     transition_stage_execution(
         connection,
@@ -91,6 +96,7 @@ def succeed_stage(  # noqa: PLR0913 -- explicit ledger seed facts
         new_state=StageExecutionState.SUCCEEDED,
         output_reference=output_reference,
         updated_at=FIXTURE_TIMESTAMP,
+        schema=selected_schema,
     )
 
 
@@ -122,6 +128,7 @@ def seed_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
         stage_index=optim_stage_index,
         input_reference="optim:in:0",
         output_reference="optim:out:0",
+        schema=schema,
     )
     for offset in range(1, row_count + 1):
         succeed_stage(
@@ -131,6 +138,7 @@ def seed_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
             stage_index=offset,
             input_reference=f"row:in:{offset}",
             output_reference=f"row:out:{offset}",
+            schema=schema,
         )
     fanin_stage_index = row_count + 1
     succeed_stage(
@@ -141,6 +149,7 @@ def seed_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
         input_reference="fanin:in:1",
         output_reference="fanin:out:1",
         barrier=True,
+        schema=schema,
     )
     return work_item_id, optim_stage_index, fanin_stage_index
 
@@ -173,6 +182,7 @@ def seed_double_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
         stage_index=o1,
         input_reference="optim:in:0",
         output_reference="optim:out:0",
+        schema=schema,
     )
     succeed_stage(
         connection,
@@ -181,6 +191,7 @@ def seed_double_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
         stage_index=1,
         input_reference="row:in:1",
         output_reference="row:out:1",
+        schema=schema,
     )
     succeed_stage(
         connection,
@@ -189,6 +200,7 @@ def seed_double_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
         stage_index=2,
         input_reference="row:in:2",
         output_reference="row:out:2",
+        schema=schema,
     )
     f1 = 3
     succeed_stage(
@@ -199,6 +211,7 @@ def seed_double_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
         input_reference="fanin:in:1",
         output_reference="fanin:out:1",
         barrier=True,
+        schema=schema,
     )
 
     o2 = 4
@@ -209,6 +222,7 @@ def seed_double_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
         stage_index=o2,
         input_reference="optim:in:4",
         output_reference="optim:out:4",
+        schema=schema,
     )
     succeed_stage(
         connection,
@@ -217,6 +231,7 @@ def seed_double_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
         stage_index=5,
         input_reference="row:in:5",
         output_reference="row:out:5",
+        schema=schema,
     )
     succeed_stage(
         connection,
@@ -225,6 +240,7 @@ def seed_double_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
         stage_index=6,
         input_reference="row:in:6",
         output_reference="row:out:6",
+        schema=schema,
     )
     f2 = 7
     succeed_stage(
@@ -235,5 +251,6 @@ def seed_double_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
         input_reference="fanin:in:2",
         output_reference="fanin:out:2",
         barrier=True,
+        schema=schema,
     )
     return work_item_id, o1, f1, o2, f2
