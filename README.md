@@ -499,14 +499,21 @@ work, the colocated DBOS `workflow_status.priority` row on the current attempt.
 
 When sweep is enabled, pass `LiveDbosIdentity` with either a non-empty static
 `executor_ids` set or a `resolve_executor_ids` callable that returns the
-current live worker ids (for example from SLURM). Sweep resolves the executor
-set once per pass. When the resolver raises or returns an empty collection,
-sweep suppresses pending `dead_executor` projection and sets
-`executor_resolver_unavailable` on the sweep summary for operator visibility;
-those rows remain eligible for startup recovery and the configured recovery
-cap. Stale app-version and terminal DBOS statuses are still
-projected. When the resolver succeeds, sweep uses the union of resolved ids
-and static `executor_ids`. The resolver must be fast and side-effect-free.
+current live worker ids (for example from SLURM). Sweep reads application
+version and the local process executor id from the live DBOS runtime once per
+pass, then unions resolved ids, static `executor_ids`, and the local process
+executor id. Identity-orphan projection applies to **`PENDING` DBOS rows
+only**; `ENQUEUED` and `DELAYED` queue backlog is left for dequeue and
+startup recovery. Blank or whitespace identity fields are treated as absent.
+When any identity axis is unavailable, sweep suppresses the
+dependent pending projections and sets `identity_unavailable` on the sweep
+summary: empty application version suppresses `stale_app_version`; resolver
+failure or an empty result, or an executor set that is only the `"local"`
+sentinel, suppresses `dead_executor`. Terminal DBOS statuses are still
+projected. Rows left for startup recovery remain eligible for the configured
+recovery cap. The resolver must be fast and side-effect-free. Distinct
+per-process `executor_id` values are required for multi-worker
+`dead_executor` detection.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -534,7 +541,7 @@ class RunCompletionRetryResult:
 class SweepSummary:
     projections: tuple[SweepProjection, ...]
     inspected_count: int
-    executor_resolver_unavailable: bool = False
+    identity_unavailable: bool = False
 ```
 
 ```text
@@ -669,13 +676,18 @@ before `DBOS.launch()`. Declare every queue name used by a stage default or
 label route, and enable `priority_enabled=True` on queues that should honor
 work priority. Admission, run-barrier reconciliation, and
 abandoned-stage and run-completion sweep have separate schedule and batch
-settings; both register by default unless `sweep_cron=None`. Pass `LiveDbosIdentity` from `DBOS.application_version` and either a static
-executor set or a `resolve_executor_ids` callable at dispatcher registration.
-When multiple worker processes run, either disable sweep on all but one
+settings; both register by default unless `sweep_cron=None`. Pass
+`LiveDbosIdentity` with either a static executor set or a
+`resolve_executor_ids` callable at dispatcher registration; sweep reads
+application version and the local process executor id from the live DBOS
+runtime once per pass after `DBOS.launch()`. Optionally pin both on
+`PlatformDbosConfig` when explicit deployment identity is required. Distinct
+per-process `executor_id` values are required for multi-worker
+`dead_executor` detection. When multiple worker processes run, either disable sweep on all but one
 reconciler or supply every live executor ID to the process that owns sweep so
-peer work is not projected as `dead_executor`. If the resolver raises or returns
-an empty collection, sweep suppresses pending `dead_executor` projection and
-sets `executor_resolver_unavailable` on the sweep summary.
+peer work is not projected as `dead_executor`. When identity is unavailable,
+sweep suppresses dependent pending abandonment projection and sets
+`identity_unavailable` on the sweep summary.
 The barrier also has a candidate budget, which
 must be at least its release batch size and bounds all evaluated runs, including
 ineligible and lock-skipped candidates. A persisted cursor rotates blocked or

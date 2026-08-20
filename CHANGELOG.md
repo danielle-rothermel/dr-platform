@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## 0.2.4 - 2026-08-19
+
+### Added
+
+- Optional `application_version` and `executor_id` on `PlatformDbosConfig` /
+  `build_dbos_config` for explicit deployment identity without
+  `runtime_initializer`.
+
+### Changed
+
+- Sweep reads `DBOS.application_version` and unions `DBOS.executor_id` into
+  live executor ids once per pass instead of requiring registration-time
+  `LiveDbosIdentity.app_version`.
+- `SweepSummary.identity_unavailable` replaces
+  `executor_resolver_unavailable` and covers unavailable application version
+  or executor identity axes.
+
+### Fixed
+
+- Default-path sweep no longer projects every healthy pending attempt as
+  `stale_app_version` when dispatcher registration precedes `DBOS.launch()`.
+- Sweep suppresses dependent pending abandonment projection when identity
+  evidence is absent instead of inferring terminal failure from empty values
+  or the default `"local"` executor sentinel.
+- Identity-orphan projection applies to PENDING DBOS rows only; ENQUEUED and
+  DELAYED queue backlog is excluded. Blank or whitespace identity fields are
+  treated as absent end-to-end.
+- Removed per-pass local-sentinel sweep warning; dispatcher registration warns
+  once for default single-process deploys.
+
+### Removed
+
+- `LiveDbosIdentity.app_version` (breaking).
+
 ## 0.2.3 - 2026-08-19
 
 ### Added

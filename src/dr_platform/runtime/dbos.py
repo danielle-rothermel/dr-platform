@@ -68,6 +68,8 @@ class PlatformDbosConfig(BaseModel):
     system_database_url: StrictStr
     pool_size: StrictInt = DEFAULT_POOL_SIZE
     max_recovery_attempts: StrictInt
+    application_version: StrictStr | None = None
+    executor_id: StrictStr | None = None
     enable_otlp: StrictBool = False
     otlp_traces_endpoints: tuple[StrictStr, ...] = ()
     otel_attribute_format: Literal["semconv"] = "semconv"
@@ -82,6 +84,13 @@ class PlatformDbosConfig(BaseModel):
     @classmethod
     def _max_recovery_attempts(cls, value: int) -> int:
         validate_positive_integer(value, label="max recovery attempts")
+        return value
+
+    @field_validator("application_version", "executor_id")
+    @classmethod
+    def _non_empty_identity_fields(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("identity fields must be non-empty when set")
         return value
 
     @model_validator(mode="after")
@@ -170,6 +179,8 @@ def build_platform_dbos_config(  # noqa: PLR0913 -- explicit bootstrap inputs
     system_database_url_env: str = DBOS_SYSTEM_DATABASE_URL_ENV,
     database_url_error_suffix: str = "",
     max_recovery_attempts: int,
+    application_version: str | None = None,
+    executor_id: str | None = None,
     enable_otlp: bool = False,
     otlp_traces_endpoints: tuple[str, ...] = (),
     pool_size: int = DEFAULT_POOL_SIZE,
@@ -193,6 +204,8 @@ def build_platform_dbos_config(  # noqa: PLR0913 -- explicit bootstrap inputs
             resolved_system_database_url
         ),
         max_recovery_attempts=max_recovery_attempts,
+        application_version=application_version,
+        executor_id=executor_id,
         enable_otlp=enable_otlp,
         otlp_traces_endpoints=otlp_traces_endpoints,
         pool_size=pool_size,
@@ -213,6 +226,10 @@ def build_dbos_config(
     }
     if config.otlp_traces_endpoints:
         result["otlp_traces_endpoints"] = list(config.otlp_traces_endpoints)
+    if config.application_version is not None:
+        result["application_version"] = config.application_version
+    if config.executor_id is not None:
+        result["executor_id"] = config.executor_id
     result["db_engine_kwargs"] = {
         "pool_size": config.pool_size,
         "max_overflow": 0,

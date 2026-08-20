@@ -18,7 +18,10 @@ from dr_platform.completion.execution import (
     RunCompletionOutcomeError,
     record_run_completion_outcome,
 )
-from dr_platform.recovery.live_identity import LiveDbosIdentity
+from dr_platform.recovery.live_identity import (
+    LOCAL_EXECUTOR_SENTINEL,
+    LiveDbosIdentity,
+)
 from dr_platform.recovery.run_completion_retry import retry_run_completion
 from dr_platform.recovery.sweep import sweep_abandoned_run_completions
 from tests.completion.test_run_barrier import (
@@ -34,10 +37,16 @@ from tests.conftest import (
     _migrate,
     _WorkflowStatus,
     default_live_dbos_identity,
+    set_live_dbos_identity,
 )
 
 if TYPE_CHECKING:
     from dr_platform.pipeline.registry import PipelineRegistry
+
+
+@pytest.fixture(autouse=True)
+def _live_sweep_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_live_dbos_identity(monkeypatch, app_version="test")
 
 
 class _StatusClient:
@@ -269,7 +278,7 @@ def test_sweep_projects_exhausted_run_completion_for_operator_retry(
     sweep = sweep_abandoned_run_completions(
         pg_engine,
         client=_as_dbos_client(status_client),
-        live_identity=default_live_dbos_identity(app_version="test"),
+        live_identity=default_live_dbos_identity(),
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.inspected_count == 1
@@ -320,12 +329,15 @@ def test_sweep_projects_pending_completion_with_dead_executor(
                     _WorkflowStatus(
                         workflow_id,
                         "PENDING",
+                        app_version="test",
                         executor_id="other-executor",
                     ),
                 )
             )
         ),
-        live_identity=default_live_dbos_identity(app_version="test"),
+        live_identity=LiveDbosIdentity(
+            executor_ids=frozenset({"reconciler-local"}),
+        ),
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.projected_count == 1
@@ -357,14 +369,13 @@ def test_sweep_suppresses_pending_completion_when_resolver_returns_empty(
             )
         ),
         live_identity=LiveDbosIdentity(
-            app_version="test",
             executor_ids=frozenset({"reconciler-local"}),
             resolve_executor_ids=lambda: (),
         ),
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.projected_count == 0
-    assert sweep.executor_resolver_unavailable is True
+    assert sweep.identity_unavailable is True
     with pg_engine.connect() as connection:
         state = connection.execute(
             select(schema.run_completion_executions.c.state)
@@ -396,14 +407,13 @@ def test_sweep_still_projects_stale_completion_when_resolver_unavailable(
             )
         ),
         live_identity=LiveDbosIdentity(
-            app_version="test",
             executor_ids=frozenset({"reconciler-local"}),
             resolve_executor_ids=lambda: (),
         ),
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.projected_count == 1
-    assert sweep.executor_resolver_unavailable is True
+    assert sweep.identity_unavailable is True
     assert sweep.projections[0].state is RunCompletionExecutionState.FAILED
 
 
@@ -425,12 +435,154 @@ def test_sweep_skips_pending_completion_with_live_identity(
                         workflow_id,
                         "PENDING",
                         app_version="test",
-                        executor_id="local",
+                        executor_id=LOCAL_EXECUTOR_SENTINEL,
                     ),
                 )
             )
         ),
-        live_identity=default_live_dbos_identity(app_version="test"),
+        live_identity=default_live_dbos_identity(),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert sweep.projected_count == 0
+    with pg_engine.connect() as connection:
+        state = connection.execute(
+            select(schema.run_completion_executions.c.state)
+        ).scalar_one()
+    assert state == RunCompletionExecutionState.ENQUEUED.value
+
+
+def test_sweep_suppresses_stale_run_completion_when_live_version_empty(
+    pg_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_live_dbos_identity(
+        monkeypatch, app_version="", executor_id=LOCAL_EXECUTOR_SENTINEL
+    )
+    schema = _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(
+        pg_engine,
+        key="sweep-empty-version-completion",
+    )
+    del registry
+    sweep = sweep_abandoned_run_completions(
+        pg_engine,
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version="computed-hash",
+                        executor_id="reconciler-local",
+                    ),
+                )
+            )
+        ),
+        live_identity=LiveDbosIdentity(
+            executor_ids=frozenset({"reconciler-local"}),
+        ),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert sweep.projected_count == 0
+    assert sweep.identity_unavailable is True
+    with pg_engine.connect() as connection:
+        state = connection.execute(
+            select(schema.run_completion_executions.c.state)
+        ).scalar_one()
+    assert state == RunCompletionExecutionState.ENQUEUED.value
+
+
+def test_sweep_suppresses_dead_executor_for_local_sentinel_only_completion(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(
+        pg_engine,
+        key="sweep-local-sentinel-completion",
+    )
+    del registry
+    sweep = sweep_abandoned_run_completions(
+        pg_engine,
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version="test",
+                        executor_id="other-executor",
+                    ),
+                )
+            )
+        ),
+        live_identity=default_live_dbos_identity(),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert sweep.projected_count == 0
+    assert sweep.identity_unavailable is True
+    with pg_engine.connect() as connection:
+        state = connection.execute(
+            select(schema.run_completion_executions.c.state)
+        ).scalar_one()
+    assert state == RunCompletionExecutionState.ENQUEUED.value
+
+
+def test_sweep_skips_enqueued_completion_stale_backlog(
+    pg_engine: Engine,
+) -> None:
+    """ENQUEUED backlog must not identity-orphan stale-project."""
+    _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(
+        pg_engine,
+        key="sweep-enqueued-completion-backlog",
+    )
+    del registry
+    sweep = sweep_abandoned_run_completions(
+        pg_engine,
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "ENQUEUED",
+                        app_version="old-version",
+                        executor_id="reconciler-local",
+                    ),
+                )
+            )
+        ),
+        live_identity=LiveDbosIdentity(
+            executor_ids=frozenset({"reconciler-local"}),
+        ),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert sweep.projected_count == 0
+
+
+def test_sweep_skips_pending_completion_with_missing_identity_fields(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(
+        pg_engine,
+        key="sweep-missing-identity-completion",
+    )
+    del registry
+    sweep = sweep_abandoned_run_completions(
+        pg_engine,
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version=None,
+                        executor_id=None,
+                    ),
+                )
+            )
+        ),
+        live_identity=default_live_dbos_identity(),
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.projected_count == 0

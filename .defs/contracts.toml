@@ -65,18 +65,25 @@ date = "2026-08-18"
 check = "uv run pytest -q tests/recovery/test_priority.py tests/admission/test_runner.py -k priority"
 
 [[contracts]]
-title = "Sweep resolves live executor identity dynamically"
+title = "Sweep resolves live DBOS identity dynamically"
 statement = """
 When sweep is enabled, dispatcher registration requires either a non-empty \
 static executor set or a resolver, and sweep compares pending workflow \
-executor ids against the resolver's current view. When the resolver raises or \
-returns an empty collection, sweep suppresses pending dead_executor projection \
-and sets executor_resolver_unavailable on the sweep summary."""
+executor ids against the resolver's current view unioned with the local \
+process executor id once per pass. Application version is read from the \
+live DBOS runtime once per sweep pass. Sweep projects abandonment only from \
+present identity evidence on PENDING DBOS rows; ENQUEUED and DELAYED queue \
+backlog is excluded. Blank or whitespace identity fields are treated as \
+absent. When any identity axis is unavailable, dependent PENDING projections \
+are suppressed and identity_unavailable is set on the \
+summary rather than inferred from absent evidence."""
 rationale = """
 A static frozenset captured at registration projects legitimately running \
-cluster work as dead when a reconciler on another host owns sweep."""
-date = "2026-08-18"
-check = "uv run pytest -q tests/recovery/test_sweep.py tests/runtime/test_dispatcher.py -k 'resolver or executor_identity'"
+cluster work as dead when a reconciler on another host owns sweep. Reading \
+identity at sweep time and suppressing projection when evidence is absent \
+avoids registration-before-launch traps and silent false abandonment."""
+date = "2026-08-19"
+check = "uv run pytest -q tests/recovery/test_sweep.py tests/recovery/test_sweep_live_app_version.py tests/runtime/test_dispatcher.py -k 'identity or stale or local or resolver or executor'"
 
 [[contracts]]
 title = "Applications own workflow resources"
@@ -402,13 +409,18 @@ check = "uv run pytest -q tests/recovery/test_actions.py -k 'cancel or cancellat
 title = "Sweep only projects abandonment"
 statement = """
 The abandoned-stage sweep visits admitted current attempts and projects only \
-cancelled, errored, recovery-exhausted, or identity-orphaned pending workflow \
+cancelled, errored, recovery-exhausted, or identity-orphaned PENDING workflow \
 evidence into terminal platform state. The run-completion sweep visits enqueued \
 current attempts and projects only errored, recovery-exhausted, or \
-identity-orphaned pending DBOS evidence into failed platform state. Pending \
-rows that still match the live \
-application version and executor identity are skipped so startup recovery and \
-the configured recovery cap can settle same-process crashes. The sweep never \
+identity-orphaned PENDING DBOS evidence into failed platform state. ENQUEUED \
+and DELAYED DBOS queue backlog is excluded from identity-orphan projection. \
+Pending \
+rows whose application version and executor id still match the live runtime \
+identity are skipped so startup recovery and the configured recovery cap can \
+settle same-process crashes. Blank or whitespace identity fields are treated \
+as absent. When identity is unavailable, dependent pending \
+projections are suppressed and identity_unavailable is set on the summary. \
+The sweep never \
 retries, resumes, replaces, or waits for work, and a concurrent platform \
 terminal outcome wins."""
 rationale = """

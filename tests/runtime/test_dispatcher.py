@@ -167,7 +167,7 @@ def test_registration_owns_colocated_client_and_wrapper_is_thin(
 
     registry = PipelineRegistry()
     registration = dispatcher.register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(app_version="test"),
+        live_dbos_identity=default_live_dbos_identity(),
         config=config,
         engine=engine,
         registry=registry,
@@ -228,9 +228,7 @@ def test_registration_validates_run_barrier_candidate_budget(
     try:
         with pytest.raises(ValueError, match="run barrier candidate budget"):
             dispatcher.register_scheduled_dispatcher(
-                live_dbos_identity=default_live_dbos_identity(
-                    app_version="test"
-                ),
+                live_dbos_identity=default_live_dbos_identity(),
                 config=config,
                 engine=engine,
                 registry=PipelineRegistry(),
@@ -255,9 +253,7 @@ def test_registration_validates_pool_size_against_checkpoint_workers() -> None:
                 config=config,
                 engine=engine,
                 registry=PipelineRegistry(),
-                live_dbos_identity=default_live_dbos_identity(
-                    app_version="test"
-                ),
+                live_dbos_identity=default_live_dbos_identity(),
                 batch_size=10,
                 barrier_batch_size=7,
             )
@@ -308,7 +304,7 @@ def test_mismatched_stages_are_logged_as_registry_drift_at_error(
     )
     engine = create_engine(config.database_url)
     registration = dispatcher.register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(app_version="test"),
+        live_dbos_identity=default_live_dbos_identity(),
         config=config,
         engine=engine,
         registry=PipelineRegistry(),
@@ -368,7 +364,7 @@ def test_registration_rejects_a_registry_with_an_unwrapped_pipeline(
 
     with pytest.raises(UnwrappedPipelineError) as caught:
         dispatcher.register_scheduled_dispatcher(
-            live_dbos_identity=default_live_dbos_identity(app_version="test"),
+            live_dbos_identity=default_live_dbos_identity(),
             config=config,
             engine=engine,
             registry=registry,
@@ -399,7 +395,7 @@ def test_registration_accepts_a_registry_of_wrapped_pipelines(
     )
 
     registration = dispatcher.register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(app_version="test"),
+        live_dbos_identity=default_live_dbos_identity(),
         config=config,
         engine=engine,
         registry=registry,
@@ -431,7 +427,7 @@ def test_registration_rejects_wrapped_recovery_cap_mismatch(
 
     with pytest.raises(ValueError, match="recovery cap does not match"):
         dispatcher.register_scheduled_dispatcher(
-            live_dbos_identity=default_live_dbos_identity(app_version="test"),
+            live_dbos_identity=default_live_dbos_identity(),
             config=config,
             engine=engine,
             registry=registry,
@@ -500,7 +496,7 @@ def test_registration_binds_one_sized_executor_to_every_wrapper(
     engine = create_engine(config.database_url)
 
     registration = dispatcher.register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(app_version="test"),
+        live_dbos_identity=default_live_dbos_identity(),
         config=config,
         engine=engine,
         registry=registry,
@@ -571,7 +567,7 @@ def test_second_live_registration_is_rejected_before_dbos_mutation(
     registration = None
     try:
         registration = dispatcher.register_scheduled_dispatcher(
-            live_dbos_identity=default_live_dbos_identity(app_version="test"),
+            live_dbos_identity=default_live_dbos_identity(),
             config=config,
             engine=engine,
             registry=first_registry,
@@ -583,9 +579,7 @@ def test_second_live_registration_is_rejected_before_dbos_mutation(
 
         with pytest.raises(RuntimeError, match="already owns this process"):
             dispatcher.register_scheduled_dispatcher(
-                live_dbos_identity=default_live_dbos_identity(
-                    app_version="test"
-                ),
+                live_dbos_identity=default_live_dbos_identity(),
                 config=config,
                 engine=engine,
                 registry=second_registry,
@@ -640,9 +634,7 @@ def test_registry_binding_preflight_is_atomic_across_pipelines(
     try:
         with pytest.raises(RuntimeError, match="live runtime owner"):
             dispatcher.register_scheduled_dispatcher(
-                live_dbos_identity=default_live_dbos_identity(
-                    app_version="test"
-                ),
+                live_dbos_identity=default_live_dbos_identity(),
                 config=config,
                 engine=engine,
                 registry=registry,
@@ -699,7 +691,7 @@ def test_close_releases_process_ownership_for_reregistration(
     engine = create_engine(config.database_url)
 
     first = dispatcher.register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(app_version="test"),
+        live_dbos_identity=default_live_dbos_identity(),
         config=config,
         engine=engine,
         registry=registry,
@@ -708,7 +700,7 @@ def test_close_releases_process_ownership_for_reregistration(
     assert isinstance(first_client, _FakeClient)
     first.close()
     second = dispatcher.register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(app_version="test"),
+        live_dbos_identity=default_live_dbos_identity(),
         config=config,
         engine=engine,
         registry=registry,
@@ -763,7 +755,7 @@ def test_registration_failure_closes_client_and_checkpoint_executor(
 
     with pytest.raises(RuntimeError, match="workflow registration failed"):
         dispatcher.register_scheduled_dispatcher(
-            live_dbos_identity=default_live_dbos_identity(app_version="test"),
+            live_dbos_identity=default_live_dbos_identity(),
             config=config,
             engine=engine,
             registry=registry,
@@ -836,7 +828,7 @@ def test_sweep_cron_registers_a_second_scheduled_workflow(
     )
 
     registration = dispatcher.register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(app_version="test"),
+        live_dbos_identity=default_live_dbos_identity(),
         config=config,
         engine=engine,
         registry=registry,
@@ -868,6 +860,38 @@ def test_sweep_cron_registers_a_second_scheduled_workflow(
     assert client.destroyed
 
 
+def test_register_warns_when_sweep_enabled_with_local_executor(
+    pg_engine: Engine,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dispatcher.DBOS, "executor_id", "local")
+    config = PlatformDbosConfig(
+        database_url=pg_engine.url.render_as_string(hide_password=False),
+        system_database_url=pg_engine.url.render_as_string(
+            hide_password=False
+        ),
+        max_recovery_attempts=1,
+    )
+    registry = PipelineRegistry()
+    registry.register(
+        wrap_pipeline_workflows(_declared_pipeline(), max_recovery_attempts=1)
+    )
+    with caplog.at_level("WARNING", logger=dispatcher.logger.name):
+        registration = dispatcher.register_scheduled_dispatcher(
+            live_dbos_identity=default_live_dbos_identity(),
+            config=config,
+            engine=pg_engine,
+            registry=registry,
+            sweep_cron="0 * * * * *",
+        )
+    assert any(
+        "default local executor id" in record.message
+        for record in caplog.records
+    )
+    registration.close()
+
+
 def test_register_rejects_empty_executor_identity_when_sweep_enabled(
     pg_engine: Engine,
 ) -> None:
@@ -882,11 +906,35 @@ def test_register_rejects_empty_executor_identity_when_sweep_enabled(
     registry.register(
         wrap_pipeline_workflows(_declared_pipeline(), max_recovery_attempts=1)
     )
-    with pytest.raises(ValueError, match="resolve_executor_ids"):
+    with pytest.raises(ValueError, match="non-blank executor_ids"):
         dispatcher.register_scheduled_dispatcher(
             live_dbos_identity=LiveDbosIdentity(
-                app_version="test",
                 executor_ids=frozenset(),
+            ),
+            config=config,
+            engine=pg_engine,
+            registry=registry,
+        )
+
+
+def test_register_rejects_whitespace_only_executor_ids_when_sweep_enabled(
+    pg_engine: Engine,
+) -> None:
+    config = PlatformDbosConfig(
+        database_url=pg_engine.url.render_as_string(hide_password=False),
+        system_database_url=pg_engine.url.render_as_string(
+            hide_password=False
+        ),
+        max_recovery_attempts=1,
+    )
+    registry = PipelineRegistry()
+    registry.register(
+        wrap_pipeline_workflows(_declared_pipeline(), max_recovery_attempts=1)
+    )
+    with pytest.raises(ValueError, match="non-blank executor_ids"):
+        dispatcher.register_scheduled_dispatcher(
+            live_dbos_identity=LiveDbosIdentity(
+                executor_ids=frozenset({" "}),
             ),
             config=config,
             engine=pg_engine,

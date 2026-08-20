@@ -150,7 +150,7 @@ def test_run_completion_payload_executes_through_dbos(
             DBOS, "scheduled", lambda _cron: lambda workflow: workflow
         )
         registration = register_scheduled_dispatcher(
-            live_dbos_identity=default_live_dbos_identity(app_version="test"),
+            live_dbos_identity=default_live_dbos_identity(),
             config=config,
             engine=pg_engine,
             registry=registry,

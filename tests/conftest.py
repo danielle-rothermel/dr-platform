@@ -15,7 +15,10 @@ from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState  # noqa: TC001
 from dr_platform.pipeline.definitions import PipelineDefinition
 from dr_platform.pipeline.registry import PipelineRegistry  # noqa: TC001
-from dr_platform.recovery.live_identity import LiveDbosIdentity
+from dr_platform.recovery.live_identity import (
+    LOCAL_EXECUTOR_SENTINEL,
+    LiveDbosIdentity,
+)
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
 from dr_platform.runtime.dbos import DEFAULT_POOL_SIZE, PlatformDbosConfig
 from dr_platform.runtime.dispatcher import (
@@ -45,11 +48,22 @@ NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 1
 
 
-def default_live_dbos_identity(*, app_version: str) -> LiveDbosIdentity:
+def default_live_dbos_identity() -> LiveDbosIdentity:
     return LiveDbosIdentity(
-        app_version=app_version,
-        executor_ids=frozenset({"local"}),
+        executor_ids=frozenset({LOCAL_EXECUTOR_SENTINEL}),
     )
+
+
+def set_live_dbos_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    app_version: str,
+    executor_id: str = LOCAL_EXECUTOR_SENTINEL,
+) -> None:
+    from dbos._utils import GlobalParams
+
+    monkeypatch.setattr(GlobalParams, "app_version", app_version)
+    monkeypatch.setattr(GlobalParams, "executor_id", executor_id)
 
 
 def default_platform_dbos_config(
@@ -188,8 +202,8 @@ class _WorkflowStatus:
     workflow_id: str
     status: str
     error: Exception | None = None
-    app_version: str | None = "test"
-    executor_id: str | None = "local"
+    app_version: str | None = None
+    executor_id: str | None = None
 
 
 def _payload_of(args: tuple[object, ...]) -> dict[str, object]:
@@ -366,9 +380,7 @@ def launch_handoff_dbos(
         )
     )
     registration = register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(
-            app_version=f"{app_version_prefix}-{suffix}"
-        ),
+        live_dbos_identity=default_live_dbos_identity(),
         config=PlatformDbosConfig(
             database_url=database_url,
             system_database_url=database_url,

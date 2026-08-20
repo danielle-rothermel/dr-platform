@@ -38,7 +38,9 @@ from dr_platform.execution.handoff import (
     is_pipeline_wrapped,
 )
 from dr_platform.recovery.live_identity import (
-    LiveDbosIdentity,  # noqa: TC001 -- runtime validation
+    LOCAL_EXECUTOR_SENTINEL,
+    LiveDbosIdentity,
+    normalize_executor_ids,
 )
 from dr_platform.recovery.sweep import (
     DEFAULT_SWEEP_BATCH_SIZE,
@@ -215,12 +217,18 @@ def _validate_live_dbos_identity(
     if not sweep_enabled:
         return
     if (
-        not live_dbos_identity.executor_ids
-        and live_dbos_identity.resolve_executor_ids is None
+        live_dbos_identity.resolve_executor_ids is None
+        and not normalize_executor_ids(live_dbos_identity.executor_ids)
     ):
         raise ValueError(
-            "live_dbos_identity must supply executor_ids or "
+            "live_dbos_identity must supply non-blank executor_ids or "
             "resolve_executor_ids when sweep is enabled"
+        )
+    if DBOS.executor_id == LOCAL_EXECUTOR_SENTINEL:
+        logger.warning(
+            "sweep is enabled with default local executor id; "
+            "dead_executor detection requires distinct per-process "
+            "executor ids"
         )
 
 
@@ -416,13 +424,13 @@ def register_scheduled_dispatcher(  # noqa: PLR0913
                 logger.info(
                     "abandoned-stage sweep inspected=%s projected=%s; "
                     "run-completion sweep inspected=%s projected=%s; "
-                    "executor_resolver_unavailable=%s",
+                    "identity_unavailable=%s",
                     stage_summary.inspected_count,
                     stage_summary.projected_count,
                     completion_summary.inspected_count,
                     completion_summary.projected_count,
-                    stage_summary.executor_resolver_unavailable
-                    or completion_summary.executor_resolver_unavailable,
+                    stage_summary.identity_unavailable
+                    or completion_summary.identity_unavailable,
                 )
 
             sweep_workflow = cast("ScheduledWorkflow", sweep)

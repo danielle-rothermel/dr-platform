@@ -184,7 +184,7 @@ def _run_pipeline(  # noqa: PLR0913 -- explicit integration wiring
     )
     initialize_dbos_runtime(config, app_name=f"drp-async-{suffix}")
     registration = register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(app_version="test"),
+        live_dbos_identity=default_live_dbos_identity(),
         config=config,
         engine=engine,
         registry=registry,

@@ -5,6 +5,7 @@ import time
 from multiprocessing import get_context
 from uuid import uuid4
 
+import pytest
 from dbos import DBOS, DBOSClient, DBOSConfig, Queue
 from sqlalchemy import Engine, create_engine, func, select, text
 
@@ -31,6 +32,7 @@ from tests.conftest import (
     dbos_config,
     default_live_dbos_identity,
     initialize_dbos_schema,
+    set_live_dbos_identity,
     submit_items,
 )
 
@@ -139,9 +141,7 @@ def _run_recovery_worker(
             )
         )
         registration = register_scheduled_dispatcher(
-            live_dbos_identity=default_live_dbos_identity(
-                app_version=application_version
-            ),
+            live_dbos_identity=default_live_dbos_identity(),
             config=PlatformDbosConfig(
                 database_url=database_url,
                 system_database_url=database_url,
@@ -368,9 +368,7 @@ def test_same_identity_crash_recovers_to_failed_and_retry_stage(  # noqa: PLR091
         sweep = sweep_abandoned_stages(
             pg_engine,
             client=client,
-            live_identity=default_live_dbos_identity(
-                app_version=application_version
-            ),
+            live_identity=default_live_dbos_identity(),
         )
     finally:
         client.destroy()
@@ -436,6 +434,7 @@ def test_same_identity_crash_recovers_to_failed_and_retry_stage(  # noqa: PLR091
 def test_stale_app_version_pending_projects_without_body_rerun(
     clean_pg: str,
     pg_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     suffix = uuid4().hex[:10]
     pipeline_key = f"stale-{suffix}"
@@ -513,10 +512,12 @@ def test_stale_app_version_pending_projects_without_body_rerun(
         {"list_workflows": lambda self, **kwargs: [_StaleStatus(workflow_id)]},
     )()
 
+    set_live_dbos_identity(monkeypatch, app_version=new_version)
+
     sweep = sweep_abandoned_stages(
         pg_engine,
         client=stale_client,  # ty: ignore[invalid-argument-type]
-        live_identity=default_live_dbos_identity(app_version=new_version),
+        live_identity=default_live_dbos_identity(),
     )
     assert sweep.projected_count == 1
 

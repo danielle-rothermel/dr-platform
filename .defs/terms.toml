@@ -419,10 +419,14 @@ definition = """
 A process-local registration that owns its durable-workflow client and runs \
 bounded admission, run-barrier, and abandoned-stage sweep passes on independent \
 schedules. The sweep registers by default unless disabled at registration time. \
-The caller supplies the live application version and either a static executor \
-set or a resolver observed at sweep time so identity-orphaned pending work \
-can be projected without time thresholds. Supply the deployment-wide live \
-executor set on the process that owns sweep when multiple workers run. Its \
+The caller supplies either a static executor set or a resolver observed at \
+sweep time so identity-orphaned PENDING work can be projected without time \
+thresholds; ENQUEUED and DELAYED queue backlog is excluded. Application \
+version and the local process executor id are read from \
+the live DBOS runtime once per sweep pass, and dependent pending projections \
+are suppressed when any identity axis is unavailable. Blank or whitespace \
+identity fields are treated as absent. Supply the deployment-wide live executor \
+set on the process that owns sweep when multiple workers run. Its \
 registration remains alive with the runtime."""
 exported_symbols = [
   "register_scheduled_dispatcher",
@@ -507,8 +511,9 @@ identity-orphaned pending work onto currently admitted platform stages, \
 projects errored, recovery-exhausted, or identity-orphaned pending DBOS \
 evidence onto enqueued run completions, and reclaims stage occupancy. \
 Structural abandonment uses stale application version or dead executor \
-evidence only; pending rows that still match the live identity are left for \
-startup recovery and the configured recovery cap. It does not retry, resume, \
+evidence only when live identity is available; pending rows that still match \
+the live runtime identity are left for startup recovery and the configured \
+recovery cap. It does not retry, resume, \
 replace, or wait for work."""
 exported_symbols = [
   "sweep_abandoned_stages",
