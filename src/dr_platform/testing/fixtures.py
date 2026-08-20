@@ -3,13 +3,19 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from dr_platform._core.ledger.attempts import append_stage_attempt
+from dr_platform._core.ledger.attempts import (
+    append_stage_attempt,
+    record_stage_attempt_terminal,
+)
 from dr_platform._core.ledger.executions import (
     insert_stage_execution,
     transition_stage_execution,
 )
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
+from dr_platform._core.ledger.terminal_summary import (
+    build_terminal_outcome_summary,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection
@@ -96,6 +102,17 @@ def succeed_stage(  # noqa: PLR0913 -- explicit ledger seed facts
         new_state=StageExecutionState.SUCCEEDED,
         output_reference=output_reference,
         updated_at=FIXTURE_TIMESTAMP,
+        schema=selected_schema,
+    )
+    record_stage_attempt_terminal(
+        connection,
+        stage_execution_id=execution.stage_execution_id,
+        attempt_number=1,
+        terminal_at=FIXTURE_TIMESTAMP,
+        terminal_summary=build_terminal_outcome_summary(
+            outcome=StageExecutionState.SUCCEEDED.value,
+        ),
+        terminal_reference=output_reference,
         schema=selected_schema,
     )
 

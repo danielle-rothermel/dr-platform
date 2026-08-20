@@ -2,6 +2,17 @@ from __future__ import annotations
 
 from sqlalchemy import make_url
 
+_DATABASE_IDENTITY_OVERRIDE_KEYS = frozenset(
+    {
+        "dbname",
+        "host",
+        "hostaddr",
+        "port",
+        "service",
+        "servicefile",
+    }
+)
+
 
 def validate_test_database_url(database_url: str) -> None:
     """Reject DSNs that are unsafe for automated test migration."""
@@ -11,7 +22,7 @@ def validate_test_database_url(database_url: str) -> None:
     database_identity_overrides = {
         key.lower()
         for key in url.query
-        if key.lower() in {"dbname", "service", "servicefile"}
+        if key.lower() in _DATABASE_IDENTITY_OVERRIDE_KEYS
     }
     if database_identity_overrides:
         raise ValueError(

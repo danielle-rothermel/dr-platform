@@ -6,10 +6,13 @@ from dr_platform._core.identities import StageKey
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.inspection.barrier_join import resolve_barrier_join_cluster
+from dr_platform.inspection.work_items import get_work_item_stages
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
 from dr_platform.testing import (
+    FIXTURE_TIMESTAMP,
     seed_deferral_episode,
     seed_double_deferral_episode,
+    seed_work_item,
     succeed_stage,
 )
 from tests.conftest import _migrate, engine_dsn
@@ -119,6 +122,36 @@ def test_succeed_stage_persists_succeeded_row_with_barrier_flag(
     assert row["state"] == StageExecutionState.SUCCEEDED.value
     assert row["output_reference"] == "extra:out"
     assert row["barrier"] is True
+
+
+def test_succeed_stage_records_terminal_attempt(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        work_item_id = seed_work_item(
+            connection,
+            campaign_key="campaign-terminal-attempt",
+            work_key="work-terminal-attempt",
+            run_key="run-terminal-attempt",
+            schema=schema,
+        )
+        succeed_stage(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=0,
+            input_reference="stage:in",
+            output_reference="stage:out",
+            schema=schema,
+        )
+
+    summary = get_work_item_stages(
+        work_item_id, engine=pg_engine, schema=schema
+    )
+    attempt = summary[0].attempts[0]
+    assert attempt.terminal_at == FIXTURE_TIMESTAMP
+    assert attempt.terminal_reference == "stage:out"
 
 
 def test_seed_deferral_episode_honors_custom_ledger_schema(

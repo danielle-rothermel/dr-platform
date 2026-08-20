@@ -21,6 +21,21 @@ def test_validate_test_database_url_rejects_identity_override() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+psycopg:///dr_platform_test?host=prod.example",
+        "postgresql+psycopg:///dr_platform_test?port=5433",
+        "postgresql+psycopg:///dr_platform_test?hostaddr=127.0.0.1",
+    ],
+)
+def test_validate_test_database_url_rejects_connection_overrides(
+    database_url: str,
+) -> None:
+    with pytest.raises(ValueError, match="identity"):
+        validate_test_database_url(database_url)
+
+
 def test_validate_test_database_url_rejects_non_test_database_name() -> None:
     with pytest.raises(ValueError, match="_test"):
         validate_test_database_url("postgresql+psycopg:///dr_platform_prod")
