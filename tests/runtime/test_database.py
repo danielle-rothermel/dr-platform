@@ -3,11 +3,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-from dr_store.storage_backends.postgresql import (
-    POSTGRES_METADATA,
-    POSTGRES_SCHEMA_FORMAT,
-    PostgresBackend,
-)
+from dr_store import POSTGRES_METADATA, POSTGRES_SCHEMA_FORMAT, PostgresBackend
 from psycopg import sql
 from sqlalchemy import Connection, Engine, create_engine, text
 

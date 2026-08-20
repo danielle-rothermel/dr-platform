@@ -45,7 +45,7 @@ from dr_platform.pipeline.definitions import (
 from dr_platform.pipeline.registry import PipelineRegistry
 from dr_platform.recovery.retry import retry_stage
 from dr_platform.runtime.dispatcher import (
-    DispatcherRegistration,  # noqa: TC001
+    DispatcherRegistration,
 )
 from dr_platform.submission.stream import WorkInput
 from tests.conftest import (

@@ -306,11 +306,7 @@ exported_symbols = [
   "WorkItemSummary",
   "list_work_items",
   "get_work_item_stages",
-  "list_predecessor_stage_outputs",
   "list_stage_executions",
-  "PredecessorStageOutput",
-  "BarrierJoinCluster",
-  "resolve_barrier_join_cluster",
   "BulkWorkStatus",
   "BulkStatusResult",
   "bulk_work_statuses",
@@ -321,6 +317,38 @@ exported_symbols = [
 ]
 is_a = ["work"]
 part_of = ["campaign"]
+
+[[terms]]
+name = "predecessor stage output"
+definition = """
+One succeeded lower-index sibling stage execution for the same work item with \
+a non-null output reference. ``list_predecessor_stage_outputs`` returns these \
+rows ordered by ascending ``stage_index``. ``min_stage_index`` and \
+``max_stage_index`` are exclusive bounds; when ``max_stage_index`` is omitted, \
+the exclusive upper cap is ``below_stage_index``. This differs from \
+``list_stage_executions``, which has no implicit upper bound on min-only \
+queries."""
+exported_symbols = [
+  "PredecessorStageOutput",
+  "list_predecessor_stage_outputs",
+]
+part_of = ["work item"]
+
+[[terms]]
+name = "deferral episode"
+definition = """
+The open interval ``(O, F)`` on one work item bounded by the deferring step at \
+origin index O and its barrier fan-in at F. The interval is expected to \
+contain only eval-row stages at contiguous indices O+1 .. F-1 with distinct \
+optim and eval stage keys. Join bodies must scope predecessor reads to one \
+episode; unfiltered reads on multi-episode work items merge earlier episodes \
+silently."""
+exported_symbols = [
+  "BarrierJoinCluster",
+  "resolve_barrier_join_cluster",
+  "list_episode_predecessor_outputs",
+]
+part_of = ["work item"]
 
 [[terms]]
 name = "stage execution"

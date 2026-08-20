@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from dbos import DBOS, DBOSConfig
-from sqlalchemy import Engine, create_engine, make_url, text
+from sqlalchemy import Engine, create_engine, text
 
 from dr_platform._core.ledger.schema import LedgerSchema
-from dr_platform._core.ledger.states import StageExecutionState  # noqa: TC001
+from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.pipeline.definitions import PipelineDefinition
-from dr_platform.pipeline.registry import PipelineRegistry  # noqa: TC001
+from dr_platform.pipeline.registry import PipelineRegistry
 from dr_platform.recovery.live_identity import (
     LOCAL_EXECUTOR_SENTINEL,
     LiveDbosIdentity,
@@ -22,7 +22,7 @@ from dr_platform.recovery.live_identity import (
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
 from dr_platform.runtime.dbos import DEFAULT_POOL_SIZE, PlatformDbosConfig
 from dr_platform.runtime.dispatcher import (
-    DispatcherRegistration,  # noqa: TC001
+    DispatcherRegistration,
 )
 from dr_platform.submission.stream import (
     RunMemberInput,
@@ -31,6 +31,7 @@ from dr_platform.submission.stream import (
     WorkInput,
     submit,
 )
+from dr_platform.testing._dsn import validate_test_database_url
 
 if TYPE_CHECKING:
     from dbos import DBOSClient, EnqueueOptions
@@ -86,30 +87,8 @@ def engine_dsn(engine: Engine) -> str:
     return engine.url.render_as_string(hide_password=False)
 
 
-def _validate_test_database_url(database_url: str) -> None:
-    url = make_url(database_url)
-    if url.get_backend_name() != "postgresql":
-        raise ValueError("DR_PLATFORM_TEST_DATABASE_URL must use PostgreSQL")
-    database_identity_overrides = {
-        key.lower()
-        for key in url.query
-        if key.lower() in {"dbname", "service", "servicefile"}
-    }
-    if database_identity_overrides:
-        raise ValueError(
-            "DR_PLATFORM_TEST_DATABASE_URL must not override database "
-            "identity through query parameters"
-        )
-    database_name = url.database
-    if database_name is None or not database_name.endswith("_test"):
-        raise ValueError(
-            "DR_PLATFORM_TEST_DATABASE_URL must name a database ending in "
-            "'_test'"
-        )
-
-
 def _verify_postgres_available(database_url: str) -> None:
-    _validate_test_database_url(database_url)
+    validate_test_database_url(database_url)
     engine = create_engine(database_url)
     try:
         with engine.connect():
@@ -128,7 +107,7 @@ def _verify_postgres_available(database_url: str) -> None:
 
 
 def _reset_test_database(database_url: str) -> None:
-    _validate_test_database_url(database_url)
+    validate_test_database_url(database_url)
     engine = create_engine(database_url)
     try:
         with engine.begin() as connection:

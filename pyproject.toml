@@ -1,6 +1,6 @@
 [project]
 name = "dr-platform"
-version = "0.2.4"
+version = "0.2.5"
 description = "Durable staged pipelines and run fan-in on PostgreSQL and DBOS."
 readme = "README.md"
 license = "MIT"
@@ -22,7 +22,7 @@ dependencies = [
     "alembic>=1.16.2",
     "dbos[otel]==2.27.0",
     "dr-serialize==0.1.2",
-    "dr-store==0.2.3",
+    "dr-store==0.2.4",
     "psycopg[binary]>=3.3.4",
     "pydantic>=2.13.4",
     "sqlalchemy>=2.0.0",
@@ -104,7 +104,8 @@ ignore = ["PLR1711", "S101", "TRY003"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/dr_platform/recovery/priority.py" = ["S608"]
-"tests/**/*.py" = ["PLR2004", "PLC0415", "ARG001", "ARG005", "S603", "TC002", "TC003"]
+"src/dr_platform/testing/**/*.py" = ["TC001", "TC003"]
+"tests/**/*.py" = ["PLR2004", "PLC0415", "ARG001", "ARG005", "S603", "TC001", "TC002", "TC003"]
 
 [tool.ty.src]
 include = ["src", "tests"]

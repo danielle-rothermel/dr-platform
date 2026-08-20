@@ -5,7 +5,35 @@ All notable changes to `dr-platform` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.2.5 - 2026-08-20
+
+### Added
+
+- `list_episode_predecessor_outputs` for episode-scoped predecessor reads at
+  barrier fan-in stages; delegates to filtered `list_predecessor_stage_outputs`.
+- Deferral episode and predecessor stage output terms in platform vocabulary,
+  with three deferral-episode binding contracts.
+- `dr_platform.testing` library surface: `migrated_engine`,
+  `validate_test_database_url`, ledger seed fixtures (`seed_work_item`,
+  `succeed_stage`, `seed_deferral_episode`, `seed_double_deferral_episode`,
+  `seed_deferral_fanout`), `validate_deferral_fanout`, and
+  `admission_payload_for_stage` for inspection-only join-body tests without
+  DBOS bootstrap.
+
+### Changed
+
+- Bumped `dr-store` to 0.2.4; consolidated imports to canonical root exports
+  and kept the PostgreSQL enlisted evidence checkpoint path.
+
+### Fixed
+
+- `succeed_stage` reuses a prepared nonterminal attempt when settling a seeded
+  stage instead of appending a second attempt.
+- `dr_platform.testing.seed_work_item` now inserts the matching
+  `run_memberships` row so seeded work items are visible to run-scoped readers.
+- `test_migrated_engine_disposes_on_normal_exit` and
+  `test_migrated_engine_disposes_on_exception` now assert `Engine.dispose` on
+  normal and exceptional context exit instead of checking pool status strings.
 
 ## 0.2.4 - 2026-08-19
 

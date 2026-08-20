@@ -10,7 +10,10 @@ payload meaning stays in the application layer.
 ``resolve_barrier_join_cluster`` requires distinct ``optim_step_stage_key`` and
 ``eval_row_stage_key`` values. The platform allows reusing a ``stage_key`` at
 distinct indices elsewhere, but this helper cannot infer which same-key row is
-the deferring step versus an eval row.
+the deferring step versus an eval row. ``BarrierJoinCluster.optim_step`` is the
+canonical deferring-step record when ``origin_stage_index`` is not already
+carried in the join payload; carrying that index in the payload remains the
+preferred pattern.
 """
 
 from __future__ import annotations
@@ -46,7 +49,12 @@ def resolve_barrier_join_cluster(  # noqa: PLR0913 -- explicit reader inputs
     engine: Engine,
     schema: LedgerSchema | None = None,
 ) -> BarrierJoinCluster:
-    """Resolve the deferral episode bounded by one barrier fan-in stage."""
+    """Resolve the deferral episode bounded by one barrier fan-in stage.
+
+    ``cluster.optim_step`` is the canonical deferring-step record for
+    discovery or verification when ``origin_stage_index`` is not payload-
+    carried.
+    """
     validate_work_item_id(work_item_id)
     validate_nonnegative_integer(fanin_stage_index, label="fanin stage index")
     normalized_optim_key = normalize_key(optim_step_stage_key, StageKey)

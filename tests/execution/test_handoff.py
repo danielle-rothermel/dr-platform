@@ -8,14 +8,15 @@ from uuid import uuid4
 import pytest
 from dbos import DBOS, DBOSClient, Queue
 from dr_serialize import Jsonable
-from dr_store.content_addressing import (
+from dr_store import (
     OBJECT_REFERENCE_PREFIX,
     ObjectReference,
+    ObjectStore,
+    PostgresBackend,
     compute_content_hash,
     format_object_reference,
+    parse_object_reference,
 )
-from dr_store.object_store import ObjectStore
-from dr_store.storage_backends.postgresql import PostgresBackend
 from sqlalchemy import Engine, select
 
 from dr_platform._core.identities import (
@@ -965,6 +966,14 @@ def test_application_failure_can_store_evidence_reference(
     )
     assert attempt.terminal_summary["producer"] == "application_failure"
     assert attempt.terminal_summary["message"] == "partial graph outcome"
+
+    store = ObjectStore(PostgresBackend.open_sync(pg_engine))
+    with pg_engine.connect() as connection:
+        record = store.get_enlisted(
+            connection,
+            parse_object_reference(attempt.evidence_reference),
+        )
+    assert record == evidence
 
 
 class _UnprintableError(RuntimeError):

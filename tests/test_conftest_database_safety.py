@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from dr_platform.testing import validate_test_database_url
 from tests import conftest
 
 
@@ -26,7 +27,7 @@ class _UnavailableEngine:
 def test_test_database_identity_accepts_explicit_test_names(
     database_url: str,
 ) -> None:
-    conftest._validate_test_database_url(database_url)
+    validate_test_database_url(database_url)
 
 
 @pytest.mark.parametrize(
@@ -41,12 +42,12 @@ def test_test_database_identity_rejects_other_names(
     database_url: str,
 ) -> None:
     with pytest.raises(ValueError, match="ending in '_test'"):
-        conftest._validate_test_database_url(database_url)
+        validate_test_database_url(database_url)
 
 
 def test_test_database_identity_rejects_other_backends() -> None:
     with pytest.raises(ValueError, match="must use PostgreSQL"):
-        conftest._validate_test_database_url("sqlite:///dr_platform_test")
+        validate_test_database_url("sqlite:///dr_platform_test")
 
 
 @pytest.mark.parametrize(

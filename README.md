@@ -126,31 +126,37 @@ optim_step @ O  →  eval_row @ O+1 .. O+N  →  eval_fanin @ F (= O+N+1)
 Admission holds the barrier join ready until every lower ``stage_index`` for
 the work item is ``SUCCEEDED``. That admission gate is work-item-wide; join
 bodies must scope reads to one episode. After multiple deferrals on one work
-item, unfiltered predecessor reads include every lower succeeded stage; scope
-one episode with exclusive index bounds (``stage_index > O``, ``stage_index < F``):
+item, unfiltered predecessor reads include every lower succeeded stage. Use
+``list_episode_predecessor_outputs`` to read one episode's branch outputs
+(``stage_index > O``, ``stage_index < F``):
 
 ```python
 async def eval_fanin(payload: AdmissionPayload) -> StageCompletion:
-    predecessors = list_predecessor_stage_outputs(
+    predecessors = list_episode_predecessor_outputs(
         payload.work_item_id,
-        below_stage_index=payload.stage_index,
+        payload.stage_index,
+        origin_stage_index=origin_stage_index,  # deferring step at O
         stage_key=STAGE_EVAL_ROW,
-        min_stage_index=optim_step_index,  # deferring step at O
         engine=engine,
     )
     # input_reference: per-row admitted payload; output_reference: completion
     ...
 ```
 
-``list_stage_executions`` lists executions with the same exclusive bounds for
-episode discovery. Its bounds are independently optional and min-only queries
-have no implicit upper cap. ``list_predecessor_stage_outputs`` instead defaults
-the exclusive upper bound to ``below_stage_index`` when ``max_stage_index`` is
-omitted. ``resolve_barrier_join_cluster`` requires distinct optim and eval
-stage keys and validates that the open interval ``(O, F)`` contains only
-eval-row stages, returning the deferring optim step, eval rows, and fan-in
-record. The platform stores and transports references only; payload meaning
-stays in the application layer.
+Carrying ``origin_stage_index`` in the join payload is preferred. When it is
+not already available, discover or verify the deferring step with
+``resolve_barrier_join_cluster(...).optim_step.stage_index``.
+
+``list_predecessor_stage_outputs`` remains the general reader for unscoped or
+custom-bound queries. ``list_stage_executions`` lists executions with the same
+exclusive bounds for episode discovery. Its bounds are independently optional
+and min-only queries have no implicit upper cap. ``list_predecessor_stage_outputs``
+instead defaults the exclusive upper bound to ``below_stage_index`` when
+``max_stage_index`` is omitted. ``resolve_barrier_join_cluster`` requires
+distinct optim and eval stage keys and validates that the open interval
+``(O, F)`` contains only eval-row stages, returning the deferring optim step,
+eval rows, and fan-in record. The platform stores and transports references
+only; payload meaning stays in the application layer.
 
 Failed or cancelled lower siblings block the join until an operator
 `retry_stage`s the sibling, not the join. This is ~80% best-effort behavior:
@@ -700,6 +706,46 @@ capacity, and the DBOS application-database pool together using
 [whetstone's sizing table](https://github.com/danielle-rothermel/whetstone).
 dr-platform exposes dispatcher and runtime knobs; only the application owns
 provider, process, and queue configuration.
+
+### Consumer test library (`dr_platform.testing`)
+
+`dr_platform.testing` ships in the wheel for downstream integration tests.
+It is **not** re-exported from `dr_platform.__all__`. All helpers require
+PostgreSQL and a database name ending in `_test`.
+
+| Symbol | Role |
+| --- | --- |
+| `validate_test_database_url` | Reject unsafe test DSNs before migration |
+| `migrated_engine` | Context manager: validate DSN, migrate, dispose engine |
+| `seed_work_item` | Insert run, work item, and run membership |
+| `succeed_stage` | Insert or reuse a stage row and drive it to `SUCCEEDED` |
+| `seed_deferral_episode` | Seed one succeeded deferral episode |
+| `seed_double_deferral_episode` | Seed two back-to-back episodes on one item |
+| `seed_deferral_fanout` | Seed a validated `StageSuccessor` fan-out tuple |
+| `validate_deferral_fanout` | Pure emission-time deferral topology check |
+| `admission_payload_for_stage` | Assemble the admission runner payload row |
+
+Join-stage logic is testable with `Engine` + `AdmissionPayload` via these
+helpers — no `initialize_dbos_runtime` or other DBOS bootstrap is required.
+See [`tests/testing/test_join_body_recipe.py`](tests/testing/test_join_body_recipe.py)
+for the seed → payload → synchronous join callable → `StageCompletion` recipe.
+
+Episode seed fixtures use a deterministic reference scheme:
+
+- optim step at index `O`: `optim:in:{O}` / `optim:out:{O}` (stage index)
+- eval row at index `i`: `row:in:{i}` / `row:out:{i}` (stage index)
+- fan-in for episode ordinal `n` (1-based): `fanin:in:{n}` / `fanin:out:{n}`
+  (episode ordinal, not stage index — e.g. `fanin:in:2` at stage index `7`)
+
+`seed_deferral_episode` uses `n = 1`. `seed_double_deferral_episode` uses
+`n = 1` then `n = 2` for the second fan-in. Consumer tests such as
+`tests/testing/test_join_body_recipe.py` assert these literals directly.
+
+Episode seeders ship with default `campaign_key`, `work_key`, and `run_key`
+strings (`campaign-deferral-episode`, etc.). These are single-use convenience
+defaults — override them when sharing a test database across cases or seeding
+multiple independent episodes or runs in one database to avoid identity
+collisions.
 
 Per-stage-boundary latency is approximately the admission schedule interval
 plus the queue poll interval configured on each application-owned DBOS
