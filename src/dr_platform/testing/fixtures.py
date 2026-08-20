@@ -16,6 +16,7 @@ from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform._core.ledger.terminal_summary import (
     build_terminal_outcome_summary,
 )
+from dr_platform.execution.stage_completion import StageSuccessor
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection
@@ -123,6 +124,58 @@ def succeed_stage(  # noqa: PLR0913 -- explicit ledger seed facts
         terminal_reference=output_reference,
         schema=selected_schema,
     )
+
+
+def seed_deferral_fanout(  # noqa: PLR0913 -- explicit fan-out seed facts
+    connection: Connection,
+    *,
+    origin_stage_index: int,
+    successors: tuple[StageSuccessor, ...],
+    origin_stage_key: str = "optim_step",
+    origin_input_reference: str = "optim:in:0",
+    origin_output_reference: str = "optim:out:0",
+    campaign_key: str = "campaign-deferral-fanout",
+    work_key: str = "work-deferral-fanout",
+    run_key: str = "run-deferral-fanout",
+    schema: LedgerSchema | None = None,
+) -> tuple[int, int, int]:
+    """Seed one origin stage plus deferral fan-out successors."""
+    selected_schema = schema or LedgerSchema()
+    work_item_id = seed_work_item(
+        connection,
+        campaign_key=campaign_key,
+        work_key=work_key,
+        run_key=run_key,
+        schema=selected_schema,
+    )
+    succeed_stage(
+        connection,
+        work_item_id=work_item_id,
+        stage_key=origin_stage_key,
+        stage_index=origin_stage_index,
+        input_reference=origin_input_reference,
+        output_reference=origin_output_reference,
+        schema=selected_schema,
+    )
+    fanin_index: int | None = None
+    for successor in successors:
+        succeed_stage(
+            connection,
+            work_item_id=work_item_id,
+            stage_key=successor.stage_key.value,
+            stage_index=successor.stage_index,
+            input_reference=successor.input_reference,
+            output_reference=(
+                f"seed:out:{successor.stage_key.value}:{successor.stage_index}"
+            ),
+            barrier=successor.barrier,
+            schema=selected_schema,
+        )
+        if successor.barrier:
+            fanin_index = successor.stage_index
+    if fanin_index is None:
+        raise ValueError("successors must include one fan-in row")
+    return work_item_id, origin_stage_index, fanin_index
 
 
 def seed_deferral_episode(  # noqa: PLR0913 -- explicit episode topology

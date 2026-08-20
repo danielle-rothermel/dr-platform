@@ -7,6 +7,7 @@ from dr_platform.testing.engine import migrated_engine
 from dr_platform.testing.fixtures import (
     FIXTURE_TIMESTAMP,
     seed_deferral_episode,
+    seed_deferral_fanout,
     seed_double_deferral_episode,
     seed_work_item,
     succeed_stage,
@@ -17,6 +18,7 @@ __all__ = [
     "admission_payload_for_stage",
     "migrated_engine",
     "seed_deferral_episode",
+    "seed_deferral_fanout",
     "seed_double_deferral_episode",
     "seed_work_item",
     "succeed_stage",

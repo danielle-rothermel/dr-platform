@@ -7,7 +7,7 @@ from dr_platform._core.identities import StageKey
 from dr_platform.execution.stage_completion import StageSuccessor
 from dr_platform.inspection.barrier_join import resolve_barrier_join_cluster
 from dr_platform.testing import (
-    seed_deferral_episode,
+    seed_deferral_fanout,
     validate_deferral_fanout,
 )
 from tests.conftest import _migrate
@@ -142,12 +142,24 @@ def test_validate_deferral_fanout_rejects_foreign_stage_key() -> None:
         )
 
 
+def _successors_for_row_count(
+    origin: int,
+    row_count: int,
+) -> tuple[StageSuccessor, ...]:
+    eval_rows = tuple(
+        _eval_row(origin + offset) for offset in range(1, row_count + 1)
+    )
+    return (*eval_rows, _fanin(origin + row_count + 1))
+
+
+@pytest.mark.parametrize("row_count", [1, 2, 3])
 def test_validate_deferral_fanout_round_trips_to_cluster_resolution(
     pg_engine: Engine,
+    row_count: int,
 ) -> None:
     schema = _migrate(pg_engine)
     origin = 0
-    successors = (_eval_row(1), _eval_row(2), _fanin(3))
+    successors = _successors_for_row_count(origin, row_count)
     validate_deferral_fanout(
         successors,
         origin_stage_index=origin,
@@ -155,9 +167,14 @@ def test_validate_deferral_fanout_round_trips_to_cluster_resolution(
         fanin_stage_key="eval_fanin",
     )
     with pg_engine.begin() as connection:
-        work_item_id, optim_index, fanin_index = seed_deferral_episode(
+        work_item_id, optim_index, fanin_index = seed_deferral_fanout(
             connection,
+            origin_stage_index=origin,
+            successors=successors,
             schema=schema,
+            campaign_key=f"campaign-fanout-{row_count}",
+            work_key=f"work-fanout-{row_count}",
+            run_key=f"run-fanout-{row_count}",
         )
 
     cluster = resolve_barrier_join_cluster(
@@ -166,7 +183,22 @@ def test_validate_deferral_fanout_round_trips_to_cluster_resolution(
         optim_step_stage_key=StageKey("optim_step"),
         eval_row_stage_key=StageKey("eval_row"),
         engine=pg_engine,
+        schema=schema,
+    )
+    eval_successors = tuple(
+        successor for successor in successors if not successor.barrier
+    )
+    fanin_successor = next(
+        successor for successor in successors if successor.barrier
     )
     assert optim_index == origin
-    assert fanin_index == origin + len(successors)
-    assert len(cluster.eval_rows) == 2
+    assert fanin_index == fanin_successor.stage_index
+    assert [row.stage_index for row in cluster.eval_rows] == [
+        successor.stage_index for successor in eval_successors
+    ]
+    assert [row.input_reference for row in cluster.eval_rows] == [
+        successor.input_reference for successor in eval_successors
+    ]
+    assert cluster.fanin.stage_index == fanin_successor.stage_index
+    assert cluster.fanin.input_reference == fanin_successor.input_reference
+    assert cluster.fanin.barrier is True

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- `dr_platform.testing.seed_deferral_fanout` seeds a validated deferral fan-out
+  tuple into the ledger.
+
 ### Fixed
 
 - `dr_platform.testing.seed_work_item` now inserts the matching
