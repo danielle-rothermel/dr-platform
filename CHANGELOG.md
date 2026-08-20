@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `dr_platform.testing.seed_work_item` now inserts the matching
   `run_memberships` row so seeded work items are visible to run-scoped readers.
+- `test_migrated_engine_disposes_on_exit` now asserts `Engine.dispose` on
+  normal and exceptional context exit instead of checking pool status strings.
 
 ## 0.2.5 - 2026-08-20
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import Engine, text
 
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform.testing import migrated_engine, validate_test_database_url
@@ -56,13 +56,48 @@ def test_migrated_engine_yields_usable_schema(clean_pg: str) -> None:
         assert schema.work_items.name in set(tables)
 
 
-def test_migrated_engine_disposes_on_exit(clean_pg: str) -> None:
-    _reset_test_database(clean_pg)
-    with migrated_engine(clean_pg) as engine:
-        pool = engine.pool
-        assert pool is not None
-        disposed = pool.status()
-        assert disposed
+def _track_engine_disposal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[Engine]:
+    disposed: list[Engine] = []
+    original_dispose = Engine.dispose
 
-    with migrated_engine(clean_pg) as engine, engine.connect() as connection:
-        connection.execute(text("SELECT 1"))
+    def tracking_dispose(self: Engine, close: bool = True) -> None:  # noqa: FBT001, FBT002
+        disposed.append(self)
+        original_dispose(self, close=close)
+
+    monkeypatch.setattr(Engine, "dispose", tracking_dispose)
+    return disposed
+
+
+def test_migrated_engine_disposes_on_normal_exit(
+    clean_pg: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _reset_test_database(clean_pg)
+    disposed = _track_engine_disposal(monkeypatch)
+
+    with migrated_engine(clean_pg) as engine:
+        captured = engine
+
+    assert disposed.count(captured) == 1
+
+
+def test_migrated_engine_disposes_on_exception(
+    clean_pg: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _reset_test_database(clean_pg)
+    disposed = _track_engine_disposal(monkeypatch)
+    captured: list[Engine] = []
+
+    def probe() -> None:
+        with migrated_engine(clean_pg) as engine:
+            captured.append(engine)
+            raise RuntimeError("probe")
+
+    with pytest.raises(RuntimeError, match="probe"):
+        probe()
+
+    assert len(captured) == 1
+    assert disposed.count(captured[0]) == 1
