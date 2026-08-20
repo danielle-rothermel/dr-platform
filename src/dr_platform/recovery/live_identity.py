@@ -119,10 +119,6 @@ class LiveDbosIdentity:
 
         if _local_executor_sentinel_only(live_executor_ids):
             suppress_pending_dead_executor = True
-            logger.warning(
-                "sweep executor identity is only the local sentinel; "
-                "suppressing pending dead_executor projection"
-            )
 
         identity_unavailable = (
             suppress_pending_stale_app_version

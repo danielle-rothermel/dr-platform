@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Identity-orphan projection applies to PENDING DBOS rows only; ENQUEUED and
   DELAYED queue backlog is excluded. Blank or whitespace identity fields are
   treated as absent end-to-end.
+- Removed per-pass local-sentinel sweep warning; dispatcher registration warns
+  once for default single-process deploys.
 
 ### Removed
 
