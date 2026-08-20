@@ -331,7 +331,9 @@ def test_sweep_projects_pending_completion_with_dead_executor(
                 )
             )
         ),
-        live_identity=default_live_dbos_identity(),
+        live_identity=LiveDbosIdentity(
+            executor_ids=frozenset({"reconciler-local"}),
+        ),
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.projected_count == 1
@@ -369,7 +371,7 @@ def test_sweep_suppresses_pending_completion_when_resolver_returns_empty(
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.projected_count == 0
-    assert sweep.executor_resolver_unavailable is True
+    assert sweep.identity_unavailable is True
     with pg_engine.connect() as connection:
         state = connection.execute(
             select(schema.run_completion_executions.c.state)
@@ -407,7 +409,7 @@ def test_sweep_still_projects_stale_completion_when_resolver_unavailable(
         clock=lambda: NOW + timedelta(seconds=2),
     )
     assert sweep.projected_count == 1
-    assert sweep.executor_resolver_unavailable is True
+    assert sweep.identity_unavailable is True
     assert sweep.projections[0].state is RunCompletionExecutionState.FAILED
 
 

@@ -11,6 +11,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_LOCAL_EXECUTOR_SENTINEL = "local"
+
+
+def _local_executor_sentinel_only(executor_ids: frozenset[str]) -> bool:
+    return not executor_ids or executor_ids == {_LOCAL_EXECUTOR_SENTINEL}
+
 
 @dataclass(frozen=True, slots=True)
 class LiveExecutorSweepContext:
@@ -18,8 +24,9 @@ class LiveExecutorSweepContext:
 
     live_app_version: str
     live_executor_ids: frozenset[str]
+    suppress_pending_stale_app_version: bool
     suppress_pending_dead_executor: bool
-    resolver_unavailable: bool
+    identity_unavailable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,38 +49,52 @@ class LiveDbosIdentity:
     def resolve_for_sweep(self) -> LiveExecutorSweepContext:
         live_app_version = DBOS.application_version
         local_executor_id = DBOS.executor_id
-        if self.resolve_executor_ids is None:
-            return LiveExecutorSweepContext(
-                live_app_version=live_app_version,
-                live_executor_ids=self.executor_ids | {local_executor_id},
-                suppress_pending_dead_executor=False,
-                resolver_unavailable=False,
-            )
-        try:
-            resolved = frozenset(self.resolve_executor_ids())
-        except Exception as error:  # noqa: BLE001 -- resolver must not fail sweep
+        suppress_pending_stale_app_version = False
+        suppress_pending_dead_executor = False
+
+        if live_app_version == "":
+            suppress_pending_stale_app_version = True
             logger.warning(
-                "executor resolver failed during sweep",
-                exc_info=error,
+                "sweep application version unavailable; "
+                "suppressing pending stale_app_version projection"
             )
-            return LiveExecutorSweepContext(
-                live_app_version=live_app_version,
-                live_executor_ids=self.executor_ids | {local_executor_id},
-                suppress_pending_dead_executor=True,
-                resolver_unavailable=True,
+
+        if self.resolve_executor_ids is None:
+            live_executor_ids = self.executor_ids | {local_executor_id}
+        else:
+            try:
+                resolved = frozenset(self.resolve_executor_ids())
+            except Exception as error:  # noqa: BLE001 -- resolver must not fail sweep
+                logger.warning(
+                    "executor resolver failed during sweep",
+                    exc_info=error,
+                )
+                suppress_pending_dead_executor = True
+                live_executor_ids = self.executor_ids | {local_executor_id}
+            else:
+                if not resolved:
+                    suppress_pending_dead_executor = True
+                    live_executor_ids = self.executor_ids | {local_executor_id}
+                else:
+                    live_executor_ids = (
+                        resolved | self.executor_ids | {local_executor_id}
+                    )
+
+        if _local_executor_sentinel_only(live_executor_ids):
+            suppress_pending_dead_executor = True
+            logger.warning(
+                "sweep executor identity is only the local sentinel; "
+                "suppressing pending dead_executor projection"
             )
-        if not resolved:
-            return LiveExecutorSweepContext(
-                live_app_version=live_app_version,
-                live_executor_ids=self.executor_ids | {local_executor_id},
-                suppress_pending_dead_executor=True,
-                resolver_unavailable=True,
-            )
+
+        identity_unavailable = (
+            suppress_pending_stale_app_version
+            or suppress_pending_dead_executor
+        )
         return LiveExecutorSweepContext(
             live_app_version=live_app_version,
-            live_executor_ids=resolved
-            | self.executor_ids
-            | {local_executor_id},
-            suppress_pending_dead_executor=False,
-            resolver_unavailable=False,
+            live_executor_ids=live_executor_ids,
+            suppress_pending_stale_app_version=suppress_pending_stale_app_version,
+            suppress_pending_dead_executor=suppress_pending_dead_executor,
+            identity_unavailable=identity_unavailable,
         )

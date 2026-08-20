@@ -691,7 +691,9 @@ def test_sweep_projects_pending_with_dead_executor(
 
     summary = sweep_abandoned_stages(
         pg_engine,
-        live_identity=default_live_dbos_identity(),
+        live_identity=LiveDbosIdentity(
+            executor_ids=frozenset({"reconciler-local"}),
+        ),
         client=_as_dbos_client(
             _StatusClient(
                 (
@@ -782,6 +784,78 @@ def test_sweep_skips_pending_owned_by_local_executor_without_static_entry(
     assert summary.projected_count == 0
 
 
+def test_sweep_suppresses_stale_app_version_when_live_version_empty(
+    pg_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_live_dbos_identity(monkeypatch, app_version="", executor_id="local")
+    _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-empty-version",
+        campaign_key="campaign-empty-version",
+        run_key="run-empty-version",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=LiveDbosIdentity(
+            executor_ids=frozenset({"reconciler-local"}),
+        ),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version="computed-hash",
+                        executor_id="reconciler-local",
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 0
+    assert summary.identity_unavailable is True
+
+
+def test_sweep_suppresses_dead_executor_for_local_sentinel_only(
+    pg_engine: Engine,
+) -> None:
+    _migrate(pg_engine)
+    registry, workflow_id = _admit_one_for_sweep(
+        pg_engine,
+        pipeline_key="sweep-local-sentinel",
+        campaign_key="campaign-local-sentinel",
+        run_key="run-local-sentinel",
+    )
+    del registry
+
+    summary = sweep_abandoned_stages(
+        pg_engine,
+        live_identity=default_live_dbos_identity(),
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "PENDING",
+                        app_version="test",
+                        executor_id="other-executor",
+                    ),
+                )
+            )
+        ),
+        clock=_utc_now,
+    )
+
+    assert summary.projected_count == 0
+    assert summary.identity_unavailable is True
+
+
 def test_sweep_resolver_includes_peer_executor_ids(pg_engine: Engine) -> None:
     _migrate(pg_engine)
     registry, workflow_id = _admit_one_for_sweep(
@@ -850,7 +924,7 @@ def test_sweep_suppresses_dead_executor_when_resolver_raises_squeue_case(
     )
 
     assert summary.projected_count == 0
-    assert summary.executor_resolver_unavailable is True
+    assert summary.identity_unavailable is True
     with pg_engine.connect() as connection:
         state = connection.execute(
             select(schema.stage_executions.c.state)
@@ -892,7 +966,7 @@ def test_sweep_suppresses_dead_executor_when_resolver_returns_empty(
     )
 
     assert summary.projected_count == 0
-    assert summary.executor_resolver_unavailable is True
+    assert summary.identity_unavailable is True
     with pg_engine.connect() as connection:
         state = connection.execute(
             select(schema.stage_executions.c.state)
@@ -934,7 +1008,7 @@ def test_sweep_still_projects_stale_app_version_when_resolver_unavailable(
     )
 
     assert summary.projected_count == 1
-    assert summary.executor_resolver_unavailable is True
+    assert summary.identity_unavailable is True
     assert summary.projections[0].state == StageExecutionState.FAILED
 
 

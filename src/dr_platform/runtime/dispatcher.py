@@ -222,6 +222,12 @@ def _validate_live_dbos_identity(
             "live_dbos_identity must supply executor_ids or "
             "resolve_executor_ids when sweep is enabled"
         )
+    if DBOS.executor_id == "local":
+        logger.warning(
+            "sweep is enabled with default local executor id; "
+            "dead_executor detection requires distinct per-process "
+            "executor ids"
+        )
 
 
 def _validate_dispatcher_settings(  # noqa: PLR0913 -- explicit dispatcher settings
@@ -416,13 +422,13 @@ def register_scheduled_dispatcher(  # noqa: PLR0913
                 logger.info(
                     "abandoned-stage sweep inspected=%s projected=%s; "
                     "run-completion sweep inspected=%s projected=%s; "
-                    "executor_resolver_unavailable=%s",
+                    "identity_unavailable=%s",
                     stage_summary.inspected_count,
                     stage_summary.projected_count,
                     completion_summary.inspected_count,
                     completion_summary.projected_count,
-                    stage_summary.executor_resolver_unavailable
-                    or completion_summary.executor_resolver_unavailable,
+                    stage_summary.identity_unavailable
+                    or completion_summary.identity_unavailable,
                 )
 
             sweep_workflow = cast("ScheduledWorkflow", sweep)

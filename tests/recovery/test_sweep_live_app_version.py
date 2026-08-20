@@ -2,15 +2,20 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from dbos import DBOS, Queue
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, select, text
 
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.admission.runner import run_admission_pass
 from dr_platform.execution.handoff import wrap_pipeline_workflows
 from dr_platform.pipeline.registry import PipelineRegistry
-from dr_platform.recovery.sweep import sweep_abandoned_stages
+from dr_platform.recovery.live_identity import LiveDbosIdentity
+from dr_platform.recovery.sweep import (
+    DbosWorkflowStatus,
+    sweep_abandoned_stages,
+)
 from dr_platform.runtime.dbos import (
     PlatformDbosConfig,
     initialize_dbos_runtime,
@@ -18,10 +23,8 @@ from dr_platform.runtime.dbos import (
 from dr_platform.runtime.dispatcher import register_scheduled_dispatcher
 from dr_platform.submission.stream import WorkInput
 from tests.conftest import (
-    _as_dbos_client,
     _migrate,
-    _RecordingClient,
-    default_live_dbos_identity,
+    set_live_dbos_identity,
 )
 from tests.execution.test_handoff import (
     _configure_controls,
@@ -34,6 +37,7 @@ from tests.execution.test_handoff import (
 def test_sweep_does_not_stale_project_default_path_pending_after_launch(
     clean_pg: str,
     pg_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     suffix = uuid4().hex[:10]
     _migrate(pg_engine)
@@ -67,39 +71,107 @@ def test_sweep_does_not_stale_project_default_path_pending_after_launch(
     )
     initialize_dbos_runtime(config, app_name=f"drp-sweep-live-{suffix}")
     registration = register_scheduled_dispatcher(
-        live_dbos_identity=default_live_dbos_identity(),
+        live_dbos_identity=LiveDbosIdentity(
+            executor_ids=frozenset({"reconciler-local"}),
+        ),
         config=config,
         engine=pg_engine,
         registry=registry,
     )
     client = registration.client
+    schema = LedgerSchema()
     try:
         DBOS.launch()
-        DBOS.set_latest_application_version(DBOS.application_version)
-        admission_client = _RecordingClient()
+        live_app_version = DBOS.application_version
+        assert live_app_version
+        DBOS.set_latest_application_version(live_app_version)
         assert (
             run_admission_pass(
                 pg_engine,
-                client=_as_dbos_client(admission_client),
+                client=client,
                 registry=registry,
                 clock=_utc_now,
             ).admitted_total
             == 1
         )
-        assert DBOS.application_version
+        with pg_engine.connect() as connection:
+            workflow_id = connection.execute(
+                select(schema.stage_attempts.c.workflow_id)
+            ).scalar_one()
+            row = connection.execute(
+                text(
+                    """
+                    SELECT status, application_version, executor_id
+                    FROM dbos.workflow_status
+                    WHERE workflow_uuid = :workflow_id
+                    """
+                ),
+                {"workflow_id": workflow_id},
+            ).one()
+        assert row.status in {
+            DbosWorkflowStatus.PENDING.value,
+            DbosWorkflowStatus.ENQUEUED.value,
+        }
+        # Versionless enqueue leaves application_version unset until a worker
+        # dequeues; stamp identity to exercise the post-launch stale trap.
+        assert row.application_version is None
+        with pg_engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    UPDATE dbos.workflow_status
+                    SET application_version = :application_version,
+                        executor_id = :executor_id,
+                        status = :status
+                    WHERE workflow_uuid = :workflow_id
+                    """
+                ),
+                {
+                    "application_version": live_app_version,
+                    "executor_id": "reconciler-local",
+                    "status": DbosWorkflowStatus.PENDING.value,
+                    "workflow_id": workflow_id,
+                },
+            )
+        statuses = client.list_workflows(
+            workflow_ids=[workflow_id],
+            load_input=False,
+            load_output=False,
+        )
+        assert len(statuses) == 1
+        status = statuses[0]
+        assert status.status == DbosWorkflowStatus.PENDING.value
+        assert status.app_version == live_app_version
+        assert status.executor_id == "reconciler-local"
 
         summary = sweep_abandoned_stages(
             pg_engine,
             client=client,
-            live_identity=default_live_dbos_identity(),
+            live_identity=LiveDbosIdentity(
+                executor_ids=frozenset({"reconciler-local"}),
+            ),
             clock=_utc_now,
         )
+        assert summary.projected_count == 0
+        assert summary.identity_unavailable is False
+
+        set_live_dbos_identity(
+            monkeypatch, app_version="", executor_id="local"
+        )
+        summary_after_empty_version = sweep_abandoned_stages(
+            pg_engine,
+            client=client,
+            live_identity=LiveDbosIdentity(
+                executor_ids=frozenset({"reconciler-local"}),
+            ),
+            clock=_utc_now,
+        )
+        assert summary_after_empty_version.projected_count == 0
+        assert summary_after_empty_version.identity_unavailable is True
     finally:
         registration.close()
         DBOS.destroy(destroy_registry=True)
 
-    assert summary.projected_count == 0
-    schema = LedgerSchema()
     with pg_engine.connect() as connection:
         state = connection.execute(
             select(schema.stage_executions.c.state)

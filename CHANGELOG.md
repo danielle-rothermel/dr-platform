@@ -20,11 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sweep reads `DBOS.application_version` and unions `DBOS.executor_id` into
   live executor ids once per pass instead of requiring registration-time
   `LiveDbosIdentity.app_version`.
+- `SweepSummary.identity_unavailable` replaces
+  `executor_resolver_unavailable` and covers unavailable application version
+  or executor identity axes.
 
 ### Fixed
 
 - Default-path sweep no longer projects every healthy pending attempt as
   `stale_app_version` when dispatcher registration precedes `DBOS.launch()`.
+- Sweep suppresses dependent pending abandonment projection when identity
+  evidence is absent instead of inferring terminal failure from empty values
+  or the default `"local"` executor sentinel.
 
 ### Removed
 

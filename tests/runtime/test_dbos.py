@@ -399,6 +399,23 @@ def test_build_dbos_config_passes_identity_fields_when_set() -> None:
     assert built["executor_id"] == "worker-17"
 
 
+def test_platform_dbos_config_rejects_empty_identity_fields() -> None:
+    with pytest.raises(ValueError, match="identity fields must be non-empty"):
+        dbos_config.PlatformDbosConfig(
+            database_url="postgresql://app-user@db.example/platform",
+            system_database_url="postgresql://app-user@db.example/platform",
+            max_recovery_attempts=1,
+            application_version="",
+        )
+    with pytest.raises(ValueError, match="identity fields must be non-empty"):
+        dbos_config.PlatformDbosConfig(
+            database_url="postgresql://app-user@db.example/platform",
+            system_database_url="postgresql://app-user@db.example/platform",
+            max_recovery_attempts=1,
+            executor_id="",
+        )
+
+
 def test_resolve_database_url_leaves_non_postgresql_urls_unchanged() -> None:
     assert (
         dbos_config.resolve_database_url("sqlite:///tmp.db")

@@ -86,6 +86,13 @@ class PlatformDbosConfig(BaseModel):
         validate_positive_integer(value, label="max recovery attempts")
         return value
 
+    @field_validator("application_version", "executor_id")
+    @classmethod
+    def _non_empty_identity_fields(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("identity fields must be non-empty when set")
+        return value
+
     @model_validator(mode="after")
     def validate_database_colocation(self) -> Self:
         validate_database_colocation(
