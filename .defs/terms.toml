@@ -323,6 +323,16 @@ is_a = ["work"]
 part_of = ["campaign"]
 
 [[terms]]
+name = "deferral episode"
+definition = """
+One bounded episode on a work item between a deferring step at origin index \
+O and a barrier fan-in at F: eval-row stages at O+1 .. F-1. Join bodies must \
+scope predecessor reads to one episode; unfiltered reads merge earlier \
+episodes silently."""
+exported_symbols = ["list_episode_predecessor_outputs"]
+part_of = ["work item"]
+
+[[terms]]
 name = "stage execution"
 definition = """
 One logical execution of one pipeline stage for one work item across one or \

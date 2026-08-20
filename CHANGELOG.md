@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## 0.2.5 - 2026-08-20
+
+### Added
+
+- `list_episode_predecessor_outputs` for episode-scoped predecessor reads at
+  barrier fan-in stages; delegates to filtered `list_predecessor_stage_outputs`.
+- Deferral episode term in platform vocabulary.
+
 ## 0.2.4 - 2026-08-19
 
 ### Added

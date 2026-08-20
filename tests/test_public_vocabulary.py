@@ -121,6 +121,9 @@ _ROOT_BINDINGS = {
     "list_predecessor_stage_outputs": (
         inspection_work_items.list_predecessor_stage_outputs
     ),
+    "list_episode_predecessor_outputs": (
+        inspection_work_items.list_episode_predecessor_outputs
+    ),
     "list_stage_executions": inspection_work_items.list_stage_executions,
     "list_run_members": run_members.list_run_members,
     "list_runs": campaigns.list_runs,
