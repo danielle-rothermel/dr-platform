@@ -725,16 +725,27 @@ PostgreSQL and a database name ending in `_test`.
 | `validate_deferral_fanout` | Pure emission-time deferral topology check |
 | `admission_payload_for_stage` | Assemble the admission runner payload row |
 
-Episode seed fixtures use a deterministic reference scheme (indices appear in
-every string):
+Join-stage logic is testable with `Engine` + `AdmissionPayload` via these
+helpers — no `initialize_dbos_runtime` or other DBOS bootstrap is required.
+See [`tests/testing/test_join_body_recipe.py`](tests/testing/test_join_body_recipe.py)
+for the seed → payload → synchronous join callable → `StageCompletion` recipe.
 
-- optim step at index `O`: `optim:in:{O}` / `optim:out:{O}`
-- eval row at index `i`: `row:in:{i}` / `row:out:{i}`
+Episode seed fixtures use a deterministic reference scheme:
+
+- optim step at index `O`: `optim:in:{O}` / `optim:out:{O}` (stage index)
+- eval row at index `i`: `row:in:{i}` / `row:out:{i}` (stage index)
 - fan-in for episode ordinal `n` (1-based): `fanin:in:{n}` / `fanin:out:{n}`
+  (episode ordinal, not stage index — e.g. `fanin:in:2` at stage index `7`)
 
 `seed_deferral_episode` uses `n = 1`. `seed_double_deferral_episode` uses
 `n = 1` then `n = 2` for the second fan-in. Consumer tests such as
 `tests/testing/test_join_body_recipe.py` assert these literals directly.
+
+Episode seeders ship with default `campaign_key`, `work_key`, and `run_key`
+strings (`campaign-deferral-episode`, etc.). These are single-use convenience
+defaults — override them when sharing a test database across cases or seeding
+multiple independent episodes or runs in one database to avoid identity
+collisions.
 
 Per-stage-boundary latency is approximately the admission schedule interval
 plus the queue poll interval configured on each application-owned DBOS

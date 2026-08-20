@@ -36,9 +36,7 @@ from dr_platform._core.identities import (
 )
 from dr_platform._core.ledger.attempts import (
     StageAttemptRecord,
-    append_stage_attempt,
-    get_stage_attempt,
-    mark_stage_attempt_admitted,
+    prepare_stage_attempt_for_admission,
 )
 from dr_platform._core.ledger.executions import transition_stage_execution
 from dr_platform._core.ledger.schema import LedgerSchema
@@ -615,32 +613,9 @@ def _attempt_for_admission(
     admitted_at: datetime,
     schema: LedgerSchema,
 ) -> StageAttemptRecord:
-    executions = schema.stage_executions
-    current_attempt = connection.execute(
-        select(executions.c.current_attempt).where(
-            executions.c.stage_execution_id == stage_execution_id
-        )
-    ).scalar_one()
-    if current_attempt:
-        prepared = get_stage_attempt(
-            connection,
-            stage_execution_id=stage_execution_id,
-            attempt_number=current_attempt,
-            schema=schema,
-        )
-        assert prepared is not None
-        if prepared.admitted_at is None and prepared.terminal_at is None:
-            return mark_stage_attempt_admitted(
-                connection,
-                stage_execution_id=stage_execution_id,
-                attempt_number=current_attempt,
-                admitted_at=admitted_at,
-                schema=schema,
-            )
-    return append_stage_attempt(
+    return prepare_stage_attempt_for_admission(
         connection,
         stage_execution_id=stage_execution_id,
-        created_at=admitted_at,
         admitted_at=admitted_at,
         schema=schema,
     )

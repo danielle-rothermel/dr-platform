@@ -165,7 +165,7 @@ def test_seed_work_item_writes_run_membership(pg_engine: Engine) -> None:
     assert members[0].work_key.value == "work-run-membership"
 
 
-def test_succeed_stage_reseed_records_terminal_on_appended_attempt(
+def test_succeed_stage_reuses_prepared_attempt(
     pg_engine: Engine,
 ) -> None:
     schema = _migrate(pg_engine)
@@ -205,9 +205,8 @@ def test_succeed_stage_reseed_records_terminal_on_appended_attempt(
     summary = get_work_item_stages(
         work_item_id, engine=pg_engine, schema=schema
     )
-    assert len(summary[0].attempts) == 2
-    assert summary[0].attempts[0].terminal_at is None
-    assert summary[0].attempts[1].terminal_at == FIXTURE_TIMESTAMP
+    assert len(summary[0].attempts) == 1
+    assert summary[0].attempts[0].terminal_at == FIXTURE_TIMESTAMP
 
 
 def test_succeed_stage_records_terminal_attempt(

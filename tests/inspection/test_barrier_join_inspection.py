@@ -376,6 +376,7 @@ def test_resolve_barrier_join_cluster_rejects_equal_stage_keys(
             optim_step_stage_key=StageKey("eval_row"),
             eval_row_stage_key=StageKey("eval_row"),
             engine=pg_engine,
+            schema=schema,
         )
 
 
@@ -397,6 +398,7 @@ def _seed_same_key_fan_out_episode(
         stage_index=0,
         input_reference="split:in",
         output_reference="split:out",
+        schema=schema,
     )
     succeed_stage(
         connection,
@@ -405,6 +407,7 @@ def _seed_same_key_fan_out_episode(
         stage_index=1,
         input_reference="row:1",
         output_reference="row:out:1",
+        schema=schema,
     )
     succeed_stage(
         connection,
@@ -413,6 +416,7 @@ def _seed_same_key_fan_out_episode(
         stage_index=2,
         input_reference="row:2",
         output_reference="row:out:2",
+        schema=schema,
     )
     succeed_stage(
         connection,
@@ -422,6 +426,7 @@ def _seed_same_key_fan_out_episode(
         input_reference="join:in",
         output_reference="join:out",
         barrier=True,
+        schema=schema,
     )
     return work_item_id
 
@@ -440,6 +445,7 @@ def test_resolve_barrier_join_cluster_rejects_same_key_fan_out_topology(
             optim_step_stage_key=StageKey("branch"),
             eval_row_stage_key=StageKey("branch"),
             engine=pg_engine,
+            schema=schema,
         )
 
 
@@ -459,6 +465,7 @@ def test_resolve_barrier_join_cluster_returns_episode(
         optim_step_stage_key=StageKey("optim_step"),
         eval_row_stage_key=StageKey("eval_row"),
         engine=pg_engine,
+        schema=schema,
     )
 
     assert cluster.optim_step.stage_index == o2
@@ -487,6 +494,7 @@ def test_resolve_barrier_join_cluster_rejects_missing_optim_step(
             input_reference="fanin:in",
             barrier=True,
             created_at=FIXTURE_TIMESTAMP,
+            schema=schema,
         )
 
     with pytest.raises(LookupError, match="no deferring optim step"):
@@ -496,6 +504,7 @@ def test_resolve_barrier_join_cluster_rejects_missing_optim_step(
             optim_step_stage_key=StageKey("optim_step"),
             eval_row_stage_key=StageKey("eval_row"),
             engine=pg_engine,
+            schema=schema,
         )
 
 
@@ -518,6 +527,7 @@ def test_resolve_barrier_join_cluster_rejects_non_barrier_fanin(
             stage_index=0,
             input_reference="optim:in",
             output_reference="optim:out",
+            schema=schema,
         )
         succeed_stage(
             connection,
@@ -527,6 +537,7 @@ def test_resolve_barrier_join_cluster_rejects_non_barrier_fanin(
             input_reference="fanin:in",
             output_reference="fanin:out",
             barrier=False,
+            schema=schema,
         )
 
     with pytest.raises(ValueError, match="not a barrier join stage"):
@@ -536,6 +547,7 @@ def test_resolve_barrier_join_cluster_rejects_non_barrier_fanin(
             optim_step_stage_key=StageKey("optim_step"),
             eval_row_stage_key=StageKey("eval_row"),
             engine=pg_engine,
+            schema=schema,
         )
 
 
@@ -558,6 +570,7 @@ def test_resolve_barrier_join_cluster_rejects_gap_in_interval(
             stage_index=0,
             input_reference="optim:in",
             output_reference="optim:out",
+            schema=schema,
         )
         succeed_stage(
             connection,
@@ -566,6 +579,7 @@ def test_resolve_barrier_join_cluster_rejects_gap_in_interval(
             stage_index=1,
             input_reference="row:in:1",
             output_reference="row:out:1",
+            schema=schema,
         )
         succeed_stage(
             connection,
@@ -575,6 +589,7 @@ def test_resolve_barrier_join_cluster_rejects_gap_in_interval(
             input_reference="fanin:in",
             output_reference="fanin:out",
             barrier=True,
+            schema=schema,
         )
 
     with pytest.raises(ValueError, match="contiguous deferral interval"):
@@ -584,4 +599,5 @@ def test_resolve_barrier_join_cluster_rejects_gap_in_interval(
             optim_step_stage_key=StageKey("optim_step"),
             eval_row_stage_key=StageKey("eval_row"),
             engine=pg_engine,
+            schema=schema,
         )

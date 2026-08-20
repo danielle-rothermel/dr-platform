@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from dr_platform._core.ledger.attempts import (
-    append_stage_attempt,
+    prepare_stage_attempt_for_admission,
     record_stage_attempt_terminal,
 )
 from dr_platform._core.ledger.executions import (
@@ -79,7 +79,7 @@ def succeed_stage(  # noqa: PLR0913 -- explicit ledger seed facts
     barrier: bool = False,
     schema: LedgerSchema | None = None,
 ) -> None:
-    """Insert one stage execution and drive it to ``SUCCEEDED``."""
+    """Insert or reuse one stage execution and drive it to ``SUCCEEDED``."""
     selected_schema = schema or LedgerSchema()
     execution = insert_stage_execution(
         connection,
@@ -91,10 +91,9 @@ def succeed_stage(  # noqa: PLR0913 -- explicit ledger seed facts
         created_at=FIXTURE_TIMESTAMP,
         schema=selected_schema,
     )
-    attempt = append_stage_attempt(
+    attempt = prepare_stage_attempt_for_admission(
         connection,
         stage_execution_id=execution.stage_execution_id,
-        created_at=FIXTURE_TIMESTAMP,
         admitted_at=FIXTURE_TIMESTAMP,
         schema=selected_schema,
     )
@@ -139,7 +138,11 @@ def seed_deferral_fanout(  # noqa: PLR0913 -- explicit fan-out seed facts
     run_key: str = "run-deferral-fanout",
     schema: LedgerSchema | None = None,
 ) -> tuple[int, int, int]:
-    """Seed one origin stage plus deferral fan-out successors."""
+    """Seed one origin stage plus caller-validated deferral fan-out successors.
+
+    Does not validate topology; callers must run ``validate_deferral_fanout``
+    first.
+    """
     selected_schema = schema or LedgerSchema()
     work_item_id = seed_work_item(
         connection,
@@ -190,7 +193,12 @@ def seed_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
     run_key: str = "run-deferral-episode",
     schema: LedgerSchema | None = None,
 ) -> tuple[int, int, int]:
-    """Seed one succeeded deferral episode; return ids and indices."""
+    """Seed one succeeded deferral episode; return ids and indices.
+
+    Reference scheme: optim/row strings embed stage index; fan-in strings
+    embed episode ordinal (``fanin:in:1`` for the first episode).
+    Override default campaign/work/run keys when sharing a test database.
+    """
     if row_count < 1:
         raise ValueError("row_count must be at least 1")
     work_item_id = seed_work_item(
@@ -245,7 +253,12 @@ def seed_double_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
     run_key: str = "run-double-deferral",
     schema: LedgerSchema | None = None,
 ) -> tuple[int, int, int, int, int]:
-    """Seed two back-to-back episodes on one work item."""
+    """Seed two back-to-back episodes on one work item.
+
+    Reference scheme: optim/row strings embed stage index; fan-in strings
+    embed episode ordinal (``fanin:in:1`` then ``fanin:in:2``).
+    Override default campaign/work/run keys when sharing a test database.
+    """
     work_item_id = seed_work_item(
         connection,
         campaign_key=campaign_key,
