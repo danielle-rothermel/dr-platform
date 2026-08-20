@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- `dr_platform.testing.seed_work_item` now inserts the matching
+  `run_memberships` row so seeded work items are visible to run-scoped readers.
+
 ## 0.2.5 - 2026-08-20
 
 ### Added

@@ -7,6 +7,7 @@ from dr_platform._core.identities import StageKey
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.inspection.barrier_join import resolve_barrier_join_cluster
+from dr_platform.inspection.run_members import list_run_members
 from dr_platform.inspection.work_items import get_work_item_stages
 from dr_platform.runtime.database.migrate import upgrade_platform_schema
 from dr_platform.testing import (
@@ -134,6 +135,29 @@ def test_succeed_stage_persists_succeeded_row_with_barrier_flag(
     assert row["state"] == StageExecutionState.SUCCEEDED.value
     assert row["output_reference"] == "extra:out"
     assert row["barrier"] is True
+
+
+def test_seed_work_item_writes_run_membership(pg_engine: Engine) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        work_item_id = seed_work_item(
+            connection,
+            campaign_key="campaign-run-membership",
+            work_key="work-run-membership",
+            run_key="run-run-membership",
+            schema=schema,
+        )
+
+    members = list_run_members(
+        "run-run-membership",
+        engine=pg_engine,
+        schema=schema,
+        limit=10,
+    )
+    assert len(members) == 1
+    assert members[0].work_item_id == work_item_id
+    assert members[0].member_ordinal == 0
+    assert members[0].work_key.value == "work-run-membership"
 
 
 def test_succeed_stage_records_terminal_attempt(

@@ -45,7 +45,7 @@ def seed_work_item(  # noqa: PLR0913 -- explicit seed facts
             created_at=FIXTURE_TIMESTAMP,
         )
     )
-    return connection.execute(
+    work_item_id = connection.execute(
         selected_schema.work_items.insert()
         .values(
             campaign_key=campaign_key,
@@ -57,6 +57,14 @@ def seed_work_item(  # noqa: PLR0913 -- explicit seed facts
         )
         .returning(selected_schema.work_items.c.work_item_id)
     ).scalar_one()
+    connection.execute(
+        selected_schema.run_memberships.insert().values(
+            run_key=run_key,
+            member_ordinal=0,
+            work_item_id=work_item_id,
+        )
+    )
+    return work_item_id
 
 
 def succeed_stage(  # noqa: PLR0913 -- explicit ledger seed facts
