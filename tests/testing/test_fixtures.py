@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import Engine, select
 
 from dr_platform._core.identities import StageKey
@@ -32,6 +33,17 @@ def test_seed_deferral_episode_indices_match_topology(
     assert optim_index == 0
     assert fanin_index == 3
     assert work_item_id > 0
+
+
+def test_seed_deferral_episode_rejects_nonpositive_row_count(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with (
+        pg_engine.begin() as connection,
+        pytest.raises(ValueError, match="row_count must be at least 1"),
+    ):
+        seed_deferral_episode(connection, row_count=0, schema=schema)
 
 
 def test_seed_double_deferral_episode_returns_all_indices(

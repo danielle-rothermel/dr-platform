@@ -130,6 +130,8 @@ def seed_deferral_episode(  # noqa: PLR0913 -- explicit episode topology
     schema: LedgerSchema | None = None,
 ) -> tuple[int, int, int]:
     """Seed one succeeded deferral episode; return ids and indices."""
+    if row_count < 1:
+        raise ValueError("row_count must be at least 1")
     work_item_id = seed_work_item(
         connection,
         campaign_key=campaign_key,
