@@ -37,7 +37,7 @@ from tests.execution.test_handoff import (
 )
 
 
-def test_sweep_does_not_stale_project_default_path_pending_after_launch(  # noqa: PLR0915
+def test_sweep_does_not_stale_project_default_path_pending_after_launch(
     clean_pg: str,
     pg_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
@@ -73,19 +73,17 @@ def test_sweep_does_not_stale_project_default_path_pending_after_launch(  # noqa
         max_recovery_attempts=1,
     )
     initialize_dbos_runtime(config, app_name=f"drp-sweep-live-{suffix}")
+    live_identity = LiveDbosIdentity(
+        executor_ids=frozenset({"reconciler-local"}),
+    )
     registration = register_scheduled_dispatcher(
-        live_dbos_identity=LiveDbosIdentity(
-            executor_ids=frozenset({"reconciler-local"}),
-        ),
+        live_dbos_identity=live_identity,
         config=config,
         engine=pg_engine,
         registry=registry,
     )
     client = registration.client
     schema = LedgerSchema()
-    live_identity = LiveDbosIdentity(
-        executor_ids=frozenset({"reconciler-local"}),
-    )
     try:
         DBOS.launch()
         live_app_version = DBOS.application_version
@@ -114,20 +112,16 @@ def test_sweep_does_not_stale_project_default_path_pending_after_launch(  # noqa
                 ),
                 {"workflow_id": workflow_id},
             ).one()
-        assert row.status in {
-            DbosWorkflowStatus.PENDING.value,
-            DbosWorkflowStatus.ENQUEUED.value,
-        }
+        assert row.status == DbosWorkflowStatus.ENQUEUED.value
         assert row.application_version is None
 
-        if row.status == DbosWorkflowStatus.ENQUEUED.value:
-            enqueued_summary = sweep_abandoned_stages(
-                pg_engine,
-                client=client,
-                live_identity=live_identity,
-                clock=_utc_now,
-            )
-            assert enqueued_summary.projected_count == 0
+        enqueued_summary = sweep_abandoned_stages(
+            pg_engine,
+            client=client,
+            live_identity=live_identity,
+            clock=_utc_now,
+        )
+        assert enqueued_summary.projected_count == 0
 
         with pg_engine.begin() as connection:
             connection.execute(

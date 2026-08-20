@@ -40,6 +40,7 @@ from dr_platform.execution.handoff import (
 from dr_platform.recovery.live_identity import (
     LOCAL_EXECUTOR_SENTINEL,
     LiveDbosIdentity,
+    normalize_executor_ids,
 )
 from dr_platform.recovery.sweep import (
     DEFAULT_SWEEP_BATCH_SIZE,
@@ -216,11 +217,11 @@ def _validate_live_dbos_identity(
     if not sweep_enabled:
         return
     if (
-        not live_dbos_identity.executor_ids
-        and live_dbos_identity.resolve_executor_ids is None
+        live_dbos_identity.resolve_executor_ids is None
+        and not normalize_executor_ids(live_dbos_identity.executor_ids)
     ):
         raise ValueError(
-            "live_dbos_identity must supply executor_ids or "
+            "live_dbos_identity must supply non-blank executor_ids or "
             "resolve_executor_ids when sweep is enabled"
         )
     if DBOS.executor_id == LOCAL_EXECUTOR_SENTINEL:

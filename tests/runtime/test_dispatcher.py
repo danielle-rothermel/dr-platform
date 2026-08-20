@@ -906,10 +906,35 @@ def test_register_rejects_empty_executor_identity_when_sweep_enabled(
     registry.register(
         wrap_pipeline_workflows(_declared_pipeline(), max_recovery_attempts=1)
     )
-    with pytest.raises(ValueError, match="resolve_executor_ids"):
+    with pytest.raises(ValueError, match="non-blank executor_ids"):
         dispatcher.register_scheduled_dispatcher(
             live_dbos_identity=LiveDbosIdentity(
                 executor_ids=frozenset(),
+            ),
+            config=config,
+            engine=pg_engine,
+            registry=registry,
+        )
+
+
+def test_register_rejects_whitespace_only_executor_ids_when_sweep_enabled(
+    pg_engine: Engine,
+) -> None:
+    config = PlatformDbosConfig(
+        database_url=pg_engine.url.render_as_string(hide_password=False),
+        system_database_url=pg_engine.url.render_as_string(
+            hide_password=False
+        ),
+        max_recovery_attempts=1,
+    )
+    registry = PipelineRegistry()
+    registry.register(
+        wrap_pipeline_workflows(_declared_pipeline(), max_recovery_attempts=1)
+    )
+    with pytest.raises(ValueError, match="non-blank executor_ids"):
+        dispatcher.register_scheduled_dispatcher(
+            live_dbos_identity=LiveDbosIdentity(
+                executor_ids=frozenset({" "}),
             ),
             config=config,
             engine=pg_engine,

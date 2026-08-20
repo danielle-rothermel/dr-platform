@@ -527,6 +527,38 @@ def test_sweep_suppresses_dead_executor_for_local_sentinel_only_completion(
     assert state == RunCompletionExecutionState.ENQUEUED.value
 
 
+def test_sweep_skips_enqueued_completion_stale_backlog(
+    pg_engine: Engine,
+) -> None:
+    """ENQUEUED backlog must not identity-orphan stale-project."""
+    _migrate(pg_engine)
+    registry, workflow_id = _enqueue_completion(
+        pg_engine,
+        key="sweep-enqueued-completion-backlog",
+    )
+    del registry
+    sweep = sweep_abandoned_run_completions(
+        pg_engine,
+        client=_as_dbos_client(
+            _StatusClient(
+                (
+                    _WorkflowStatus(
+                        workflow_id,
+                        "ENQUEUED",
+                        app_version="old-version",
+                        executor_id="reconciler-local",
+                    ),
+                )
+            )
+        ),
+        live_identity=LiveDbosIdentity(
+            executor_ids=frozenset({"reconciler-local"}),
+        ),
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert sweep.projected_count == 0
+
+
 def test_sweep_skips_pending_completion_with_missing_identity_fields(
     pg_engine: Engine,
 ) -> None:
