@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `succeed_stage` records terminal state on the appended attempt number so
+  re-seeding an existing execution preserves attempt invariants.
 - `dr_platform.testing.seed_work_item` now inserts the matching
   `run_memberships` row so seeded work items are visible to run-scoped readers.
 - `test_migrated_engine_disposes_on_exit` now asserts `Engine.dispose` on

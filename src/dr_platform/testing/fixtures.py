@@ -91,7 +91,7 @@ def succeed_stage(  # noqa: PLR0913 -- explicit ledger seed facts
         created_at=FIXTURE_TIMESTAMP,
         schema=selected_schema,
     )
-    append_stage_attempt(
+    attempt = append_stage_attempt(
         connection,
         stage_execution_id=execution.stage_execution_id,
         created_at=FIXTURE_TIMESTAMP,
@@ -116,7 +116,7 @@ def succeed_stage(  # noqa: PLR0913 -- explicit ledger seed facts
     record_stage_attempt_terminal(
         connection,
         stage_execution_id=execution.stage_execution_id,
-        attempt_number=1,
+        attempt_number=attempt.attempt_number,
         terminal_at=FIXTURE_TIMESTAMP,
         terminal_summary=build_terminal_outcome_summary(
             outcome=StageExecutionState.SUCCEEDED.value,

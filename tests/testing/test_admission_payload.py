@@ -87,5 +87,6 @@ def test_admission_payload_for_stage_uses_stage_input_reference(
         pg_engine,
         work_item_id=work_item_id,
         stage_index=0,
+        schema=schema,
     )
     assert payload.input_reference == "stage-input"

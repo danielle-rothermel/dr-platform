@@ -14,7 +14,12 @@ def validate_deferral_fanout(  # noqa: PLR0912 -- explicit shape checks
     eval_row_stage_key: StageKey | str,
     fanin_stage_key: StageKey | str,
 ) -> None:
-    """Raise ``ValueError`` unless successors form one deferral fan-out."""
+    """Raise ``ValueError`` unless successors form one deferral fan-out.
+
+    Non-empty ``input_reference`` values are enforced by ``StageSuccessor``
+    construction; this validator checks topology, keys, barrier placement, and
+    index contiguity only.
+    """
     validate_nonnegative_integer(
         origin_stage_index,
         label="origin stage index",

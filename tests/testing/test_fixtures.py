@@ -4,6 +4,8 @@ import pytest
 from sqlalchemy import Engine, select
 
 from dr_platform._core.identities import StageKey
+from dr_platform._core.ledger.attempts import append_stage_attempt
+from dr_platform._core.ledger.executions import insert_stage_execution
 from dr_platform._core.ledger.schema import LedgerSchema
 from dr_platform._core.ledger.states import StageExecutionState
 from dr_platform.inspection.barrier_join import resolve_barrier_join_cluster
@@ -76,6 +78,7 @@ def test_seed_deferral_episode_satisfies_cluster_resolution(
         optim_step_stage_key=StageKey("optim_step"),
         eval_row_stage_key=StageKey("eval_row"),
         engine=pg_engine,
+        schema=schema,
     )
     assert [row.stage_index for row in cluster.eval_rows] == [1, 2]
     assert cluster.fanin.barrier is True
@@ -97,6 +100,7 @@ def test_seed_double_deferral_episode_satisfies_cluster_resolution(
         optim_step_stage_key=StageKey("optim_step"),
         eval_row_stage_key=StageKey("eval_row"),
         engine=pg_engine,
+        schema=schema,
     )
     assert cluster.optim_step.stage_index == o2
     assert [row.stage_index for row in cluster.eval_rows] == [5, 6]
@@ -120,6 +124,7 @@ def test_succeed_stage_persists_succeeded_row_with_barrier_flag(
             input_reference="extra:in",
             output_reference="extra:out",
             barrier=True,
+            schema=schema,
         )
 
     with pg_engine.connect() as connection:
@@ -158,6 +163,51 @@ def test_seed_work_item_writes_run_membership(pg_engine: Engine) -> None:
     assert members[0].work_item_id == work_item_id
     assert members[0].member_ordinal == 0
     assert members[0].work_key.value == "work-run-membership"
+
+
+def test_succeed_stage_reseed_records_terminal_on_appended_attempt(
+    pg_engine: Engine,
+) -> None:
+    schema = _migrate(pg_engine)
+    with pg_engine.begin() as connection:
+        work_item_id = seed_work_item(
+            connection,
+            campaign_key="campaign-reseed-attempt",
+            work_key="work-reseed-attempt",
+            run_key="run-reseed-attempt",
+            schema=schema,
+        )
+        execution = insert_stage_execution(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=0,
+            input_reference="stage:in",
+            created_at=FIXTURE_TIMESTAMP,
+            schema=schema,
+        )
+        append_stage_attempt(
+            connection,
+            stage_execution_id=execution.stage_execution_id,
+            created_at=FIXTURE_TIMESTAMP,
+            schema=schema,
+        )
+        succeed_stage(
+            connection,
+            work_item_id=work_item_id,
+            stage_key="execute",
+            stage_index=0,
+            input_reference="stage:in",
+            output_reference="stage:out",
+            schema=schema,
+        )
+
+    summary = get_work_item_stages(
+        work_item_id, engine=pg_engine, schema=schema
+    )
+    assert len(summary[0].attempts) == 2
+    assert summary[0].attempts[0].terminal_at is None
+    assert summary[0].attempts[1].terminal_at == FIXTURE_TIMESTAMP
 
 
 def test_succeed_stage_records_terminal_attempt(

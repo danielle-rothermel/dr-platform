@@ -45,6 +45,7 @@ def test_join_body_without_dbos_bootstrap(pg_engine: Engine) -> None:
         pg_engine,
         work_item_id=work_item_id,
         stage_index=fanin_index,
+        schema=schema,
     )
 
     completion = _join_eval_fanin(

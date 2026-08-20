@@ -707,6 +707,35 @@ capacity, and the DBOS application-database pool together using
 dr-platform exposes dispatcher and runtime knobs; only the application owns
 provider, process, and queue configuration.
 
+### Consumer test library (`dr_platform.testing`)
+
+`dr_platform.testing` ships in the wheel for downstream integration tests.
+It is **not** re-exported from `dr_platform.__all__`. All helpers require
+PostgreSQL and a database name ending in `_test`.
+
+| Symbol | Role |
+| --- | --- |
+| `validate_test_database_url` | Reject unsafe test DSNs before migration |
+| `migrated_engine` | Context manager: validate DSN, migrate, dispose engine |
+| `seed_work_item` | Insert run, work item, and run membership |
+| `succeed_stage` | Insert or reuse a stage row and drive it to `SUCCEEDED` |
+| `seed_deferral_episode` | Seed one succeeded deferral episode |
+| `seed_double_deferral_episode` | Seed two back-to-back episodes on one item |
+| `seed_deferral_fanout` | Seed a validated `StageSuccessor` fan-out tuple |
+| `validate_deferral_fanout` | Pure emission-time deferral topology check |
+| `admission_payload_for_stage` | Assemble the admission runner payload row |
+
+Episode seed fixtures use a deterministic reference scheme (indices appear in
+every string):
+
+- optim step at index `O`: `optim:in:{O}` / `optim:out:{O}`
+- eval row at index `i`: `row:in:{i}` / `row:out:{i}`
+- fan-in for episode ordinal `n` (1-based): `fanin:in:{n}` / `fanin:out:{n}`
+
+`seed_deferral_episode` uses `n = 1`. `seed_double_deferral_episode` uses
+`n = 1` then `n = 2` for the second fan-in. Consumer tests such as
+`tests/testing/test_join_body_recipe.py` assert these literals directly.
+
 Per-stage-boundary latency is approximately the admission schedule interval
 plus the queue poll interval configured on each application-owned DBOS
 `Queue`. Queue poll intervals are part of whetstone's sizing table, not
