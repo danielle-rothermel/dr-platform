@@ -13,7 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `list_episode_predecessor_outputs` for episode-scoped predecessor reads at
   barrier fan-in stages; delegates to filtered `list_predecessor_stage_outputs`.
-- Deferral episode term in platform vocabulary.
+- Deferral episode and predecessor stage output terms in platform vocabulary,
+  with three deferral-episode binding contracts.
+- `dr_platform.testing` library surface: `migrated_engine`,
+  `validate_test_database_url`, ledger seed fixtures (`seed_work_item`,
+  `succeed_stage`, `seed_deferral_episode`, `seed_double_deferral_episode`),
+  `validate_deferral_fanout`, and `admission_payload_for_stage` for
+  inspection-only join-body tests without DBOS bootstrap.
 
 ## 0.2.4 - 2026-08-19
 

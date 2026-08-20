@@ -540,3 +540,44 @@ Fan-out must surface a FAILED sibling ahead of a READY join so inspection, \
 run-barrier counts, and operator tooling stay coherent."""
 date = "2026-08-18"
 check = "uv run pytest -q tests/core/test_work_item_status.py tests/completion/test_run_barrier.py::test_fan_out_failed_branch_release_counts_as_failed"
+
+[[contracts]]
+title = "Ledger owns topology and stage I/O references; applications own payload meaning in dr-store"
+statement = """
+The platform ledger validates deferral episode topology, stage indices, stage \
+keys, and opaque input and output references. Applications own payload \
+meaning and resolve references through dr-store or other storage; the platform \
+does not interpret application-owned data."""
+rationale = """
+Keeping topology validation in the ledger and payload meaning in the \
+application preserves a domain-neutral orchestration boundary and lets \
+consumers evolve storage without changing platform persistence rules."""
+date = "2026-08-20"
+check = "uv run pytest -q tests/inspection/test_barrier_join_inspection.py"
+
+[[contracts]]
+title = "Episode-scoped predecessor reads for multi-deferral work items"
+statement = """
+An unfiltered ``list_predecessor_stage_outputs`` call on a work item with more \
+than one deferral episode is not episode-safe: it merges eval rows from all \
+earlier episodes. Episode reads must pass the deferring origin as \
+``min_stage_index`` or use ``list_episode_predecessor_outputs``."""
+rationale = """
+Multi-deferral work items reuse eval stage keys at distinct indices across \
+episodes. Without an exclusive origin lower bound, join bodies silently \
+aggregate stale rows from prior episodes."""
+date = "2026-08-20"
+check = "uv run pytest -q tests/inspection/test_barrier_join_inspection.py -k 'episode or filtered_predecessors_exclude_stale or unfiltered_predecessors'"
+
+[[contracts]]
+title = "Cluster resolution requires distinct optim and eval stage keys, and contiguous branch fill in (O, F)"
+statement = """
+``resolve_barrier_join_cluster`` requires distinct ``optim_step_stage_key`` and \
+``eval_row_stage_key`` values and contiguous eval-row fill in the open interval \
+``(O, F)``. Violations raise ``ValueError``."""
+rationale = """
+Distinct keys and contiguous branch fill make episode topology auditable \
+without inferring deferring steps from same-key fan-out rows at distinct \
+indices."""
+date = "2026-08-20"
+check = "uv run pytest -q tests/inspection/test_barrier_join_inspection.py -k resolve_barrier_join_cluster"
