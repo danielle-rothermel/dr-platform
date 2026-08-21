@@ -22,8 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Bumped `dr-store` to 0.2.4; consolidated imports to canonical root exports
-  and kept the PostgreSQL enlisted evidence checkpoint path.
+- Bumped `dr-store` to 0.2.5.
 
 ### Fixed
 
