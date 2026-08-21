@@ -5,6 +5,12 @@ All notable changes to `dr-platform` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.6 - 2026-08-21
+
+### Changed
+
+- Bumped `dr-store` to 0.2.5.
+
 ## 0.2.5 - 2026-08-20
 
 ### Added
@@ -22,7 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Bumped `dr-store` to 0.2.5.
+- Bumped `dr-store` to 0.2.4; consolidated imports to canonical root exports
+  and kept the PostgreSQL enlisted evidence checkpoint path.
 
 ### Fixed
 
