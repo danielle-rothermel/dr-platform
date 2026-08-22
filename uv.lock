@@ -165,7 +165,7 @@ wheels = [
 
 [[package]]
 name = "dr-platform"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -190,7 +190,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.16.2" },
     { name = "dbos", extras = ["otel"], specifier = "==2.27.0" },
     { name = "dr-serialize", specifier = "==0.1.2" },
-    { name = "dr-store", specifier = "==0.2.5" },
+    { name = "dr-store", specifier = "==0.2.6" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
@@ -218,7 +218,7 @@ wheels = [
 
 [[package]]
 name = "dr-store"
-version = "0.2.5"
+version = "0.2.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "dr-serialize" },
@@ -226,9 +226,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/16/5b/6b8d34c4e2217d2f06981792f7ec06aa83608c606e70d9f141ca35b4192b/dr_store-0.2.5.tar.gz", hash = "sha256:2710e6af17b61d7748eff0ed8bb217e03c427ee85b00b1c1089ded817c61d4d2", size = 82810, upload-time = "2026-08-21T05:19:32.304Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/f8/590885df95d13acba79f6b36f2a1ad9bb8d4ff66e898fd76bc7c89bff4c7/dr_store-0.2.6.tar.gz", hash = "sha256:3ef0da35b3aceecf34ba35576ab47f3585ddd26bcd1b6d393434e0391cf646ba", size = 83000, upload-time = "2026-08-22T01:50:44.46Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/15/9e/83d5ddb187ccc56a30fe602ebea1ac2a37b34d2af64109b25f3927f4a76b/dr_store-0.2.5-py3-none-any.whl", hash = "sha256:b54bc03d298e57c41bd6f657de151bbde798f4921726c20ff74dfda79edaee49", size = 99079, upload-time = "2026-08-21T05:19:30.741Z" },
+    { url = "https://files.pythonhosted.org/packages/19/26/8d4b9d7ba68e57010548216285c9489544f13dd31fcb4062fd997ddd9061/dr_store-0.2.6-py3-none-any.whl", hash = "sha256:f2de4e787d197b4024a8db2b50566c6eb532bab4b3ddd8bdbb1112848da602e9", size = 99269, upload-time = "2026-08-22T01:50:43.165Z" },
 ]
 
 [[package]]
