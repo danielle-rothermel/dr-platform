@@ -10,7 +10,7 @@ permissions: {}
 
 jobs:
   validate:
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -37,8 +37,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      # The Depot host has its own PostgreSQL on localhost:5432, so connect to
-      # the service container over its bridge address, as the CI workflow does.
+      # Connect to the service container over its bridge address, as the CI
+      # workflow does.
       - name: Point tests at the postgres service container
         run: |
           postgres_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' '${{ job.services.postgres.id }}')"
