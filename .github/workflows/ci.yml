@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -31,8 +31,7 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The runner host has its own PostgreSQL answering on localhost:5432,
-      # so a host port mapping is shadowed; connect to the service
+      # The service publishes no host port mapping; connect to the service
       # container's bridge address directly.
       - name: Point tests at the postgres service container
         run: |
@@ -58,7 +57,7 @@ jobs:
   # Branch protection on main requires the exact status check context 'ci'.
   # The matrix above produces versioned contexts instead, so this aggregate
   # gate republishes a single 'ci' check that passes only when every matrix job
-  # succeeded. It runs on a cheap runner (no Depot minutes).
+  # succeeded.
   ci:
     needs: test
     if: always()
