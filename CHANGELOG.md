@@ -5,6 +5,13 @@ All notable changes to `dr-platform` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.8 - 2026-10-16
+
+### Changed
+
+- Bumped `dr-store` to 0.2.7, in lockstep with `dr-exec` 0.1.16 and
+  `whetstone-ai`.
+
 ## 0.2.7 - 2026-08-21
 
 ### Changed
